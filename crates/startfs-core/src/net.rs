@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A node's identity: the transport endpoint on the wire, and the member id
-/// the filesystem assigned at join (which tags its log entries and inodes).
+/// A node's transport endpoint on the wire. Not its member id: that is
+/// [`MemberId`](crate::members::MemberId), assigned by the filesystem at join.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]

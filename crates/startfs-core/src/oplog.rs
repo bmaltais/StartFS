@@ -2,6 +2,7 @@
 //! wire protocol peers use to exchange them.
 
 use crate::fs::Content;
+use crate::members::MemberId;
 use crate::ops::{FileKind, Ino, Nanos};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,18 +15,18 @@ use std::collections::BTreeMap;
 pub struct Hlc {
     pub wall: Nanos,
     pub counter: u32,
-    pub node: u32,
+    pub node: MemberId,
 }
 
 impl Hlc {
     pub const ZERO: Hlc = Hlc {
         wall: 0,
         counter: 0,
-        node: 0,
+        node: MemberId(0),
     };
 
     /// Stamp for a local event at physical time `now`, after `last`.
-    pub fn tick(last: Hlc, now: Nanos, node: u32) -> Hlc {
+    pub fn tick(last: Hlc, now: Nanos, node: MemberId) -> Hlc {
         if now > last.wall {
             Hlc {
                 wall: now,
@@ -103,7 +104,7 @@ pub enum Op {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
-    pub origin: u32,
+    pub origin: MemberId,
     pub seq: u64,
     pub hlc: Hlc,
     pub op: Op,
@@ -123,4 +124,4 @@ pub struct StateTransfer {
 }
 
 /// How much of each node's log a peer holds: next expected seq per origin.
-pub type Frontier = BTreeMap<u32, u64>;
+pub type Frontier = BTreeMap<MemberId, u64>;

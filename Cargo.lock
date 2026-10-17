@@ -999,6 +999,7 @@ dependencies = [
  "serde_json",
  "startfs-core",
  "tempfile",
+ "thiserror",
  "tokio",
 ]
 

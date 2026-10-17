@@ -5,6 +5,7 @@ pub mod clock;
 pub mod config;
 pub mod control;
 pub mod daemon;
+pub mod error;
 pub mod fs;
 pub mod members;
 pub mod net;
@@ -16,3 +17,5 @@ pub mod protocol;
 pub mod replication;
 pub mod scrub;
 pub mod sync;
+
+pub use error::Error;

@@ -10,7 +10,7 @@
 use crate::chunkstore::ChunkId;
 use crate::control::{FileHealth, Repair, Tier};
 use crate::fs::LocalFs;
-use crate::members::Member;
+use crate::members::{Member, MemberId};
 use crate::net::{NodeId, Transport};
 use crate::ops::Nanos;
 use crate::placement::place;
@@ -24,12 +24,12 @@ pub const RETRY: Duration = Duration::from_secs(5);
 
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
-    pub me: u32,
+    pub me: MemberId,
     /// N.
     pub copies: u32,
     pub members: &'a [Member],
     /// Members unseen past the repair grace period: never chosen to hold copies.
-    pub lost: &'a HashSet<u32>,
+    pub lost: &'a HashSet<MemberId>,
     /// Space this node offers for replicas.
     pub offer: u64,
     /// Most bytes per second sent when re-replicating chunks already held.
@@ -38,14 +38,14 @@ pub struct View<'a> {
 }
 
 impl View<'_> {
-    fn endpoint(&self, member: u32) -> Option<NodeId> {
+    fn endpoint(&self, member: MemberId) -> Option<NodeId> {
         self.members
             .iter()
             .find(|m| m.id == member)
             .map(|m| m.endpoint)
     }
 
-    fn member_at(&self, endpoint: NodeId) -> Option<u32> {
+    fn member_at(&self, endpoint: NodeId) -> Option<MemberId> {
         self.members
             .iter()
             .find(|m| m.endpoint == endpoint && m.id != self.me)
@@ -57,13 +57,13 @@ impl View<'_> {
 #[derive(Default)]
 struct Track {
     /// Other members known to hold the chunk.
-    holders: BTreeSet<u32>,
+    holders: BTreeSet<MemberId>,
     /// Members that said they lack it and would take it.
-    missing: BTreeSet<u32>,
+    missing: BTreeSet<MemberId>,
     /// When we last asked or pushed, per member.
-    sent: HashMap<u32, Nanos>,
+    sent: HashMap<MemberId, Nanos>,
     /// Members that just said they lack the chunk and have not been sent it yet.
-    answered: BTreeSet<u32>,
+    answered: BTreeSet<MemberId>,
     /// Every node placement allows holds it, yet there are fewer than N.
     settled: bool,
     /// Some peer has answered about this chunk, so the holders are known.
@@ -71,13 +71,13 @@ struct Track {
 }
 
 /// N and each member's (id, offer, revision): what placement depends on.
-type Epoch = (u32, Vec<(u32, u64, u64)>, Vec<u32>);
+type Epoch = (u32, Vec<(MemberId, u64, u64)>, Vec<MemberId>);
 
 #[derive(Default)]
 struct State {
     tracks: BTreeMap<ChunkId, Track>,
     /// Members that turned a chunk away for lack of room; placement skips them.
-    full: HashSet<u32>,
+    full: HashSet<MemberId>,
     /// The copies and membership (id, offer, revision) placement last used.
     epoch: Option<Epoch>,
     /// Bytes of re-replication allowed right now; goes negative after a send.
@@ -262,7 +262,7 @@ impl Replicator {
             st.tracks.remove(id);
             return false;
         }
-        let skip: HashSet<u32> = st.full.union(view.lost).copied().collect();
+        let skip: HashSet<MemberId> = st.full.union(view.lost).copied().collect();
         let targets = place(id, view.members, view.copies, &skip);
         if staged
             && targets.contains(&view.me)
@@ -383,7 +383,7 @@ impl Replicator {
     }
 
     /// Members known to be out of room.
-    pub fn full_members(&self) -> HashSet<u32> {
+    pub fn full_members(&self) -> HashSet<MemberId> {
         self.state.lock().unwrap().full.clone()
     }
 

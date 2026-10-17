@@ -86,7 +86,7 @@ fn an_expired_token_is_rejected_and_a_fresh_one_works() {
     c.advance(Duration::from_secs(601));
 
     let err = c.control(1).join(&old, None).unwrap_err();
-    assert!(err.contains("expired"), "{err}");
+    assert!(err.to_string().contains("expired"), "{err}");
     assert!(c.control(1).status().unwrap().filesystem.is_none());
 
     let fresh = c.control(0).new_token().unwrap();
@@ -102,7 +102,7 @@ fn a_revoked_token_is_rejected_even_before_it_expires() {
     c.control(0).revoke(&leaked).unwrap();
 
     let err = c.control(1).join(&leaked, None).unwrap_err();
-    assert!(err.contains("revoked"), "{err}");
+    assert!(err.to_string().contains("revoked"), "{err}");
     // Other tokens are unaffected.
     c.control(2).join(&other, None).unwrap();
 }
@@ -134,7 +134,7 @@ fn status_lists_every_member_with_its_address_and_offer() {
         let view: Vec<_> = s
             .members
             .iter()
-            .map(|m| (m.id, m.addr.as_str(), m.offer_bytes, m.state, m.is_self))
+            .map(|m| (m.id.0, m.addr.as_str(), m.offer_bytes, m.state, m.is_self))
             .collect();
         let up = NodeState::Online;
         assert_eq!(
@@ -498,7 +498,7 @@ fn a_token_revoked_on_any_member_is_rejected_by_all_once_synced() {
             .control(2)
             .join(&token_via(&c, &leaked, via), None)
             .unwrap_err();
-        assert!(err.contains("revoked"), "via {via}: {err}");
+        assert!(err.to_string().contains("revoked"), "via {via}: {err}");
     }
     assert!(c.control(2).status().unwrap().filesystem.is_none());
     // Other tokens are unaffected.
@@ -524,7 +524,7 @@ fn a_revocation_made_during_a_partition_holds_after_it_heals() {
     c.sync();
 
     let err = c.control(2).join(&leaked, None).unwrap_err();
-    assert!(err.contains("revoked"), "{err}");
+    assert!(err.to_string().contains("revoked"), "{err}");
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn expiry_is_enforced_the_same_by_every_member() {
             .control(2)
             .join(&token_via(&c, &token, via), None)
             .unwrap_err();
-        assert!(err.contains("expired"), "via {via}: {err}");
+        assert!(err.to_string().contains("expired"), "via {via}: {err}");
     }
 }
 
@@ -582,5 +582,5 @@ fn a_token_revoked_on_its_issuer_is_rejected_by_the_others() {
         .control(2)
         .join(&token_via(&c, &leaked, 1), None)
         .unwrap_err();
-    assert!(err.contains("revoked"), "{err}");
+    assert!(err.to_string().contains("revoked"), "{err}");
 }

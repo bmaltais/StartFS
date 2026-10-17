@@ -8,16 +8,31 @@
 //! reused.
 
 use crate::control::FilesystemInfo;
+use crate::error::Error;
 use crate::net::NodeId;
 use crate::ops::Nanos;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// A member's id, assigned at admission. It tags the member's log entries and
+/// inode numbers; on the wire and on disk it is a bare number.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct MemberId(pub u32);
+
+impl std::fmt::Display for MemberId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     /// Assigned at admission; tags the member's log entries and inode numbers.
-    pub id: u32,
+    pub id: MemberId,
     /// Where the member is reached on the transport.
     pub endpoint: NodeId,
     /// The `host:port` the member advertises.
@@ -38,8 +53,18 @@ pub struct Member {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Admission {
     pub fs: FilesystemInfo,
-    pub id: u32,
+    pub id: MemberId,
     pub members: Vec<Member>,
+}
+
+/// A new node's request to the member named in its token: admit me.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinRequest {
+    pub fs_id: String,
+    pub token_id: String,
+    /// The joiner's advertised `host:port`.
+    pub addr: String,
+    pub offer_bytes: u64,
 }
 
 /// A join token as every member knows it. `expires` never changes and `revoked`
@@ -59,8 +84,8 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn parse(text: &str) -> Result<Token, String> {
-        let bad = || "not a StartFS join token".to_string();
+    pub fn parse(text: &str) -> Result<Token, Error> {
+        let bad = || Error::BadToken;
         let rest = text.trim().strip_prefix("startfs1-").ok_or_else(bad)?;
         let (ids, addr) = rest.split_once('@').ok_or_else(bad)?;
         let (fs_id, token_id) = ids.split_once('.').ok_or_else(bad)?;
@@ -78,8 +103,8 @@ impl Token {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Membership {
     fs: Option<FilesystemInfo>,
-    me: u32,
-    members: BTreeMap<u32, Member>,
+    me: MemberId,
+    members: BTreeMap<MemberId, Member>,
     tokens: Vec<TokenRec>,
     /// Set by `join` or `config`; otherwise the config file's offer applies.
     offer: Option<u64>,
@@ -103,12 +128,12 @@ impl Membership {
         m
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&self) -> Result<(), Error> {
         let tmp = self.path.with_extension("tmp");
         let text = serde_json::to_string_pretty(self).expect("serialises");
         std::fs::write(&tmp, text)
             .and_then(|_| std::fs::rename(&tmp, &self.path))
-            .map_err(|e| format!("cannot save membership: {e}"))
+            .map_err(Error::SaveMembership)
     }
 
     /// Save where the caller cannot return an error: a failure is reported,
@@ -124,7 +149,7 @@ impl Membership {
     }
 
     /// This node's member id, once it belongs to a filesystem.
-    pub fn me(&self) -> Option<u32> {
+    pub fn me(&self) -> Option<MemberId> {
         self.fs.as_ref().map(|_| self.me)
     }
 
@@ -175,14 +200,14 @@ impl Membership {
         endpoint: NodeId,
         addr: String,
         default_offer: u64,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         self.fs = Some(fs);
-        self.me = 0;
+        self.me = MemberId(0);
         let offer_bytes = self.my_offer(default_offer);
         self.members.insert(
-            0,
+            MemberId(0),
             Member {
-                id: 0,
+                id: MemberId(0),
                 endpoint,
                 addr,
                 offer_bytes,
@@ -195,9 +220,9 @@ impl Membership {
     }
 
     /// Mint a join token valid until `expires`; returns the token text.
-    pub fn mint_token(&mut self, expires: Nanos) -> Result<String, String> {
+    pub fn mint_token(&mut self, expires: Nanos) -> Result<String, Error> {
         let (Some(fs), Some(me)) = (&self.fs, self.members.get(&self.me)) else {
-            return Err("this node does not belong to a filesystem yet".into());
+            return Err(Error::NotInFilesystem);
         };
         let id = random_hex(8);
         let text = format!("startfs1-{}.{id}@{}", fs.id, me.addr);
@@ -210,13 +235,13 @@ impl Membership {
         Ok(text)
     }
 
-    pub fn revoke_token(&mut self, text: &str) -> Result<(), String> {
+    pub fn revoke_token(&mut self, text: &str) -> Result<(), Error> {
         let token = Token::parse(text)?;
         let rec = self
             .tokens
             .iter_mut()
             .find(|t| t.id == token.token_id)
-            .ok_or("no such token")?;
+            .ok_or(Error::NoSuchToken)?;
         rec.revoked = true;
         self.save()
     }
@@ -253,27 +278,24 @@ impl Membership {
     pub fn admit(
         &mut self,
         now: Nanos,
-        fs_id: &str,
-        token_id: &str,
         endpoint: NodeId,
-        addr: String,
-        offer_bytes: u64,
-    ) -> Result<Admission, String> {
-        let fs = self.fs.clone().ok_or("this node is not in a filesystem")?;
-        let denied = || "token not recognised".to_string();
-        if fs.id != fs_id {
+        request: JoinRequest,
+    ) -> Result<Admission, Error> {
+        let fs = self.fs.clone().ok_or(Error::NotAdmitting)?;
+        let denied = || Error::TokenNotRecognised;
+        if fs.id != request.fs_id {
             return Err(denied());
         }
         let rec = self
             .tokens
             .iter()
-            .find(|t| t.id == token_id)
+            .find(|t| t.id == request.token_id)
             .ok_or_else(denied)?;
         if rec.revoked {
-            return Err("token has been revoked".into());
+            return Err(Error::TokenRevoked);
         }
         if now >= rec.expires {
-            return Err("token has expired".into());
+            return Err(Error::TokenExpired);
         }
         // The same machine joining again (rebuilt) replaces its old record.
         for old in self.members.values_mut() {
@@ -282,14 +304,18 @@ impl Membership {
                 old.rev += 1;
             }
         }
-        let id = self.members.keys().next_back().map_or(0, |m| m + 1);
+        let id = self
+            .members
+            .keys()
+            .next_back()
+            .map_or(MemberId(0), |m| MemberId(m.0 + 1));
         self.members.insert(
             id,
             Member {
                 id,
                 endpoint,
-                addr,
-                offer_bytes,
+                addr: request.addr,
+                offer_bytes: request.offer_bytes,
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -304,7 +330,7 @@ impl Membership {
     }
 
     /// Become a member, as told by the admitting member.
-    pub fn install(&mut self, adm: Admission, offer: u64) -> Result<(), String> {
+    pub fn install(&mut self, adm: Admission, offer: u64) -> Result<(), Error> {
         self.fs = Some(adm.fs);
         self.me = adm.id;
         self.members = adm.members.into_iter().map(|m| (m.id, m)).collect();
@@ -355,10 +381,10 @@ impl Membership {
     }
 
     /// Start handing this node's data to the others.
-    pub fn begin_leave(&mut self) -> Result<(), String> {
+    pub fn begin_leave(&mut self) -> Result<(), Error> {
         let me = self.me;
         let Some(m) = self.members.get_mut(&me) else {
-            return Err("this node does not belong to a filesystem".into());
+            return Err(Error::NotAMember);
         };
         if !m.leaving {
             m.leaving = true;
@@ -368,15 +394,15 @@ impl Membership {
     }
 
     /// Take a member that is gone for good out of the filesystem.
-    pub fn remove(&mut self, id: u32) -> Result<(), String> {
+    pub fn remove(&mut self, id: MemberId) -> Result<(), Error> {
         if id == self.me {
-            return Err("this node cannot remove itself; use `leave`".into());
+            return Err(Error::RemoveSelf);
         }
         let m = self
             .members
             .get_mut(&id)
             .filter(|m| !m.removed)
-            .ok_or_else(|| format!("no member {id}"))?;
+            .ok_or(Error::NoMember(id))?;
         m.removed = true;
         m.rev += 1;
         self.save()
@@ -401,7 +427,7 @@ impl Membership {
         self.save_or_report();
     }
 
-    pub fn set_offer(&mut self, bytes: u64) -> Result<(), String> {
+    pub fn set_offer(&mut self, bytes: u64) -> Result<(), Error> {
         self.offer = Some(bytes);
         let me = self.me;
         if let Some(m) = self.members.get_mut(&me) {
