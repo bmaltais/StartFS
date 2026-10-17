@@ -248,7 +248,16 @@ impl Daemon {
             let members_msg = Message::Members(members).encode();
             let tokens_msg = Message::Tokens(tokens).encode();
             let health_msg = Message::Health(self.local_health()).encode();
+            let copies_msg = self
+                .membership
+                .lock()
+                .unwrap()
+                .copies_setting()
+                .map(|(copies, rev)| Message::Copies { copies, rev }.encode());
             for p in &peers {
+                if let Some(msg) = &copies_msg {
+                    transport.send(*p, msg.clone());
+                }
                 transport.send(*p, members_msg.clone());
                 transport.send(*p, tokens_msg.clone());
                 transport.send(*p, health_msg.clone());

@@ -29,7 +29,8 @@ commands:
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
-  config [--offer SIZE]               change this node's settings (sizes like 500M, 2T)";
+  config [--offer SIZE] [--copies N]  change this node's space offer (sizes like 500M, 2T), or
+                                      the filesystem's number of copies on every node";
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
@@ -168,7 +169,24 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         }
         "config" => {
             if let Some(bytes) = optional_size(rest, "--offer")? {
-                Client::new(socket).set_offer(bytes)?;
+                Client::new(socket.clone()).set_offer(bytes)?;
+            }
+            if let Ok(copies) = flag_value(rest, "--copies") {
+                let copies = copies
+                    .parse::<u32>()
+                    .map_err(|_| CliError::CopiesNotANumber)?;
+                let client = Client::new(socket);
+                client.set_copies(copies)?;
+                if let Ok(s) = client.status()
+                    && s.copies_possible < copies
+                {
+                    eprintln!(
+                        "warning: {copies} copies wanted but only {} node{} can store copies, so {} will exist until more join",
+                        s.copies_possible,
+                        if s.copies_possible == 1 { "" } else { "s" },
+                        s.copies_possible,
+                    );
+                }
             }
             Ok(())
         }

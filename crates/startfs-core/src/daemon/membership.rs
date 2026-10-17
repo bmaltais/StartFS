@@ -2,7 +2,7 @@
 //! minting or revoking join tokens.
 
 use super::{DOWN_AFTER, Daemon};
-use crate::control::FilesystemInfo;
+use crate::control::{FilesystemInfo, Verdict};
 use crate::error::Error;
 use crate::members::{JoinRequest, MemberId, Membership, Token};
 use crate::net::{NodeId, Transport};
@@ -143,6 +143,7 @@ impl Daemon {
                 id,
                 name,
                 copies,
+                copies_rev: 0,
                 repair_grace_secs: self.config.repair_grace_secs,
                 gc_retention_secs: self.config.gc_retention_secs,
             },
@@ -202,8 +203,35 @@ impl Daemon {
     }
 
     /// Change this node's space offer; `None` leaves it as it is.
-    pub(super) fn configure(&self, offer_bytes: Option<u64>) -> Result<(), Error> {
+    pub(super) fn configure(
+        &self,
+        offer_bytes: Option<u64>,
+        copies: Option<u32>,
+    ) -> Result<(), Error> {
+        if copies == Some(0) {
+            return Err(Error::BadFilesystemSpec);
+        }
+        // Lowering drops copies, so only do it when none of them is still being made
+        // or out of reach. Judged before taking the lock (status takes it too), so
+        // remember what it was judged against and refuse if that moved meanwhile.
+        let judged = self.membership.lock().unwrap().copies_setting();
+        let lowering = copies.zip(judged).is_some_and(|(n, (now, _))| n < now);
+        // Best effort is as healthy as safe: it only means fewer nodes than copies wanted.
+        if lowering
+            && !matches!(
+                self.status()?.verdict,
+                Some(Verdict::Safe | Verdict::BestEffort)
+            )
+        {
+            return Err(Error::NotHealthyToLowerCopies);
+        }
         let mut membership = self.membership.lock().unwrap();
+        if lowering && membership.copies_setting() != judged {
+            return Err(Error::NotHealthyToLowerCopies);
+        }
+        if let Some(copies) = copies {
+            membership.set_copies(copies)?;
+        }
         if let Some(bytes) = offer_bytes {
             membership.set_offer(bytes)?;
         }

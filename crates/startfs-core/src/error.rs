@@ -24,6 +24,10 @@ pub enum Error {
     AlreadyInFilesystem,
     #[error("need a name and at least 1 copy")]
     BadFilesystemSpec,
+    #[error(
+        "cannot lower the number of copies until every file has all its copies and every member is reachable (see `startfs status`)"
+    )]
+    NotHealthyToLowerCopies,
     #[error("no such token")]
     NoSuchToken,
     #[error("token not recognised")]

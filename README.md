@@ -225,7 +225,10 @@ repair progress, scrub state, cache usage, warnings, and conflicts.
 
 Other commands: `startfs leave` (hand this node's data over and leave),
 `startfs remove <member>` (drop a dead member; its data is re-replicated),
-`startfs config --offer 500G`.
+`startfs config --offer 500G` (this node's space) and `startfs config --copies 3`, which
+changes the number of copies for the whole filesystem, on every node. Raising it makes the
+extra copies in the background (`status` shows the repair). Lowering is refused until every
+file has all its copies and every member is reachable, then the surplus is trimmed lazily.
 
 ## Configuration
 

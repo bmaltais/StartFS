@@ -265,3 +265,38 @@ fn a_join_to_an_unidentifiable_peer_fails_with_the_reason() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("tailscaled does not know"), "{err}");
 }
+
+#[test]
+fn cli_changes_the_number_of_copies_and_rejects_nonsense() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "2"],
+    ));
+
+    // One node cannot hold three copies: the command says so rather than succeeding quietly.
+    let out = startfs(data, &["config", "--copies", "3"]);
+    assert!(out.status.success());
+    let warning = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        warning.contains("warning") && warning.contains("only 1 node"),
+        "{warning}"
+    );
+    let text = stdout(&startfs(data, &["status"]));
+    assert!(text.contains("home (3 copies)"), "{text}");
+
+    let out = startfs(data, &["config", "--copies", "three"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--copies must be a number"));
+    let out = startfs(data, &["config", "--copies", "0"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("at least 1 copy"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = stdout(&startfs(data, &["status"]));
+    assert!(text.contains("home (3 copies)"), "{text}");
+}

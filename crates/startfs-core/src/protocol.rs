@@ -37,6 +37,9 @@ pub enum Message {
     /// How well replicated the sender's own chunks are, so any member's
     /// status can speak for the whole cluster.
     Health(Health),
+    /// The filesystem's number of copies and the revision of that setting;
+    /// the higher revision wins.
+    Copies { copies: u32, rev: u64 },
 }
 
 /// One member's view of its replication, as gossiped to the others.
@@ -58,7 +61,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 4;
+pub const PROTOCOL_VERSION: u8 = 5;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -153,6 +156,7 @@ mod tests {
             Message::Members(vec![]),
             Message::Tokens(vec![]),
             Message::Health(Health::default()),
+            Message::Copies { copies: 3, rev: 2 },
             Message::ChunkRequest(id),
             Message::ChunkAck(id, Replica::Stored),
         ];

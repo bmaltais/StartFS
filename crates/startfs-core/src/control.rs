@@ -28,6 +28,9 @@ pub enum Request {
     /// Change settings of this node; unset fields stay as they are.
     Config {
         offer_bytes: Option<u64>,
+        /// Change the filesystem's number of copies (for every member).
+        #[serde(default)]
+        copies: Option<u32>,
     },
     /// Make a token we issued stop working.
     Revoke {
@@ -50,8 +53,11 @@ pub enum Request {
 pub struct FilesystemInfo {
     pub id: String,
     pub name: String,
-    /// N: copies of every chunk, fixed at creation.
+    /// N: copies of every chunk. Set at creation; `config --copies` changes it.
     pub copies: u32,
+    /// Bumped each time `copies` is changed; the highest wins when members disagree.
+    #[serde(default)]
+    pub copies_rev: u64,
     /// How long a member may be unseen before repair treats it as lost.
     #[serde(default = "default_grace")]
     pub repair_grace_secs: u64,
@@ -430,6 +436,18 @@ impl Client {
     pub fn set_offer(&self, bytes: u64) -> Result<(), Error> {
         match self.call(&Request::Config {
             offer_bytes: Some(bytes),
+            copies: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Change the number of copies of every chunk, on every member.
+    pub fn set_copies(&self, copies: u32) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            copies: Some(copies),
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),

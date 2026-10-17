@@ -20,7 +20,7 @@ same code with a different membership scope.
 2. **Workload:** mixed, general-purpose. Content-defined chunking (FastCDC, roughly 1-4MB chunks)
    with a small-file fast path (single chunk under a threshold, around 64KB; tiny files inlined in
    metadata).
-3. **Redundancy:** plain N-copy replication of whole chunks. N is set per filesystem at creation.
+3. **Redundancy:** plain N-copy replication of whole chunks. N is set per filesystem at creation and can be changed later with `config --copies` (a gossiped, versioned setting; on a tie the higher count wins). Raising it is repair; lowering waits for a healthy cluster, then trims surplus copies lazily.
    No erasure coding in v1.
 
 4. **Platforms:** Linux and macOS for v1. Linux uses FUSE (`fuser`). macOS uses FUSE-T (preferred,
