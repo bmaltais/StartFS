@@ -16,6 +16,10 @@ use std::time::Duration;
 pub enum Request {
     Create { name: String, copies: u32 },
     Status,
+    /// Mint another join token (valid for the configured time).
+    NewToken,
+    /// Make a token we issued stop working.
+    Revoke { token: String },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
         token: String,
@@ -62,6 +66,7 @@ pub struct Status {
 pub enum Response {
     Created { token: String },
     Joined,
+    Done,
     Status(Status),
     Error(String),
 }
@@ -177,6 +182,26 @@ impl Client {
             offer_bytes,
         })? {
             Response::Joined => Ok(()),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Mint another join token.
+    pub fn new_token(&self) -> Result<String, String> {
+        match self.call(&Request::NewToken)? {
+            Response::Created { token } => Ok(token),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Revoke a token this node issued.
+    pub fn revoke(&self, token: &str) -> Result<(), String> {
+        match self.call(&Request::Revoke {
+            token: token.into(),
+        })? {
+            Response::Done => Ok(()),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
         }

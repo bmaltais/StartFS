@@ -170,7 +170,7 @@ impl Daemon {
         if self.membership.lock().unwrap().filesystem().is_some() {
             return Err("this node already belongs to a filesystem".into());
         }
-        if self.fs.frontier().map_err(|e| e.to_string())?.len() > 0 {
+        if !self.fs.frontier().map_err(|e| e.to_string())?.is_empty() {
             return Err("this node holds files of its own; join needs a fresh node".into());
         }
         let transport = self.transport().ok_or("the daemon has no network")?;
@@ -196,6 +196,11 @@ impl Daemon {
         self.membership.lock().unwrap().install(reply, offer)
     }
 
+    fn mint(&self, membership: &mut Membership) -> Result<String, String> {
+        let ttl = std::time::Duration::from_secs(self.config.token_ttl_secs);
+        membership.mint_token(self.clock.now() + ttl.as_nanos() as u64)
+    }
+
     pub fn handle(&self, req: Request) -> Response {
         match req {
             Request::Create { name, copies } => {
@@ -217,12 +222,19 @@ impl Daemon {
                         self.addr(),
                         self.config.offer_bytes,
                     )
-                    .and_then(|_| {
-                        let ttl = std::time::Duration::from_secs(self.config.token_ttl_secs);
-                        membership.mint_token(self.clock.now() + ttl.as_nanos() as u64)
-                    });
+                    .and_then(|_| self.mint(&mut membership));
                 match created {
                     Ok(token) => Response::Created { token },
+                    Err(e) => Response::Error(e),
+                }
+            }
+            Request::NewToken => match self.mint(&mut self.membership.lock().unwrap()) {
+                Ok(token) => Response::Created { token },
+                Err(e) => Response::Error(e),
+            },
+            Request::Revoke { token } => {
+                match self.membership.lock().unwrap().revoke_token(&token) {
+                    Ok(()) => Response::Done,
                     Err(e) => Response::Error(e),
                 }
             }
