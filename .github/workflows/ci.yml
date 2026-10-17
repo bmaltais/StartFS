@@ -32,7 +32,8 @@ jobs:
           brew tap macos-fuse-t/homebrew-cask
           brew install --cask fuse-t
           brew install pkg-config
-          find /usr/local /opt/homebrew -name '*fuse*.pc' 2>/dev/null
-          ls /usr/local/include 2>/dev/null | grep -i fuse
+          # fuser asks pkg-config for `fuse`; FUSE-T only ships fuse-t.pc and fuse3.pc.
+          cat /usr/local/lib/pkgconfig/fuse-t.pc
+          sudo cp /usr/local/lib/pkgconfig/fuse-t.pc /usr/local/lib/pkgconfig/fuse.pc
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked -p startfs
+      - run: PKG_CONFIG_PATH=/usr/local/lib/pkgconfig cargo build --locked -p startfs
