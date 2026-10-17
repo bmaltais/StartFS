@@ -401,3 +401,43 @@ fn a_damaged_cache_entry_is_refetched_not_returned() {
     c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
     assert_eq!(c.fs(1).read(on_b, 0, u32::MAX).unwrap(), data);
 }
+
+#[test]
+fn editing_a_remote_file_fetches_it_first_and_the_author_then_reads_the_edit() {
+    let c = joined(2, 2);
+    let (a, b) = (c.fs(0), c.fs(1));
+    let data = noise(100_000, 8);
+    write_file(&a, "f", &data);
+    c.sync();
+
+    let on_b = b.lookup(ROOT_INO, "f").unwrap().ino;
+    c.advance(Duration::from_secs(1));
+    b.write(on_b, 10, b"EDITED").unwrap();
+    c.sync();
+
+    let mut expected = data;
+    expected[10..16].copy_from_slice(b"EDITED");
+    let on_a = a.lookup(ROOT_INO, "f").unwrap().ino;
+    assert_eq!(a.read(on_a, 0, u32::MAX).unwrap(), expected);
+    assert_eq!(b.read(on_b, 0, u32::MAX).unwrap(), expected);
+}
+
+#[test]
+fn a_joined_node_keeps_its_identity_and_membership_across_a_restart() {
+    let c = joined(2, 2);
+    c.crash(1);
+    c.fs(0).create(ROOT_INO, "while-down", 0o644).unwrap();
+    c.restart(1);
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+
+    let fs = c.control(1).status().unwrap();
+    assert_eq!(fs.members.len(), 2);
+    assert!(fs.members[1].is_self);
+    let mine = c.fs(1).create(ROOT_INO, "after", 0o644).unwrap();
+    let theirs = c.fs(0).lookup(ROOT_INO, "while-down").unwrap();
+    assert_ne!(mine.ino, theirs.ino);
+    c.sync();
+    assert_eq!(names(&c.fs(0), ROOT_INO), ["after", "while-down"]);
+    assert_eq!(names(&c.fs(1), ROOT_INO), ["after", "while-down"]);
+}

@@ -127,6 +127,7 @@ impl Daemon {
             return false;
         };
         let mut busy = false;
+        self.sync_peers();
         while let Some((from, raw)) = transport.recv() {
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());
@@ -149,12 +150,18 @@ impl Daemon {
             busy |= !peers.is_empty();
         }
         drop(last);
-        let mut syncer = self.syncer.lock().unwrap();
-        if let Some(s) = syncer.as_mut() {
-            s.set_peers(&peers);
+        if let Some(s) = self.syncer.lock().unwrap().as_mut() {
             busy |= s.poll();
         }
         busy
+    }
+
+    /// Exchange logs with exactly the other members.
+    fn sync_peers(&self) {
+        let peers = self.membership.lock().unwrap().peers();
+        if let Some(s) = self.syncer.lock().unwrap().as_mut() {
+            s.set_peers(&peers);
+        }
     }
 
     fn dispatch(&self, transport: &dyn Transport, from: NodeId, msg: Message) {
@@ -198,8 +205,9 @@ impl Daemon {
             }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
-                if m.is_member_endpoint(from) {
-                    m.merge(list);
+                if m.is_member_endpoint(from) && m.merge(list) {
+                    drop(m);
+                    self.sync_peers();
                 }
             }
             msg @ (Message::Hello(_) | Message::Entries(_)) => {
