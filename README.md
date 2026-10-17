@@ -194,6 +194,27 @@ size of the files; `df` on the mount shows what is actually stored. For example,
 folder showed 1.7 MiB used. Per-file sizes never show the saving, only the filesystem-wide
 used figure does.
 
+## Surviving machine loss
+
+There is no central server: every machine runs the same daemon, and the data lives on
+the member machines themselves. `--copies N` (set once at `create`, for the whole
+filesystem) keeps N copies of every chunk on N different machines.
+
+- **Up to N-1 machines can fail without losing data**, provided the writes had finished
+  replicating. With `--copies 2` one machine can die; with `--copies 3`, two.
+- **No action is needed to recover.** A machine unseen for longer than `repair_grace_secs`
+  (30 minutes by default) is treated as gone and the others re-replicate its chunks back to N
+  copies. If it comes back, its copies count again. Use `startfs remove <member>` to
+  declare a dead machine gone sooner.
+- **The margin shrinks until repair finishes.** If a second machine is lost before the first
+  one's data is back to N copies, you are one failure closer to loss. `startfs status`
+  shows copies possible versus wanted and the repair progress.
+- A short outage is not a loss. A machine that is merely offline keeps working locally and
+  catches up when it returns; concurrent edits to the same file become conflict copies.
+
+This was validated with real processes (`kill -9` of members, 2 and 3 copies, see
+`docs/validation.md`), not yet on real separate machines.
+
 ## Status
 
 `startfs status` answers "is my data safe right now?": copies possible versus
