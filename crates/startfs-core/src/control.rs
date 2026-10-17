@@ -128,7 +128,7 @@ pub struct FileHealth {
     pub tier: Tier,
 }
 
-/// Chunks this node is re-replicating after a member was lost, still to do.
+/// Chunks being re-replicated after a member was lost, still to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repair {
     /// Chunks down to a single copy: repaired first.
@@ -215,10 +215,14 @@ pub struct Status {
     pub copies_possible: u32,
     /// Roughly how much data fits: offered space divided by N.
     pub usable_bytes: u64,
-    /// Files this node wrote that are not yet on N nodes, worst first.
+    /// Files not yet on N nodes anywhere in the cluster, as far as the
+    /// reachable members report, worst first.
     pub unreplicated: Vec<FileHealth>,
-    /// Re-replication under way on this node, if any.
+    /// Re-replication under way, summed over this node and the reachable members.
     pub repair: Option<Repair>,
+    /// Members whose replication state is missing from `unreplicated` and
+    /// `repair`: unreachable, or not heard from yet. Empty when the view is complete.
+    pub unheard: Vec<MemberId>,
     pub scrub: ScrubStatus,
     pub log: LogStatus,
     /// Things the user should know: redundancy that cannot be met, full nodes.

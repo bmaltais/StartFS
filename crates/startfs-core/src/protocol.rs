@@ -1,6 +1,7 @@
 //! The wire protocol peers speak over a [`Transport`](crate::net::Transport).
 
 use crate::chunkstore::ChunkId;
+use crate::control::{FileHealth, Repair};
 use crate::members::{Admission, JoinRequest, Member, TokenRec};
 use crate::oplog::{Entry, Frontier, StateTransfer};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,16 @@ pub enum Message {
     ChunkAck(ChunkId, Replica),
     /// A member's view of the join tokens: any member can admit with any of them.
     Tokens(Vec<TokenRec>),
+    /// How well replicated the sender's own chunks are, so any member's
+    /// status can speak for the whole cluster.
+    Health(Health),
+}
+
+/// One member's view of its replication, as gossiped to the others.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Health {
+    pub unreplicated: Vec<FileHealth>,
+    pub repair: Option<Repair>,
 }
 
 /// A node's standing towards holding a replica of one chunk.
@@ -46,7 +57,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Why a received message could not be understood.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -130,6 +141,7 @@ mod tests {
             Message::Entries(vec![]),
             Message::Members(vec![]),
             Message::Tokens(vec![]),
+            Message::Health(Health::default()),
             Message::ChunkRequest(id),
             Message::ChunkAck(id, Replica::Stored),
         ];

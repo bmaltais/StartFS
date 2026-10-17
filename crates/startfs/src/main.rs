@@ -389,6 +389,18 @@ fn render(s: &Status) -> String {
     for w in &s.warnings {
         out.push_str(&format!("warning: {w}\n"));
     }
+    if !s.unheard.is_empty() {
+        let names: Vec<&str> = s
+            .members
+            .iter()
+            .filter(|m| s.unheard.contains(&m.id))
+            .map(|m| m.addr.as_str())
+            .collect();
+        out.push_str(&format!(
+            "partial view: no replication report from {}\n",
+            names.join(", ")
+        ));
+    }
     if !s.unreplicated.is_empty() {
         out.push_str(&format!(
             "not fully replicated: {} file{}\n",

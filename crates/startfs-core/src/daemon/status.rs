@@ -6,6 +6,7 @@ use crate::control::{
 };
 use crate::error::Error;
 use crate::ops::FsOps;
+use crate::protocol::Health;
 use std::time::Duration;
 
 /// Is the data safe right now? Copies beyond what the storage nodes allow are
@@ -35,20 +36,50 @@ fn verdict(
     }
 }
 
+/// Fold a member's report into the cluster view: a file is as safe as the
+/// least safe copy count any member sees, and repair work adds up.
+fn merge_health(into: &mut Health, from: &Health) {
+    for f in &from.unreplicated {
+        match into.unreplicated.iter_mut().find(|g| g.path == f.path) {
+            Some(g) if f.copies < g.copies => *g = f.clone(),
+            Some(_) => {}
+            None => into.unreplicated.push(f.clone()),
+        }
+    }
+    into.unreplicated.sort_by_key(|f| f.copies);
+    if let Some(r) = from.repair {
+        let mine = into.repair.get_or_insert(Repair {
+            at_risk: 0,
+            degraded: 0,
+        });
+        mine.at_risk += r.at_risk;
+        mine.degraded += r.degraded;
+    }
+}
+
 impl Daemon {
+    /// This node's own replication state: what it gossips and contributes to `status`.
+    pub(super) fn local_health(&self) -> Health {
+        Health {
+            unreplicated: self
+                .with_view(|v| self.replicator.unreplicated(v))
+                .unwrap_or_default(),
+            repair: self
+                .with_view(|v| self.replicator.repair_progress(v))
+                .flatten(),
+        }
+    }
+
     pub(super) fn status(&self) -> Result<Status, Error> {
         let stats = self.fs.stats()?;
-        let unreplicated = self
-            .with_view(|v| self.replicator.unreplicated(v))
-            .unwrap_or_default();
-        let repair = self
-            .with_view(|v| self.replicator.repair_progress(v))
-            .flatten();
+        let mut health = self.local_health();
         let lost = self.with_view(|v| v.lost.clone()).unwrap_or_default();
         let membership = self.membership.lock().unwrap();
         let filesystem = membership.filesystem().cloned();
         let now = self.clock.now();
         let heard = self.heard.lock().unwrap();
+        let peer_health = self.peer_health.lock().unwrap();
+        let mut unheard = Vec::new();
         let members: Vec<MemberStatus> = membership
             .members()
             .into_iter()
@@ -58,6 +89,13 @@ impl Daemon {
                     || heard
                         .get(&m.endpoint)
                         .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64);
+                if !is_self {
+                    // Only a member that is up speaks for its own chunks.
+                    match peer_health.get(&m.endpoint) {
+                        Some(h) if up => merge_health(&mut health, h),
+                        _ => unheard.push(m.id),
+                    }
+                }
                 MemberStatus {
                     id: m.id,
                     addr: m.addr,
@@ -75,6 +113,11 @@ impl Daemon {
                 }
             })
             .collect();
+        drop(peer_health);
+        let Health {
+            unreplicated,
+            repair,
+        } = health;
         let nodes = members.len() as u32;
         // Only members offering space, and with room left, can hold a copy.
         let full = self.replicator.full_members();
@@ -143,6 +186,7 @@ impl Daemon {
             usable_bytes,
             unreplicated,
             repair,
+            unheard,
             log: LogStatus {
                 entries: self.fs.log_len().unwrap_or(0),
                 objects: self.fs.object_count().unwrap_or(0),
