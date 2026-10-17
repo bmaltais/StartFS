@@ -30,6 +30,10 @@ const CODEC_ZSTD: u8 = 1;
 const ZSTD_LEVEL: i32 = 3;
 
 fn io(e: std::io::Error) -> FsError {
+    // A full disk is the one failure the user can act on: report it as ENOSPC.
+    if e.raw_os_error() == Some(libc::ENOSPC) {
+        return FsError::NoSpace;
+    }
     FsError::Io(e.to_string())
 }
 

@@ -71,6 +71,16 @@ pub struct Daemon {
     power: Mutex<Arc<dyn PowerSource>>,
 }
 
+/// The most the staging area may hold. A node offering space is limited by its
+/// disk alone; one offering none keeps what it writes in staging, so it is capped.
+fn staging_limit(config: &Config, offer: u64) -> u64 {
+    if offer > 0 {
+        u64::MAX
+    } else {
+        config.staging_bytes
+    }
+}
+
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
 type ChunkAnswer = Option<Vec<u8>>;
 
@@ -93,7 +103,10 @@ impl Daemon {
     ) -> FsResult<Arc<Self>> {
         let membership = Membership::load(&dir.join("membership.json"));
         let fs = Arc::new(LocalFs::open(dir, node, config.cache_bytes, clock.clone())?);
-        fs.set_staging_limit(config.staging_bytes);
+        fs.set_staging_limit(staging_limit(
+            &config,
+            membership.my_offer(config.offer_bytes),
+        ));
         if let Some(me) = membership.me() {
             fs.set_node(NodeId(me));
             fs.set_replicating();
@@ -169,6 +182,13 @@ impl Daemon {
         };
         let mut busy = false;
         self.sync_peers();
+        let offer = self
+            .membership
+            .lock()
+            .unwrap()
+            .my_offer(self.config.offer_bytes);
+        self.fs
+            .set_staging_limit(staging_limit(&self.config, offer));
         while let Some((from, raw)) = transport.recv() {
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());
@@ -235,7 +255,9 @@ impl Daemon {
             return false;
         };
         *last = Some(now);
-        let _ = self.fs.compact(&held, settled);
+        if let Err(e) = self.fs.compact(&held, settled) {
+            eprintln!("startfs: cannot compact the operation log: {e}");
+        }
         false
     }
 
@@ -373,6 +395,17 @@ impl Daemon {
     }
 
     fn dispatch(&self, transport: &dyn Transport, from: NodeId, msg: Message) {
+        // Chunk traffic is for members only.
+        if matches!(
+            msg,
+            Message::ChunkRequest(_)
+                | Message::ChunkReply(..)
+                | Message::ChunkPush(..)
+                | Message::ChunkAck(..)
+        ) && !self.membership.lock().unwrap().is_member_endpoint(from)
+        {
+            return;
+        }
         match msg {
             Message::JoinRequest {
                 fs_id,
@@ -401,33 +434,25 @@ impl Daemon {
                 *self.join_reply.lock().unwrap() = Some(reply);
             }
             Message::ChunkRequest(id) => {
-                if self.membership.lock().unwrap().is_member_endpoint(from) {
-                    let data = self.fs.local_chunk(&id);
-                    transport.send(from, Message::ChunkReply(id, data).encode());
-                }
+                let data = self.fs.local_chunk(&id);
+                transport.send(from, Message::ChunkReply(id, data).encode());
             }
             Message::ChunkReply(id, data) => {
-                if self.membership.lock().unwrap().is_member_endpoint(from) {
-                    let healed = self
-                        .with_view(|v| self.replicator.on_heal_reply(v, &id, data.as_deref()))
-                        .unwrap_or(false);
-                    if !healed {
-                        self.chunk_replies.lock().unwrap().insert((from, id), data);
-                    }
+                let healed = self
+                    .with_view(|v| self.replicator.on_heal_reply(v, &id, data.as_deref()))
+                    .unwrap_or(false);
+                if !healed {
+                    self.chunk_replies.lock().unwrap().insert((from, id), data);
                 }
             }
             Message::ChunkPush(id, data) => {
-                if self.membership.lock().unwrap().is_member_endpoint(from) {
-                    let standing = self
-                        .with_view(|v| self.replicator.on_push(v, &id, data.as_deref()))
-                        .unwrap_or(Replica::Full);
-                    transport.send(from, Message::ChunkAck(id, standing).encode());
-                }
+                let standing = self
+                    .with_view(|v| self.replicator.on_push(v, &id, data.as_deref()))
+                    .unwrap_or(Replica::Full);
+                transport.send(from, Message::ChunkAck(id, standing).encode());
             }
             Message::ChunkAck(id, standing) => {
-                if self.membership.lock().unwrap().is_member_endpoint(from) {
-                    self.with_view(|v| self.replicator.on_ack(v, from, &id, standing));
-                }
+                self.with_view(|v| self.replicator.on_ack(v, from, &id, standing));
             }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
@@ -577,6 +602,10 @@ impl Daemon {
                 {
                     return Response::Error(e);
                 }
+                self.fs.set_staging_limit(staging_limit(
+                    &self.config,
+                    membership.my_offer(self.config.offer_bytes),
+                ));
                 Response::Done
             }
             Request::Revoke { token } => {

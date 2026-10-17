@@ -19,13 +19,16 @@ impl LocalFs {
         Ok(self.staging.list()?.into_iter().map(|c| c.0).collect())
     }
 
-    /// Most bytes the staging area may hold before writes are refused.
+    /// Most bytes the staging area may hold before writes are refused. Only
+    /// nodes that offer no space are held to it (see [`Self::set_staging_limit`]
+    /// callers): a storage node is limited by its disk alone.
     pub fn set_staging_limit(&self, bytes: u64) {
         self.staging_limit.store(bytes, Ordering::SeqCst);
     }
 
-    /// Refuse a write whose new chunks would overflow the staging area. This
-    /// is the only reason a write fails for lack of space: copies that cannot
+    /// Refuse a write whose new chunks would overflow the staging area. With
+    /// the cap in force (a node offering no space), this and a full local disk
+    /// are the only reasons a write fails for lack of space: copies that cannot
     /// be placed elsewhere never stop a write.
     pub(super) fn make_room(&self, pieces: &[&[u8]]) -> FsResult<()> {
         if !self.replicating.load(Ordering::SeqCst) {

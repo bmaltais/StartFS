@@ -203,6 +203,22 @@ fn a_write_is_refused_only_when_the_local_node_has_no_space() {
 }
 
 #[test]
+fn a_storage_node_is_not_refused_just_because_the_staging_cap_is_reached() {
+    // The cap holds just over one 100 KB file, but this node offers space and
+    // replication has not yet moved the first file out of staging.
+    let c = Cluster::start_with_config(1, "staging_bytes = 150000");
+    c.control(0).create("home", 1).unwrap();
+    let fs = c.fs(0);
+
+    let first = noise(100_000, 1);
+    let second = noise(100_000, 2);
+    let a = put(&fs, "a", &first);
+    let b = put(&fs, "b", &second);
+    assert_eq!(fs.read(a, 0, u32::MAX).unwrap(), first);
+    assert_eq!(fs.read(b, 0, u32::MAX).unwrap(), second);
+}
+
+#[test]
 fn a_write_survives_a_crash_before_replication_and_replicates_after_restart() {
     let c = cluster(2, &[BIG, BIG, 0]);
     let data = noise(60 * 1024, 1);
