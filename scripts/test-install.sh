@@ -93,3 +93,11 @@ install_version v1.0.4 || fail "stopped service"
 refute "enable --now" "$work/state/calls"
 expect "left stopped" "$work/out"
 echo "ok   an explicit downgrade warns; a stopped service stays stopped"
+
+rm -rf "$HOME/.config" "$HOME/.local"
+: >"$work/state/calls"
+STARTFS_BASE_URL=file://$work/rel STARTFS_VERSION=v1.0.4 STARTFS_NO_SERVICE=1 \
+  sh "$here/install.sh" >"$work/out" 2>&1 || fail "STARTFS_NO_SERVICE install"
+[ -e "$HOME/.config/systemd/user/startfs.service" ] || fail "unit file not installed"
+refute "stop\|enable\|start " "$work/state/calls"
+echo "ok   STARTFS_NO_SERVICE installs the files and never touches the service"

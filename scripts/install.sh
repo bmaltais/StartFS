@@ -92,9 +92,9 @@ fi
 manage=
 was_running=
 first_install=
+unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/startfs.service
 if [ -z "${STARTFS_NO_SERVICE:-}" ]; then
   if [ "$os" = linux ]; then
-    unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/startfs.service
     if systemctl --user daemon-reload 2>/dev/null; then
       manage=systemd
       [ -e "$unit" ] || first_install=1
