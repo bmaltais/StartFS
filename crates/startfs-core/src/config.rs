@@ -16,6 +16,12 @@ pub struct Config {
     pub staging_bytes: u64,
     /// How long a join token stays valid, in seconds.
     pub token_ttl_secs: u64,
+    /// When this node creates a filesystem: how long a member may be unseen
+    /// before its copies are re-made elsewhere. Fixed for the filesystem.
+    pub repair_grace_secs: u64,
+    /// Most bytes per second this node sends when re-replicating chunks it
+    /// already holds (repair and rebalancing; new writes are not limited).
+    pub repair_bytes_per_sec: u64,
 }
 
 impl Default for Config {
@@ -26,6 +32,8 @@ impl Default for Config {
             cache_bytes: 1 << 30,
             staging_bytes: 4 << 30,
             token_ttl_secs: 24 * 3600,
+            repair_grace_secs: 30 * 60,
+            repair_bytes_per_sec: 8 << 20,
         }
     }
 }

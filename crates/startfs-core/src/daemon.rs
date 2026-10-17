@@ -11,16 +11,17 @@ use crate::control::{
     FilesystemInfo, MemberStatus, NodeState, Request, Response, Staging, Status, Usage,
 };
 use crate::fs::{ChunkSource, LocalFs, NodeConfig};
-use crate::members::{Membership, Token};
+use crate::members::{Member, Membership, Token};
 use crate::net::{NodeId, Transport};
 use crate::ops::Nanos;
 use crate::ops::{FsOps, FsResult};
 use crate::protocol::{Message, Replica};
 use crate::replication::{Replicator, View};
 use crate::sync::{HELLO_INTERVAL, Syncer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 /// Called while a control request waits for a peer's answer. A real daemon
 /// sleeps (its background thread makes progress meanwhile); the test harness
@@ -50,6 +51,8 @@ pub struct Daemon {
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
+    /// When this daemon started: how long a never-heard member has been unseen.
+    started: Nanos,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
     chunk_replies: Mutex<HashMap<(NodeId, ChunkId), ChunkAnswer>>,
     /// Pushes new chunks to the nodes placement chose and tracks their copies.
@@ -83,6 +86,7 @@ impl Daemon {
             fs.set_node(NodeId(me));
             fs.set_replicating();
         }
+        let started = clock.now();
         Ok(Arc::new_cyclic(|me| {
             fs.set_chunk_source(Arc::new(PeerChunks(me.clone())));
             Self {
@@ -95,6 +99,7 @@ impl Daemon {
                 join_reply: Mutex::new(None),
                 heard: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
+                started,
                 wait: Mutex::new(Arc::new(|| {
                     std::thread::sleep(std::time::Duration::from_millis(10))
                 })),
@@ -172,22 +177,42 @@ impl Daemon {
 
     /// Run `f` with the replicator's view of the filesystem, if we belong to one.
     fn with_view<T>(&self, f: impl FnOnce(&View<'_>) -> T) -> Option<T> {
-        let (me, copies, members, offer) = {
+        let (me, copies, grace, members, offer) = {
             let m = self.membership.lock().unwrap();
+            let fs = m.filesystem()?;
             (
                 m.me()?,
-                m.filesystem()?.copies,
+                fs.copies,
+                fs.repair_grace_secs,
                 m.members(),
                 m.my_offer(self.config.offer_bytes),
             )
         };
+        let now = self.clock.now();
+        let lost = self.lost_members(&members, me, grace, now);
         Some(f(&View {
             me,
             copies,
             members: &members,
+            lost: &lost,
             offer,
-            now: self.clock.now(),
+            now,
         }))
+    }
+
+    /// Members unseen for the repair grace period: repair treats them as gone.
+    fn lost_members(&self, members: &[Member], me: u32, grace: u64, now: Nanos) -> HashSet<u32> {
+        let heard = self.heard.lock().unwrap();
+        let grace = Duration::from_secs(grace).as_nanos() as u64;
+        members
+            .iter()
+            .filter(|m| m.id != me)
+            .filter(|m| {
+                let seen = heard.get(&m.endpoint).copied().unwrap_or(self.started);
+                now.saturating_sub(seen) >= grace
+            })
+            .map(|m| m.id)
+            .collect()
     }
 
     /// Exchange logs with exactly the other members.
@@ -349,7 +374,12 @@ impl Daemon {
                 let endpoint = self.transport().map_or(NodeId(0), |t| t.local());
                 let created = membership
                     .create(
-                        FilesystemInfo { id, name, copies },
+                        FilesystemInfo {
+                            id,
+                            name,
+                            copies,
+                            repair_grace_secs: self.config.repair_grace_secs,
+                        },
                         endpoint,
                         self.addr(),
                         self.config.offer_bytes,

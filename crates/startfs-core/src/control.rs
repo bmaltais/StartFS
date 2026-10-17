@@ -43,6 +43,13 @@ pub struct FilesystemInfo {
     pub name: String,
     /// N: copies of every chunk, fixed at creation.
     pub copies: u32,
+    /// How long a member may be unseen before repair treats it as lost.
+    #[serde(default = "default_grace")]
+    pub repair_grace_secs: u64,
+}
+
+fn default_grace() -> u64 {
+    30 * 60
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

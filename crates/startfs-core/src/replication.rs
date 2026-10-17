@@ -28,6 +28,8 @@ pub struct View<'a> {
     /// N.
     pub copies: u32,
     pub members: &'a [Member],
+    /// Members unseen past the repair grace period: never chosen to hold copies.
+    pub lost: &'a HashSet<u32>,
     /// Space this node offers for replicas.
     pub offer: u64,
     pub now: Nanos,
@@ -65,7 +67,7 @@ struct Track {
 }
 
 /// N and each member's (id, offer, revision): what placement depends on.
-type Epoch = (u32, Vec<(u32, u64, u64)>);
+type Epoch = (u32, Vec<(u32, u64, u64)>, Vec<u32>);
 
 #[derive(Default)]
 struct State {
@@ -114,6 +116,12 @@ impl Replicator {
                 .iter()
                 .map(|m| (m.id, m.offer_bytes, m.rev))
                 .collect::<Vec<_>>(),
+            view.lost
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         );
         if st.epoch.as_ref() != Some(&epoch) {
             // Membership or offers changed: placement may differ, so check
@@ -149,7 +157,8 @@ impl Replicator {
             st.tracks.remove(id);
             return false;
         }
-        let targets = place(id, view.members, view.copies, &st.full);
+        let skip: HashSet<u32> = st.full.union(view.lost).copied().collect();
+        let targets = place(id, view.members, view.copies, &skip);
         if staged
             && targets.contains(&view.me)
             && !self.fs.has_replica(id)
