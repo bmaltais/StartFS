@@ -196,6 +196,7 @@ impl Daemon {
             members: &members,
             lost: &lost,
             offer,
+            repair_rate: self.config.repair_bytes_per_sec,
             now,
         }))
     }
@@ -424,6 +425,10 @@ impl Daemon {
                 let unreplicated = self
                     .with_view(|v| self.replicator.unreplicated(v))
                     .unwrap_or_default();
+                let repair = self
+                    .with_view(|v| self.replicator.repair_progress(v))
+                    .flatten();
+                let lost = self.with_view(|v| v.lost.clone()).unwrap_or_default();
                 let membership = self.membership.lock().unwrap();
                 let filesystem = membership.filesystem().cloned();
                 let now = self.clock.now();
@@ -442,6 +447,8 @@ impl Daemon {
                             addr: m.addr,
                             state: if up {
                                 NodeState::Online
+                            } else if lost.contains(&m.id) {
+                                NodeState::Lost
                             } else {
                                 NodeState::Down
                             },
@@ -507,6 +514,7 @@ impl Daemon {
                     copies_possible,
                     usable_bytes,
                     unreplicated,
+                    repair,
                     warnings,
                     conflicts: match self.fs.conflicts() {
                         Ok(c) => c,

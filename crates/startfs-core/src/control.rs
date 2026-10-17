@@ -57,6 +57,8 @@ pub enum NodeState {
     Online,
     /// Not heard from recently.
     Down,
+    /// Unseen past the repair grace period: its copies no longer count.
+    Lost,
 }
 
 /// One member of the filesystem, as `status` shows it.
@@ -108,6 +110,15 @@ pub struct FileHealth {
     pub tier: Tier,
 }
 
+/// Chunks this node is re-replicating after a member was lost, still to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Repair {
+    /// Chunks down to a single copy: repaired first.
+    pub at_risk: u32,
+    /// Chunks with more than one but fewer than N copies.
+    pub degraded: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// `None` until a filesystem is created or joined.
@@ -128,6 +139,8 @@ pub struct Status {
     pub usable_bytes: u64,
     /// Files this node wrote that are not yet on N nodes, worst first.
     pub unreplicated: Vec<FileHealth>,
+    /// Re-replication under way on this node, if any.
+    pub repair: Option<Repair>,
     /// Things the user should know: redundancy that cannot be met, full nodes.
     pub warnings: Vec<String>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).

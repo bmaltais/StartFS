@@ -8,7 +8,7 @@
 //! these answers, so a node tracks the chunks it is working on and nothing else.
 
 use crate::chunkstore::ChunkId;
-use crate::control::{FileHealth, Tier};
+use crate::control::{FileHealth, Repair, Tier};
 use crate::fs::LocalFs;
 use crate::members::Member;
 use crate::net::{NodeId, Transport};
@@ -32,6 +32,8 @@ pub struct View<'a> {
     pub lost: &'a HashSet<u32>,
     /// Space this node offers for replicas.
     pub offer: u64,
+    /// Most bytes per second sent when re-replicating chunks already held.
+    pub repair_rate: u64,
     pub now: Nanos,
 }
 
@@ -60,6 +62,8 @@ struct Track {
     missing: BTreeSet<u32>,
     /// When we last asked or pushed, per member.
     sent: HashMap<u32, Nanos>,
+    /// Members that just said they lack the chunk and have not been sent it yet.
+    answered: BTreeSet<u32>,
     /// Every node placement allows holds it, yet there are fewer than N.
     settled: bool,
     /// Some peer has answered about this chunk, so the holders are known.
@@ -76,6 +80,9 @@ struct State {
     full: HashSet<u32>,
     /// The copies and membership (id, offer, revision) placement last used.
     epoch: Option<Epoch>,
+    /// Bytes of re-replication allowed right now; goes negative after a send.
+    allowance: i64,
+    allowance_at: Option<Nanos>,
 }
 
 pub struct Replicator {
@@ -134,7 +141,20 @@ impl Replicator {
             }
         }
         self.track_staged(&mut st);
-        let ids: Vec<ChunkId> = st.tracks.keys().copied().collect();
+        // Earn this round's share of the repair rate (at most one second's worth).
+        let earned = st.allowance_at.map_or(i64::MAX, |at| {
+            (view.now.saturating_sub(at) as u128 * view.repair_rate as u128 / 1_000_000_000)
+                .min(i64::MAX as u128) as i64
+        });
+        let cap = view.repair_rate.min(i64::MAX as u64) as i64;
+        st.allowance = st.allowance.saturating_add(earned).min(cap);
+        st.allowance_at = Some(view.now);
+        // The least replicated chunks first, so the most at risk are made safe first.
+        let mut ids: Vec<ChunkId> = st.tracks.keys().copied().collect();
+        ids.sort_by_key(|id| {
+            let t = &st.tracks[id];
+            t.holders.len() + usize::from(self.fs.has_replica(id))
+        });
         for id in ids {
             busy |= self.work(&mut st, view, transport, &id);
         }
@@ -179,23 +199,35 @@ impl Replicator {
             if *t == view.me || track.holders.contains(t) {
                 continue;
             }
-            let due = track
-                .sent
-                .get(t)
-                .is_none_or(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
+            // A target that just said it lacks the chunk is sent it at once by
+            // the steward; everyone else asks again only after a retry delay.
+            let due = (steward && track.answered.contains(t))
+                || track
+                    .sent
+                    .get(t)
+                    .is_none_or(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
             let Some(to) = view.endpoint(*t) else {
                 continue;
             };
             if !due {
                 continue;
             }
-            let data = if steward && track.missing.contains(t) {
-                self.fs.local_chunk(id)
-            } else {
-                None
-            };
+            let mut data = None;
+            if steward && track.missing.contains(t) {
+                data = self.fs.local_chunk(id);
+                if let Some(bytes) = &data
+                    && !staged
+                {
+                    // Chunks already held are re-replicated within the rate limit.
+                    if st.allowance < 0 {
+                        continue;
+                    }
+                    st.allowance -= bytes.len() as i64;
+                }
+            }
             transport.send(to, Message::ChunkPush(*id, data).encode());
             track.sent.insert(*t, view.now);
+            track.answered.remove(t);
             busy = true;
         }
         let complete = !targets.is_empty()
@@ -246,23 +278,48 @@ impl Replicator {
         let Some(track) = st.tracks.get_mut(id) else {
             return;
         };
-        track.sent.remove(&member);
         track.heard = true;
         match standing {
             Replica::Stored => {
+                track.sent.remove(&member);
+                track.answered.remove(&member);
                 track.holders.insert(member);
                 track.missing.remove(&member);
             }
             Replica::Missing => {
+                track.sent.insert(member, view.now);
+                track.answered.insert(member);
                 track.missing.insert(member);
             }
-            Replica::Full => {}
+            Replica::Full => {
+                track.sent.remove(&member);
+            }
         }
     }
 
     /// Members known to be out of room.
     pub fn full_members(&self) -> HashSet<u32> {
         self.state.lock().unwrap().full.clone()
+    }
+
+    /// Chunks held here that this node must re-replicate, by how safe they are.
+    pub fn repair_progress(&self, view: &View<'_>) -> Option<Repair> {
+        let st = self.state.lock().unwrap();
+        let mut progress = Repair {
+            at_risk: 0,
+            degraded: 0,
+        };
+        for (id, t) in &st.tracks {
+            let replicas = t.holders.len() as u32 + 1;
+            let mine = t.holders.first().is_none_or(|h| view.me < *h);
+            if t.heard && !t.settled && mine && replicas < view.copies && self.fs.has_replica(id) {
+                match tier(replicas) {
+                    Tier::AtRisk => progress.at_risk += 1,
+                    _ => progress.degraded += 1,
+                }
+            }
+        }
+        (progress.at_risk + progress.degraded > 0).then_some(progress)
     }
 
     /// Files with a chunk on fewer than `view.copies` nodes, as far as this node knows.

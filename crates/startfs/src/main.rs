@@ -196,6 +196,7 @@ fn render(s: &Status) -> String {
     let state = match s.node_state {
         NodeState::Online => "online",
         NodeState::Down => "down",
+        NodeState::Lost => "lost",
     };
     let mut out = format!(
         "filesystem: {} ({} copies)\nnode: {state}\nusage: {} stored in {} chunks, {} offered\n",
@@ -230,6 +231,7 @@ fn render(s: &Status) -> String {
         let state = match m.state {
             NodeState::Online => "up",
             NodeState::Down => "down",
+            NodeState::Lost => "lost",
         };
         out.push_str(&format!(
             "  {:<3} {:<22} {:<5} {} offered{}\n",
@@ -238,6 +240,12 @@ fn render(s: &Status) -> String {
             state,
             human(m.offer_bytes),
             if m.is_self { "  (this node)" } else { "" }
+        ));
+    }
+    if let Some(r) = &s.repair {
+        out.push_str(&format!(
+            "repair: {} at risk, {} degraded chunks left to re-replicate\n",
+            r.at_risk, r.degraded
         ));
     }
     for w in &s.warnings {
