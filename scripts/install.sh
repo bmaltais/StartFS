@@ -1,7 +1,8 @@
 #!/bin/sh
 # Install the latest prebuilt startfs release for this machine's OS and CPU.
 #   curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
-# Environment: STARTFS_VERSION=v1.0.0 pins a release; INSTALL_DIR overrides ~/.local/bin.
+# Environment: STARTFS_VERSION=v1.0.0 pins a release; INSTALL_DIR overrides ~/.local/bin;
+# STARTFS_NO_SERVICE=1 installs the systemd unit without enabling or starting it.
 set -eu
 
 repo=bmaltais/StartFS
@@ -57,13 +58,18 @@ if [ "$os" = linux ]; then
   unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
   mkdir -p "$unit_dir"
   install -m644 "$tmp/$name/startfs.service" "$unit_dir/startfs.service"
-  cat <<NEXT
-
-Needs fuse3 and Tailscale installed. To run it as a service that mounts ~/StartFS:
-  systemctl --user daemon-reload
-  systemctl --user enable --now startfs.service
-  loginctl enable-linger "\$USER"
-NEXT
+  command -v fusermount3 >/dev/null || echo "Warning: fuse3 is not installed; the mount will fail until it is."
+  command -v tailscale >/dev/null || echo "Warning: Tailscale is not installed; see the README."
+  if [ -n "${STARTFS_NO_SERVICE:-}" ]; then
+    echo "Service file installed but not started (STARTFS_NO_SERVICE is set)."
+  elif systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now startfs.service || die "could not start startfs.service (see: journalctl --user -u startfs)"
+    loginctl enable-linger "$USER" 2>/dev/null ||
+      echo "Note: could not enable linger; run 'sudo loginctl enable-linger $USER' to start at boot."
+    echo "The startfs service is running and mounts ~/StartFS."
+  else
+    echo "No systemd user session; start it by hand: startfs daemon --mount ~/StartFS"
+  fi
 else
   cat <<NEXT
 

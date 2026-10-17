@@ -35,24 +35,20 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
    Then `sudo systemctl enable --now tailscaled && sudo tailscale up`.
 
 2. Install the latest release for your CPU (detects x86_64 or aarch64, checks the
-   checksum, installs `~/.local/bin/startfs` and the systemd user unit):
+   checksum, installs `~/.local/bin/startfs`, then enables and starts the systemd user
+   service that mounts `~/StartFS`, restarts after a crash and starts at boot):
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
    ```
 
-   Set `STARTFS_VERSION=v1.0.0` to pin a release or `INSTALL_DIR` to change the
-   target. Make sure `~/.local/bin` is on your `PATH` (it is on Omarchy; on Ubuntu and
+   Set `STARTFS_VERSION=v1.0.0` to pin a release, `INSTALL_DIR` to change the
+   target, or `STARTFS_NO_SERVICE=1` to install the unit without starting it. Make sure `~/.local/bin` is on your `PATH` (it is on Omarchy; on Ubuntu and
    Fedora, log out and in again after the directory is first created). `startfs --version`
    shows what is installed.
 
-3. Run it as a systemd user service that mounts `~/StartFS` and restarts after a crash:
-
-   ```sh
-   systemctl --user daemon-reload
-   systemctl --user enable --now startfs.service
-   loginctl enable-linger "$USER"     # start at boot, before you log in
-   ```
+The service is the only step after the install: check it with
+`systemctl --user status startfs`.
 
 To try it by hand instead: `startfs daemon --mount ~/StartFS`.
 
@@ -98,15 +94,16 @@ install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
 
 On the first machine:
 
+The daemon is already running (the Linux installer starts it; on macOS or a manual
+install, run `startfs daemon --mount ~/StartFS &` first).
+
 ```sh
-startfs daemon --mount ~/StartFS &       # skip this if the service is already enabled
 startfs create --name home --copies 2    # prints a join token
 ```
 
 On each further machine, with the token from above:
 
 ```sh
-startfs daemon --mount ~/StartFS &       # skip this if the service is already enabled
 startfs join <token> --offer 100G        # --offer: space this machine contributes
 ```
 
