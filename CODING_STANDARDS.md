@@ -16,8 +16,13 @@ Read during review, not implementation. Mechanical rules live in CI (`.github/wo
 
 - The harness runs `tick` inside any thread that waits on a peer, so a lock held across a chunk fetch or the wait hook is re-entered by that same thread. Code reachable from `tick` takes such a lock with `try_lock` and skips the round when it is busy.
 
+## Docs
+
+- A change to behaviour, the wire protocol or config updates what describes it: `DESIGN.md` (including its "Not done" lines), the README config table, and `GLOSSARY.md` for a new domain term.
+
 ## Tests
 
 - A test of behaviour goes through the cluster harness: `FsOps`, the daemon control interface, the simulated network and clock. Tests of internals are rejected.
+- A test asserts the bound the spec states; when the code misses it, fix the code, not the assertion.
 - A test of durability fails when the code under test is made eager or lazy the wrong way. `crash` and `restart` keep lazy commits, so they prove nothing about a power cut; observe `has_unsynced` instead.
 - A test that spawns real processes or sockets reads each request fully before replying and polls for readiness. Timing guesses make it flaky under load.
