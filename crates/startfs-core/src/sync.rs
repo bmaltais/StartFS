@@ -79,6 +79,31 @@ impl Syncer {
         }
     }
 
+    /// What every peer not in `except` is known to hold, per origin: the log
+    /// below it can be dropped. `None` while any such peer has not said what
+    /// it holds, or when every peer is excepted (this node is cut off).
+    pub fn held_by_all(&self, except: &[NodeId]) -> Option<Frontier> {
+        let mut all: Option<Frontier> = None;
+        for (_, p) in self.peers.iter().filter(|(id, _)| !except.contains(id)) {
+            let known = p.known.as_ref()?;
+            all = Some(match all {
+                None => known.clone(),
+                Some(mut so_far) => {
+                    so_far.retain(|o, seq| {
+                        *seq = (*seq).min(known.get(o).copied().unwrap_or(0));
+                        *seq > 0
+                    });
+                    so_far
+                }
+            });
+        }
+        match (all, self.peers.is_empty()) {
+            (Some(f), _) => Some(f),
+            (None, true) => self.fs.frontier().ok(),
+            (None, false) => None,
+        }
+    }
+
     /// Whether every peer not in `except` is known to hold all of our log.
     pub fn peers_have_our_log(&self, except: &[NodeId]) -> bool {
         let Ok(ours) = self.fs.frontier() else {

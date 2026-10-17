@@ -246,3 +246,24 @@ fn the_scrub_waits_while_replication_has_work_to_do() {
     c.sync();
     assert_eq!(c.control(0).status().unwrap().scrub.state, ScrubState::Idle);
 }
+
+#[test]
+fn the_log_stays_bounded_however_much_is_written() {
+    let c = cluster(2, 3);
+    let f = put(&c.fs(0), "busy", b"v0");
+    for i in 0..200 {
+        c.fs(i % 3).write(f, 0, format!("v{i}").as_bytes()).unwrap();
+        c.sync();
+    }
+    let log = |c: &Cluster, i| c.control(i).status().unwrap().log.entries;
+    assert!(log(&c, 0) > 200);
+
+    pass(&c, 2 * HOUR, Duration::from_secs(1800));
+    for i in 0..3 {
+        assert!(log(&c, i) < 10, "node {i}: {}", log(&c, i));
+    }
+    // Compaction loses nothing.
+    let last = c.fs(1).read(f, 0, u32::MAX).unwrap();
+    assert_eq!(last, b"v199");
+    assert_eq!(c.fs(2).read(f, 0, u32::MAX).unwrap(), b"v199");
+}

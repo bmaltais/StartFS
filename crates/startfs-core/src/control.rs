@@ -159,6 +159,13 @@ pub struct ScrubStatus {
     pub healing: u32,
 }
 
+/// How much metadata history this node keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogStatus {
+    /// Operation log entries not yet compacted away.
+    pub entries: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// `None` until a filesystem is created or joined.
@@ -182,6 +189,7 @@ pub struct Status {
     /// Re-replication under way on this node, if any.
     pub repair: Option<Repair>,
     pub scrub: ScrubStatus,
+    pub log: LogStatus,
     /// Things the user should know: redundancy that cannot be met, full nodes.
     pub warnings: Vec<String>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).

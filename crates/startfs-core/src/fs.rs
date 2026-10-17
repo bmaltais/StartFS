@@ -33,9 +33,12 @@ const FRONTIER: TableDefinition<u32, u64> = TableDefinition::new("frontier");
 const OBJECTS: TableDefinition<u64, &[u8]> = TableDefinition::new("objects");
 /// Unresolved conflict copies currently visible in the tree.
 const CONFLICTS: TableDefinition<u64, &[u8]> = TableDefinition::new("conflicts");
+/// First log seq still kept per origin; everything below was compacted away.
+const LOGBASE: TableDefinition<u32, u64> = TableDefinition::new("logbase");
 /// Chunks held here that no file references, and when GC first saw them so.
 const ORPHANS: TableDefinition<&[u8], u64> = TableDefinition::new("orphans");
 
+mod compact;
 mod gc;
 mod merge;
 mod replicas;
@@ -110,6 +113,7 @@ pub(crate) struct Tables<'a> {
     objects: Table<'a, u64, &'static [u8]>,
     conflicts: Table<'a, u64, &'static [u8]>,
     orphans: Table<'a, &'static [u8], u64>,
+    logbase: Table<'a, u32, u64>,
 }
 
 impl Tables<'_> {
@@ -293,6 +297,7 @@ impl LocalFs {
                 objects: txn.open_table(OBJECTS).map_err(db)?,
                 conflicts: txn.open_table(CONFLICTS).map_err(db)?,
                 orphans: txn.open_table(ORPHANS).map_err(db)?,
+                logbase: txn.open_table(LOGBASE).map_err(db)?,
             };
             f(&mut t)
         };

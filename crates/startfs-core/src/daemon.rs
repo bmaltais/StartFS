@@ -8,7 +8,7 @@ use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::control::{
-    FilesystemInfo, MemberStatus, NodeState, Request, Response, Staging, Status, Usage,
+    FilesystemInfo, LogStatus, MemberStatus, NodeState, Request, Response, Staging, Status, Usage,
 };
 use crate::fs::{ChunkSource, LocalFs, NodeConfig};
 use crate::members::{Member, Membership, Token};
@@ -34,6 +34,9 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 const WAIT_ROUNDS: usize = 300;
 
 /// A member not heard from for this long is shown as down.
+/// How often the operation log is compacted.
+const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 /// How often the garbage collector looks for orphaned chunks.
 const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
@@ -57,6 +60,7 @@ pub struct Daemon {
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
     last_gc: Mutex<Option<Nanos>>,
+    last_compact: Mutex<Option<Nanos>>,
     /// When this daemon started: how long a never-heard member has been unseen.
     started: Nanos,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
@@ -110,6 +114,7 @@ impl Daemon {
                 heard: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
                 last_gc: Mutex::new(None),
+                last_compact: Mutex::new(None),
                 started,
                 wait: Mutex::new(Arc::new(|| {
                     std::thread::sleep(std::time::Duration::from_millis(10))
@@ -194,11 +199,42 @@ impl Daemon {
             .unwrap_or(false);
         busy |= self.finish_leaving(&*transport);
         busy |= self.collect_garbage();
+        busy |= self.compact_log();
         if !busy {
             // The scrub only gets the disk when nothing else wants it.
             busy |= self.scrub();
         }
         busy
+    }
+
+    /// Drop log entries that every member still around already holds.
+    fn compact_log(&self) -> bool {
+        let now = self.clock.now();
+        let mut last = self.last_compact.lock().unwrap();
+        if last.is_some_and(|t| now.saturating_sub(t) < COMPACT_INTERVAL.as_nanos() as u64) {
+            return false;
+        }
+        let gone: Vec<NodeId> = self
+            .with_view(|v| {
+                v.members
+                    .iter()
+                    .filter(|m| v.lost.contains(&m.id))
+                    .map(|m| m.endpoint)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let held = self
+            .syncer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.held_by_all(&gone));
+        let Some(held) = held else {
+            return false;
+        };
+        *last = Some(now);
+        let _ = self.fs.compact(&held);
+        false
     }
 
     /// Check some replicas if the scrub is due; corrupt ones are deleted and
@@ -683,6 +719,9 @@ impl Daemon {
                     usable_bytes,
                     unreplicated,
                     repair,
+                    log: LogStatus {
+                        entries: self.fs.log_len().unwrap_or(0),
+                    },
                     scrub: self.scrubber.status(
                         now,
                         Duration::from_secs(self.config.scrub_period_secs),
