@@ -2,10 +2,11 @@
 
 use startfs_core::clock::SystemClock;
 use startfs_core::config::Config;
-use startfs_core::control::{self, Client, NodeState, Status, Tier};
+use startfs_core::control::{self, Client, NodeState, ScrubState, Status, Tier};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::net::NodeId;
+use startfs_core::power::SystemPower;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
@@ -186,6 +187,7 @@ fn daemon(
         tailnet_address(),
     )
     .map_err(|e| e.to_string())?;
+    d.set_power_source(Arc::new(SystemPower));
     let server = control::serve(d, socket)
         .map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
     server.wait();
@@ -265,6 +267,23 @@ fn render(s: &Status) -> String {
             r.at_risk, r.degraded
         ));
     }
+    let scrub = match s.scrub.state {
+        ScrubState::Idle => "idle".to_string(),
+        ScrubState::Running => format!("running, {} replicas to check", s.scrub.remaining),
+        ScrubState::PausedOnBattery => "paused while on battery power".to_string(),
+    };
+    out.push_str(&format!("scrub: {scrub}"));
+    if s.scrub.healing > 0 {
+        out.push_str(&format!(
+            ", {} corrupt replicas being re-fetched",
+            s.scrub.healing
+        ));
+    }
+    out.push('\n');
+    out.push_str(&format!(
+        "metadata log: {} entries, {} objects\n",
+        s.log.entries, s.log.objects
+    ));
     for w in &s.warnings {
         out.push_str(&format!("warning: {w}\n"));
     }

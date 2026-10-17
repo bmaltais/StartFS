@@ -77,6 +77,12 @@ impl Object {
     }
 }
 
+/// What a peer needs to catch up with our log.
+pub enum CatchUp {
+    Entries(Vec<Entry>),
+    State(StateTransfer),
+}
+
 /// An unresolved conflict copy, as shown by `status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictCopy {
@@ -306,38 +312,36 @@ impl LocalFs {
         }
     }
 
-    /// Whether a peer holding `have` lacks log entries that were compacted away,
-    /// so it needs a [`StateTransfer`] rather than entries.
-    pub fn needs_state(&self, have: &Frontier) -> FsResult<bool> {
+    /// What a peer holding `have` needs to catch up: the entries it lacks, or,
+    /// when some of those were compacted away, a copy of our merge state.
+    pub fn catch_up(&self, have: &Frontier, limit: usize) -> FsResult<CatchUp> {
         self.run(false, |t| {
             for row in t.logbase.iter().map_err(db)? {
                 let (origin, base) = row.map_err(db)?;
                 if have.get(&origin.value()).copied().unwrap_or(0) < base.value() {
-                    return Ok(true);
+                    return Ok(CatchUp::State(self.state_in(t)?));
                 }
             }
-            Ok(false)
+            Ok(CatchUp::Entries(Self::entries_in(t, have, limit)?))
         })
     }
 
     /// A copy of this node's merge state, as of its whole log.
-    pub fn state_transfer(&self) -> FsResult<StateTransfer> {
-        self.run(false, |t| {
-            let mut frontier = Frontier::new();
-            for row in t.frontier.iter().map_err(db)? {
-                let (k, v) = row.map_err(db)?;
-                frontier.insert(k.value(), v.value());
-            }
-            let mut objects = Vec::new();
-            for row in t.objects.iter().map_err(db)? {
-                let (k, v) = row.map_err(db)?;
-                objects.push((k.value(), v.value().to_vec()));
-            }
-            Ok(StateTransfer {
-                frontier,
-                hlc: *self.hlc.lock().unwrap(),
-                objects,
-            })
+    fn state_in(&self, t: &Tables<'_>) -> FsResult<StateTransfer> {
+        let mut frontier = Frontier::new();
+        for row in t.frontier.iter().map_err(db)? {
+            let (k, v) = row.map_err(db)?;
+            frontier.insert(k.value(), v.value());
+        }
+        let mut objects = Vec::new();
+        for row in t.objects.iter().map_err(db)? {
+            let (k, v) = row.map_err(db)?;
+            objects.push((k.value(), v.value().to_vec()));
+        }
+        Ok(StateTransfer {
+            frontier,
+            hlc: *self.hlc.lock().unwrap(),
+            objects,
         })
     }
 
@@ -391,25 +395,23 @@ impl LocalFs {
     }
 
     /// Entries a peer holding `have` lacks, in per-origin order, at most `limit`.
-    pub fn entries_since(&self, have: &Frontier, limit: usize) -> FsResult<Vec<Entry>> {
-        self.run(false, |t| {
-            let mut out = Vec::new();
-            for row in t.frontier.iter().map_err(db)? {
-                let origin = row.map_err(db)?.0.value();
-                let from = have.get(&origin).copied().unwrap_or(0);
-                for row in t
-                    .log
-                    .range((origin, from)..=(origin, u64::MAX))
-                    .map_err(db)?
-                {
-                    if out.len() >= limit {
-                        return Ok(out);
-                    }
-                    out.push(dec(row.map_err(db)?.1.value())?);
+    fn entries_in(t: &Tables<'_>, have: &Frontier, limit: usize) -> FsResult<Vec<Entry>> {
+        let mut out = Vec::new();
+        for row in t.frontier.iter().map_err(db)? {
+            let origin = row.map_err(db)?.0.value();
+            let from = have.get(&origin).copied().unwrap_or(0);
+            for row in t
+                .log
+                .range((origin, from)..=(origin, u64::MAX))
+                .map_err(db)?
+            {
+                if out.len() >= limit {
+                    return Ok(out);
                 }
+                out.push(dec(row.map_err(db)?.1.value())?);
             }
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 
     /// Apply entries received from a peer; returns how many were new.

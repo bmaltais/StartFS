@@ -102,6 +102,22 @@ same code with a different membership scope.
     joining again with a new token and pulling the metadata log and chunks (full metadata is on every
     node, chunks on N nodes). The dead node is removed and repair restores N copies.
 
+## Background maintenance (as built)
+
+- **GC:** a pass every 10 minutes looks at what the visible tree references. A chunk (replica or
+  staged) unreferenced for the retention period (`gc_retention_secs`, fixed per filesystem at
+  creation, default 7 days) is removed. "Unreferenced since" is when this node first saw it so,
+  persisted across restarts, so a node that was away re-waits a full period after catching up.
+- **Scrub:** one pass per `scrub_period_secs` (default 30 days), a few replicas per daemon tick, only
+  when the tick had no other work, paused on battery power. A corrupt replica is deleted and the
+  node asks other members for the chunk until one supplies it (the replicator's heal path).
+- **Log compaction:** hourly, entries every non-lost peer has itself reported holding are dropped.
+  A peer that missed dropped entries is sent a copy of the merge registers instead, which it joins
+  into its own. Superseded-version bookkeeping and tombstones are only purged when every member,
+  lost ones included, has reported the same frontier; a member that is gone for good has to be
+  removed to unblock that. A node offline longer than the retention period is not otherwise
+  special: its state joins in like any other.
+
 ## Future: personal (group-of-1) scope
 
 Not in v1. Needs:

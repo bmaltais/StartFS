@@ -10,12 +10,12 @@ use redb::ReadableTableMetadata;
 impl LocalFs {
     /// Entries currently kept in the log.
     pub fn log_len(&self) -> FsResult<u64> {
-        self.run(false, |t| Ok(t.log.len().map_err(db)?))
+        self.run(false, |t| t.log.len().map_err(db))
     }
 
     /// Objects whose merge state is kept.
     pub fn object_count(&self) -> FsResult<u64> {
-        self.run(false, |t| Ok(t.objects.len().map_err(db)?))
+        self.run(false, |t| t.objects.len().map_err(db))
     }
 
     /// Drop log entries below `upto` (per origin, never beyond what this node

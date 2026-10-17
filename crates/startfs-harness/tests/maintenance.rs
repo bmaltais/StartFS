@@ -180,7 +180,10 @@ fn scrub_pauses_on_battery_power_and_carries_on_when_plugged_in() {
     );
     c.network()
         .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
-    assert!(c.fs(0).read(ino, 0, u32::MAX).is_err(), "scrubbed on battery");
+    assert!(
+        c.fs(0).read(ino, 0, u32::MAX).is_err(),
+        "scrubbed on battery"
+    );
     c.network().heal();
 
     c.set_on_battery(0, false);
@@ -225,7 +228,11 @@ fn a_scrub_pass_is_spread_over_many_rounds() {
     c.sync();
     let done = c.control(0).status().unwrap().scrub;
     assert_eq!(done.state, ScrubState::Idle);
-    assert!(done.last_pass > before, "{before:?} -> {:?}", done.last_pass);
+    assert!(
+        done.last_pass > before,
+        "{before:?} -> {:?}",
+        done.last_pass
+    );
 }
 
 #[test]

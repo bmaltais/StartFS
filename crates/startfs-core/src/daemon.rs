@@ -13,9 +13,9 @@ use crate::control::{
 use crate::fs::{ChunkSource, LocalFs, NodeConfig};
 use crate::members::{Member, Membership, Token};
 use crate::net::{NodeId, Transport};
-use crate::power::{MainsPower, PowerSource};
 use crate::ops::Nanos;
 use crate::ops::{FsOps, FsResult};
+use crate::power::{MainsPower, PowerSource};
 use crate::protocol::{Message, Replica};
 use crate::replication::{Replicator, View};
 use crate::scrub::Scrubber;
@@ -242,7 +242,8 @@ impl Daemon {
     /// fetched afresh from another replica holder.
     fn scrub(&self) -> bool {
         let period = Duration::from_secs(self.config.scrub_period_secs);
-        let step = self.scrubber
+        let step = self
+            .scrubber
             .step(self.clock.now(), period, self.on_battery());
         for id in step.corrupt {
             self.fs.drop_replica(&id);

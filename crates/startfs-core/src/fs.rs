@@ -44,7 +44,7 @@ mod merge;
 mod replicas;
 mod scrub;
 pub use gc::GcReport;
-pub use merge::ConflictCopy;
+pub use merge::{CatchUp, ConflictCopy};
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {

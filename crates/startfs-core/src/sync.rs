@@ -6,7 +6,7 @@
 //! any leader or quorum.
 
 use crate::clock::Clock;
-use crate::fs::LocalFs;
+use crate::fs::{CatchUp, LocalFs};
 use crate::net::{NodeId, Transport};
 use crate::oplog::Frontier;
 use crate::ops::Nanos;
@@ -163,18 +163,17 @@ impl Syncer {
             let Some(known) = self.peers[&id].known.clone() else {
                 continue;
             };
-            // Entries the peer misses may be compacted away: send our state instead.
-            if self.fs.needs_state(&known).unwrap_or(false) {
-                if let Ok(state) = self.fs.state_transfer() {
+            let entries = match self.fs.catch_up(&known, BATCH) {
+                Ok(CatchUp::Entries(entries)) => entries,
+                // What the peer misses was compacted away: send our state instead.
+                Ok(CatchUp::State(state)) => {
                     let p = self.peers.get_mut(&id).expect("known peer");
                     p.known = Some(state.frontier.clone());
                     self.send(id, &Message::State(state));
                     busy = true;
+                    continue;
                 }
-                continue;
-            }
-            let Ok(entries) = self.fs.entries_since(&known, BATCH) else {
-                continue;
+                Err(_) => continue,
             };
             if entries.is_empty() {
                 continue;

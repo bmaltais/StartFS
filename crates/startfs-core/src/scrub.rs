@@ -16,6 +16,8 @@ const CHUNKS_PER_STEP: usize = 8;
 
 #[derive(Default)]
 struct State {
+    /// When the last full pass finished (read from disk once).
+    last_done: Option<Option<Nanos>>,
     /// Replicas still to check in the pass under way.
     queue: Option<VecDeque<ChunkId>>,
 }
@@ -42,6 +44,16 @@ impl Scrubber {
         }
     }
 
+    fn last_done(&self, st: &mut State) -> Option<Nanos> {
+        *st.last_done
+            .get_or_insert_with(|| self.fs.scrub_last_done())
+    }
+
+    fn finish_pass(&self, st: &mut State, now: Nanos) {
+        st.last_done = Some(Some(now));
+        self.fs.set_scrub_done(now);
+    }
+
     pub fn status(
         &self,
         now: Nanos,
@@ -57,7 +69,7 @@ impl Scrubber {
             .as_ref()
             .map(|q| q.len() as u64);
         let running = remaining.is_some();
-        let last_pass = self.fs.scrub_last_done();
+        let last_pass = self.last_done(&mut self.state.lock().unwrap());
         let next_pass = last_pass.map(|t| t + period.as_nanos() as u64);
         let due = next_pass.is_some_and(|t| t <= now);
         let state = match (running || due, on_battery) {
@@ -81,10 +93,10 @@ impl Scrubber {
         }
         let mut st = self.state.lock().unwrap();
         if st.queue.is_none() {
-            match self.fs.scrub_last_done() {
+            match self.last_done(&mut st) {
                 // The first pass is one period after the node first ran.
                 None => {
-                    self.fs.set_scrub_done(now);
+                    self.finish_pass(&mut st, now);
                     return Step::default();
                 }
                 Some(last) if now.saturating_sub(last) < period.as_nanos() as u64 => {
@@ -108,7 +120,7 @@ impl Scrubber {
         }
         if queue.is_empty() {
             st.queue = None;
-            self.fs.set_scrub_done(now);
+            self.finish_pass(&mut st, now);
         }
         step
     }
