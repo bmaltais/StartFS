@@ -19,3 +19,20 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # The macOS adapter has never been run; this only shows whether it still builds.
+  macos-build:
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install FUSE-T
+        run: |
+          brew tap macos-fuse-t/homebrew-cask
+          brew install --cask fuse-t
+          brew install pkg-config
+          find /usr/local /opt/homebrew -name '*fuse*.pc' 2>/dev/null
+          ls /usr/local/include 2>/dev/null | grep -i fuse
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p startfs
