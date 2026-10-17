@@ -5,9 +5,9 @@ use crate::config::Config;
 use crate::control::{FilesystemInfo, NodeState, Request, Response, Status, Usage};
 use crate::fs::{LocalFs, NodeConfig};
 use crate::net::{NodeId, Transport};
-use crate::sync::Syncer;
 use crate::ops::FsOps;
 use crate::ops::FsResult;
+use crate::sync::Syncer;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -64,7 +64,11 @@ impl Daemon {
 
     /// One round of background work: returns whether anything happened.
     pub fn tick(&self) -> bool {
-        self.syncer.lock().unwrap().as_mut().is_some_and(Syncer::tick)
+        self.syncer
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(Syncer::tick)
     }
 
     pub fn handle(&self, req: Request) -> Response {

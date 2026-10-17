@@ -155,6 +155,15 @@ fn render(s: &Status) -> String {
         s.nodes,
         if s.nodes == 1 { "" } else { "s" }
     ));
+    if !s.conflicts.is_empty() {
+        out.push_str(&format!(
+            "conflicts: {} (delete a copy to resolve it)\n",
+            s.conflicts.len()
+        ));
+        for c in &s.conflicts {
+            out.push_str(&format!("  {}\n", c.path));
+        }
+    }
     out
 }
 

@@ -109,7 +109,11 @@ fn conflicting_writes_keep_the_newest_and_save_the_loser_as_a_named_copy() {
     let c = conflicting_writes();
     for i in 0..2 {
         let fs = c.fs(i);
-        assert_eq!(names(&fs, ROOT_INO), [CONFLICT_FROM_A, "report.txt"], "node {i}");
+        assert_eq!(
+            names(&fs, ROOT_INO),
+            [CONFLICT_FROM_A, "report.txt"],
+            "node {i}"
+        );
         let winner = fs.lookup(ROOT_INO, "report.txt").unwrap();
         assert_eq!(read_all(&fs, winner.ino), b"from b");
         let copy = fs.lookup(ROOT_INO, CONFLICT_FROM_A).unwrap();
@@ -135,7 +139,10 @@ fn deleting_a_conflict_copy_resolves_it_everywhere() {
     c.sync();
     for i in 0..2 {
         assert_eq!(names(&c.fs(i), ROOT_INO), ["report.txt"], "node {i}");
-        assert!(c.control(i).status().unwrap().conflicts.is_empty(), "node {i}");
+        assert!(
+            c.control(i).status().unwrap().conflicts.is_empty(),
+            "node {i}"
+        );
     }
     // Later activity does not resurrect it.
     let f = c.fs(1).lookup(ROOT_INO, "report.txt").unwrap();
@@ -306,7 +313,11 @@ fn files_created_with_the_same_name_keep_the_newest_and_a_conflict_copy() {
     for i in 0..2 {
         let fs = c.fs(i);
         let copy = "notes (conflict from node0 20231114-221330).txt";
-        assert_eq!(names(&fs, ROOT_INO), ["docs", copy, "notes.txt"], "node {i}");
+        assert_eq!(
+            names(&fs, ROOT_INO),
+            ["docs", copy, "notes.txt"],
+            "node {i}"
+        );
         let win = fs.lookup(ROOT_INO, "notes.txt").unwrap();
         assert_eq!(read_all(&fs, win.ino), b"b's notes");
         let lose = fs.lookup(ROOT_INO, copy).unwrap();
@@ -325,4 +336,108 @@ fn directories_created_with_the_same_name_are_merged() {
         let d = fs.lookup(ROOT_INO, "docs").unwrap();
         assert_eq!(names(&fs, d.ino), ["from-a", "from-b"], "node {i}");
     }
+}
+
+#[test]
+fn offline_edits_survive_a_crash_and_merge_after_restart() {
+    let c = pair();
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    let f = c.fs(0).create(ROOT_INO, "offline", 0o644).unwrap();
+    c.fs(0)
+        .write(f.ino, 0, b"written before the crash")
+        .unwrap();
+    c.fs(1).create(ROOT_INO, "other", 0o644).unwrap();
+    c.crash(0);
+    c.restart(0);
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+
+    for i in 0..2 {
+        assert_eq!(names(&c.fs(i), ROOT_INO), ["offline", "other"], "node {i}");
+    }
+    let on_b = c.fs(1).lookup(ROOT_INO, "offline").unwrap();
+    assert_eq!(read_all(&c.fs(1), on_b.ino), b"written before the crash");
+}
+
+#[test]
+fn a_node_that_was_down_catches_up_when_it_restarts() {
+    let c = pair();
+    c.crash(1);
+    let f = c.fs(0).create(ROOT_INO, "while-down", 0o644).unwrap();
+    c.fs(0).write(f.ino, 0, b"missed").unwrap();
+    c.sync();
+    c.restart(1);
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    let on_b = c.fs(1).lookup(ROOT_INO, "while-down").unwrap();
+    assert_eq!(read_all(&c.fs(1), on_b.ino), b"missed");
+}
+
+#[test]
+fn three_nodes_converge_without_quorum_even_with_one_cut_off() {
+    let (a, b, z) = (NodeId(0), NodeId(1), NodeId(2));
+    let c = Cluster::start(3);
+    c.control(0).create("home", 3).unwrap();
+    c.peer_all();
+    // Node 2 is isolated: the other two still accept writes and agree.
+    c.network().partition(&[&[a, b], &[z]]);
+    c.fs(0).create(ROOT_INO, "one", 0o644).unwrap();
+    c.fs(1).create(ROOT_INO, "two", 0o644).unwrap();
+    c.fs(2).create(ROOT_INO, "three", 0o644).unwrap();
+    c.sync();
+    assert_eq!(names(&c.fs(0), ROOT_INO), ["one", "two"]);
+    assert_eq!(names(&c.fs(1), ROOT_INO), ["one", "two"]);
+    assert_eq!(names(&c.fs(2), ROOT_INO), ["three"]);
+
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    for i in 0..3 {
+        assert_eq!(
+            names(&c.fs(i), ROOT_INO),
+            ["one", "three", "two"],
+            "node {i}"
+        );
+    }
+}
+
+#[test]
+fn entries_are_relayed_between_nodes_that_cannot_reach_each_other() {
+    let c = Cluster::start(3);
+    c.control(0).create("home", 3).unwrap();
+    c.peer_all();
+    c.network().set_drop(NodeId(0), NodeId(2), true);
+    c.fs(0).create(ROOT_INO, "relayed", 0o644).unwrap();
+    c.sync();
+    assert_eq!(names(&c.fs(2), ROOT_INO), ["relayed"]);
+}
+
+#[test]
+fn metadata_changes_propagate() {
+    let c = pair();
+    let (a, b) = (c.fs(0), c.fs(1));
+    let f = a.create(ROOT_INO, "f", 0o644).unwrap();
+    a.write(f.ino, 0, b"0123456789").unwrap();
+    c.sync();
+    c.advance(Duration::from_secs(1));
+    a.setattr(
+        f.ino,
+        SetAttr {
+            mode: Some(0o600),
+            size: Some(4),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    a.setxattr(f.ino, "user.tag", b"blue").unwrap();
+    c.sync();
+    let on_b = b.lookup(ROOT_INO, "f").unwrap();
+    assert_eq!(on_b.mode, 0o600);
+    assert_eq!(read_all(&b, on_b.ino), b"0123");
+    assert_eq!(b.getxattr(on_b.ino, "user.tag").unwrap(), b"blue");
+    c.advance(Duration::from_secs(1));
+    a.removexattr(f.ino, "user.tag").unwrap();
+    c.sync();
+    assert_eq!(b.getxattr(on_b.ino, "user.tag"), Err(FsError::NoData));
 }

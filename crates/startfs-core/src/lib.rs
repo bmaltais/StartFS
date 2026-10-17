@@ -6,6 +6,6 @@ pub mod control;
 pub mod daemon;
 pub mod fs;
 pub mod net;
-pub mod ops;
 pub mod oplog;
+pub mod ops;
 pub mod sync;

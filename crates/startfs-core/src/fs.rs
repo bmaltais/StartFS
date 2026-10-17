@@ -185,8 +185,16 @@ impl LocalFs {
             hlc: Mutex::new(Hlc::ZERO),
         };
         fs.run(true, |t| {
-            let wall = t.counters.get("hlc_wall").map_err(db)?.map_or(0, |g| g.value());
-            let counter = t.counters.get("hlc_counter").map_err(db)?.map_or(0, |g| g.value());
+            let wall = t
+                .counters
+                .get("hlc_wall")
+                .map_err(db)?
+                .map_or(0, |g| g.value());
+            let counter = t
+                .counters
+                .get("hlc_counter")
+                .map_err(db)?
+                .map_or(0, |g| g.value());
             *fs.hlc.lock().unwrap() = Hlc {
                 wall,
                 counter: counter as u32,
@@ -397,6 +405,7 @@ impl FsOps for LocalFs {
             // uid/gid are accepted but ownership stays mapped to the local user.
             i.ctime = now;
             t.put(ino, &i)?;
+            self.emit_set(t, ino, &i)?;
             Ok(self.attr(ino, &i))
         })
     }
@@ -600,7 +609,8 @@ impl FsOps for LocalFs {
             let mut i = t.inode(ino)?;
             i.xattrs.insert(name.to_string(), value.to_vec());
             i.ctime = self.clock.now();
-            t.put(ino, &i)
+            t.put(ino, &i)?;
+            self.emit_set(t, ino, &i)
         })
     }
 
@@ -629,7 +639,8 @@ impl FsOps for LocalFs {
             let mut i = t.inode(ino)?;
             i.xattrs.remove(name).ok_or(FsError::NoData)?;
             i.ctime = self.clock.now();
-            t.put(ino, &i)
+            t.put(ino, &i)?;
+            self.emit_set(t, ino, &i)
         })
     }
 

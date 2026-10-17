@@ -76,7 +76,11 @@ fn conflict_name(name: &str, from: Hlc) -> String {
         Some(i) if i > 0 => name.split_at(i),
         _ => (name, ""),
     };
-    format!("{stem} (conflict from node{} {}){ext}", from.node, stamp(from.wall))
+    format!(
+        "{stem} (conflict from node{} {}){ext}",
+        from.node,
+        stamp(from.wall)
+    )
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC.
@@ -436,7 +440,10 @@ impl LocalFs {
             let sources = std::iter::once(dir).chain(merged.get(&dir).cloned().unwrap_or_default());
             for source in sources {
                 for &idx in by_parent.get(&source).into_iter().flatten() {
-                    groups.entry(placed[idx].name.as_str()).or_default().push(idx);
+                    groups
+                        .entry(placed[idx].name.as_str())
+                        .or_default()
+                        .push(idx);
                 }
             }
             // (index, name to show, whether it is shown as a conflict)
@@ -447,7 +454,10 @@ impl LocalFs {
                 shown.push((winner, name.to_string(), placed[winner].conflict));
                 for &loser in &group[1..] {
                     if placed[winner].kind == FileKind::Dir && placed[loser].kind == FileKind::Dir {
-                        merged.entry(placed[winner].ino).or_default().push(placed[loser].ino);
+                        merged
+                            .entry(placed[winner].ino)
+                            .or_default()
+                            .push(placed[loser].ino);
                         continue;
                     }
                     let mut copy = conflict_name(name, placed[loser].version.hlc);
@@ -479,7 +489,9 @@ impl LocalFs {
                         path: path.clone(),
                         seed: p.seed,
                     };
-                    t.conflicts.insert(p.ino, enc(&rec).as_slice()).map_err(db)?;
+                    t.conflicts
+                        .insert(p.ino, enc(&rec).as_slice())
+                        .map_err(db)?;
                 }
                 if p.kind == FileKind::Dir {
                     paths.insert(p.ino, path);

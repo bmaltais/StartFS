@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 
 /// Hybrid logical clock timestamp. Ordered by wall time, then counter, then
 /// node, so every operation in the filesystem has a unique place in one total order.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct Hlc {
     pub wall: Nanos,
     pub counter: u32,
