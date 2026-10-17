@@ -255,7 +255,7 @@ async fn serve_connection(shared: Arc<Shared>, incoming: quinn::Incoming) {
     match handshake_accept(&shared, &conn, remote).await {
         Ok(()) => {}
         Err(why) => {
-            conn.close(CLOSE_REFUSED.into(), why.to_string().as_bytes());
+            conn.close(CLOSE_REFUSED.into(), why.refusal_text().as_bytes());
             shared.fail(peer, why);
             return;
         }
@@ -289,7 +289,7 @@ async fn handshake_accept(
     };
     let answer = match &verdict {
         Ok(()) => vec![0],
-        Err(why) => [&[1][..], why.to_string().as_bytes()].concat(),
+        Err(why) => [&[1][..], why.refusal_text().as_bytes()].concat(),
     };
     reply.write_all(&answer).await?;
     reply.finish()?;

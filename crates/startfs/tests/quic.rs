@@ -8,6 +8,7 @@
 use startfs::identity::{PeerIdentity, StaticWhois};
 use startfs::quic::QuicTransport;
 use startfs_core::net::{NodeId, Transport};
+use startfs_core::protocol::PROTOCOL_VERSION;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -144,7 +145,14 @@ fn a_peer_speaking_another_protocol_version_fails_with_a_clear_error() {
     let a_at_old = old.resolve(&a.local_addr().to_string()).unwrap();
     old.send(a_at_old, b"hello".to_vec());
     let why = wait_for_error(&old, a_at_old, "protocol version mismatch");
-    assert!(why.contains("speaks version"), "{why}");
+    // Worded from the dialer's side: the peer (a) is older, so the dialer is told to upgrade the peer.
+    let (ours, theirs) = (PROTOCOL_VERSION + 1, PROTOCOL_VERSION);
+    assert!(
+        why.contains(&format!(
+            "the peer speaks version {theirs}, this node speaks version {ours}; upgrade the peer"
+        )),
+        "{why}"
+    );
     assert!(recv_within(&a, Duration::from_millis(300)).is_none());
     // The accepting side says so too.
     wait_for_error(&a, old.local(), "protocol version mismatch");

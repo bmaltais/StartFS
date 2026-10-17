@@ -29,7 +29,8 @@ pub enum Error {
     #[error("not a StartFS peer")]
     NotAPeer,
     #[error(
-        "protocol version mismatch: the peer speaks version {theirs}, this node speaks version {ours}"
+        "protocol version mismatch: the peer speaks version {theirs}, this node speaks version {ours}; {}",
+        startfs_core::protocol::upgrade_hint(*ours, *theirs)
     )]
     VersionMismatch { ours: u8, theirs: u8 },
     #[error("empty handshake answer")]
@@ -70,4 +71,19 @@ pub enum Error {
     },
     #[error(transparent)]
     Unmount(std::io::Error),
+}
+
+impl Error {
+    /// This refusal worded for the node that was refused. A version mismatch names "the
+    /// peer" and "this node" from the reader's side, so the refuser swaps them.
+    pub(crate) fn refusal_text(&self) -> String {
+        match self {
+            Error::VersionMismatch { ours, theirs } => Error::VersionMismatch {
+                ours: *theirs,
+                theirs: *ours,
+            }
+            .to_string(),
+            other => other.to_string(),
+        }
+    }
 }

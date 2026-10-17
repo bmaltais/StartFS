@@ -60,11 +60,21 @@ pub enum Replica {
 /// Version of the wire protocol. Bumped whenever messages change shape.
 pub const PROTOCOL_VERSION: u8 = 4;
 
+/// Which side of a version mismatch is behind, in the words of the node reading it.
+pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
+    if theirs > ours {
+        "upgrade this node"
+    } else {
+        "upgrade the peer"
+    }
+}
+
 /// Why a received message could not be understood.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     #[error(
-        "protocol version mismatch: the peer speaks version {theirs}, this node speaks version {ours}"
+        "protocol version mismatch: the peer speaks version {theirs}, this node speaks version {ours}; {}",
+        upgrade_hint(*ours, *theirs)
     )]
     VersionMismatch { ours: u8, theirs: u8 },
     #[error("malformed message")]
