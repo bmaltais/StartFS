@@ -89,6 +89,10 @@ pub struct MemberStatus {
     pub offer_bytes: u64,
     /// Whether this is the node answering.
     pub is_self: bool,
+    /// Why this node cannot reach the member, when it is not up (for example a protocol
+    /// version mismatch).
+    #[serde(default)]
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

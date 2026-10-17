@@ -115,7 +115,11 @@ fn version_flag_prints_the_crate_version_without_a_daemon() {
     assert!(out.status.success());
     assert_eq!(
         stdout(&out).trim(),
-        format!("startfs {}", env!("CARGO_PKG_VERSION"))
+        format!(
+            "startfs {} (protocol {})",
+            env!("CARGO_PKG_VERSION"),
+            startfs_core::protocol::PROTOCOL_VERSION
+        )
     );
 }
 

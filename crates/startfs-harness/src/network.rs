@@ -23,6 +23,8 @@ struct State {
     down: HashSet<NodeId>,
     /// `host:port` addresses nodes listen on.
     addrs: HashMap<String, NodeId>,
+    /// Why `(from, to)` cannot connect, as the transport would report it.
+    errors: HashMap<(NodeId, NodeId), String>,
     /// Every message that was sent over a working link, oldest first.
     traffic: Vec<(NodeId, NodeId, Vec<u8>)>,
 }
@@ -91,6 +93,15 @@ impl SimNetwork {
         }
     }
 
+    /// Make `from` report `why` as the reason it cannot reach `to` (`None` clears it).
+    pub fn set_error(&self, from: NodeId, to: NodeId, why: Option<&str>) {
+        let mut s = self.state.lock().unwrap();
+        match why {
+            Some(why) => s.errors.insert((from, to), why.into()),
+            None => s.errors.remove(&(from, to)),
+        };
+    }
+
     /// Delay all traffic in both directions between two nodes.
     pub fn set_delay(&self, a: NodeId, b: NodeId, delay: Duration) {
         let mut s = self.state.lock().unwrap();
@@ -144,6 +155,11 @@ impl Transport for SimTransport {
 
     fn local(&self) -> NodeId {
         self.node
+    }
+
+    fn last_error(&self, node: NodeId) -> Option<String> {
+        let s = self.net.state.lock().unwrap();
+        s.errors.get(&(self.node, node)).cloned()
     }
 
     fn resolve(&self, addr: &str) -> Option<NodeId> {

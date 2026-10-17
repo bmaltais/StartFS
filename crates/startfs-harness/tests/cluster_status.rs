@@ -107,6 +107,28 @@ fn a_partitioned_member_makes_the_view_partial_and_is_named() {
 }
 
 #[test]
+fn a_member_that_cannot_connect_is_shown_with_the_reason() {
+    let c = one_storage_node();
+    let why = "protocol version mismatch: the peer speaks version 5, this node speaks version 4; upgrade this node";
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1), NodeId(3)], &[NodeId(2)]]);
+    c.network().set_error(NodeId(3), NodeId(2), Some(why));
+    for _ in 0..4 {
+        gossip(&c);
+    }
+    let members = c.control(3).status().unwrap().members;
+    assert_eq!(members[2].problem.as_deref(), Some(why));
+    assert_eq!(
+        members[1].problem, None,
+        "a reachable member has no problem"
+    );
+    assert_eq!(
+        members[3].problem, None,
+        "this node has no problem with itself"
+    );
+}
+
+#[test]
 fn repair_progress_is_the_same_cluster_wide_total_on_every_node() {
     let c = Cluster::start_with_config(4, "repair_bytes_per_sec = 20000");
     let token = c.control(0).create("home", 2).unwrap();

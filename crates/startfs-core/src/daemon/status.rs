@@ -82,6 +82,7 @@ impl Daemon {
         let now = self.clock.now();
         let heard = self.heard.lock().unwrap();
         let peer_health = self.peer_health.lock().unwrap();
+        let transport = self.transport();
         let mut unheard = Vec::new();
         let members: Vec<MemberStatus> = membership
             .members()
@@ -113,6 +114,11 @@ impl Daemon {
                     },
                     offer_bytes: m.offer_bytes,
                     is_self,
+                    problem: if up {
+                        None
+                    } else {
+                        transport.as_ref().and_then(|t| t.last_error(m.endpoint))
+                    },
                 }
             })
             .collect();

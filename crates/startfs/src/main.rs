@@ -110,7 +110,11 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         }
     }
     if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
-        println!("startfs {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "startfs {} (protocol {})",
+            env!("CARGO_PKG_VERSION"),
+            startfs_core::protocol::PROTOCOL_VERSION
+        );
         return Ok(());
     }
     let data_dir = data_dir.unwrap_or_else(|| home_dir("XDG_DATA_HOME", ".local/share"));
@@ -379,6 +383,9 @@ fn render(s: &Status) -> String {
             human(m.offer_bytes),
             if m.is_self { "  (this node)" } else { "" }
         ));
+        if let Some(why) = &m.problem {
+            out.push_str(&format!("      cannot reach: {why}\n"));
+        }
     }
     if let Some(r) = &s.repair {
         out.push_str(&format!(
