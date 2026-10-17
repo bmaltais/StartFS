@@ -111,3 +111,37 @@ fn the_retention_period_is_configurable() {
     pass(&c, 3 * HOUR, Duration::from_secs(1200));
     assert_eq!(total_replicas(&c), 0);
 }
+
+#[test]
+fn a_stale_node_returning_after_the_reclaim_cannot_resurrect_deleted_data() {
+    let c = cluster(3, 3);
+    put(&c.fs(0), "doomed", &noise(8 * 1024, 7));
+    let keeper_data = noise(8 * 1024, 8);
+    put(&c.fs(0), "keeper", &keeper_data);
+    c.sync();
+    assert_eq!(total_replicas(&c), 6);
+
+    c.crash(2);
+    c.fs(0).unlink(ROOT_INO, "doomed").unwrap();
+    pass(&c, 9 * DAY, 12 * HOUR);
+    assert_eq!(total_replicas(&c), 2, "the live nodes reclaimed the orphan");
+
+    c.restart(2);
+    pass(&c, 2 * HOUR, Duration::from_secs(600));
+    for i in 0..3 {
+        assert_eq!(
+            c.fs(i).lookup(ROOT_INO, "doomed").unwrap_err(),
+            FsError::NotFound,
+            "node {i}"
+        );
+        let k = c.fs(i).lookup(ROOT_INO, "keeper").unwrap();
+        assert_eq!(c.fs(i).read(k.ino, 0, u32::MAX).unwrap(), keeper_data);
+    }
+
+    // Whatever the stale node still held is garbage too, and goes in time.
+    pass(&c, 9 * DAY, 12 * HOUR);
+    assert_eq!(total_replicas(&c), 3);
+    for i in 0..3 {
+        assert!(c.control(i).status().unwrap().unreplicated.is_empty());
+    }
+}
