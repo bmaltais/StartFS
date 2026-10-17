@@ -13,7 +13,7 @@ use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::error::Error;
-use crate::fs::{ChunkSource, LocalFs, NodeConfig};
+use crate::fs::{ChunkSource, GcReport, LocalFs, NodeConfig};
 use crate::members::{Member, MemberId, Membership};
 use crate::net::{NodeId, Transport};
 use crate::ops::FsResult;
@@ -23,7 +23,7 @@ use crate::protocol::{Health, Message};
 use crate::replication::{Replicator, View};
 use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -65,6 +65,8 @@ pub struct Daemon {
     /// The latest replication health each peer gossiped.
     peer_health: Mutex<HashMap<NodeId, Health>>,
     last_gc: Mutex<Option<Nanos>>,
+    /// What garbage collection has done and is waiting on, for `status`.
+    gc: Mutex<GcProgress>,
     last_compact: Mutex<Option<Nanos>>,
     /// When this daemon started: how long a never-heard member has been unseen.
     started: Nanos,
@@ -74,6 +76,23 @@ pub struct Daemon {
     replicator: Replicator,
     scrubber: Scrubber,
     power: Mutex<Arc<dyn PowerSource>>,
+}
+
+/// Garbage collection as `status` reports it.
+#[derive(Default)]
+struct GcProgress {
+    reclaimed_chunks: u64,
+    reclaimed_bytes: u64,
+    last: GcReport,
+}
+
+/// Whether we hold everything `peer` reported holding at or after `since`.
+fn caught_up(synced: &BTreeMap<NodeId, Option<Nanos>>, peer: &NodeId, since: Nanos) -> bool {
+    synced
+        .get(peer)
+        .copied()
+        .flatten()
+        .is_some_and(|t| t >= since)
 }
 
 /// The most the staging area may hold. A node offering space is limited by its
@@ -134,6 +153,7 @@ impl Daemon {
                 last_gossip: Mutex::new(None),
                 peer_health: Mutex::new(HashMap::new()),
                 last_gc: Mutex::new(None),
+                gc: Mutex::new(GcProgress::default()),
                 last_compact: Mutex::new(None),
                 started,
                 wait: Mutex::new(Arc::new(|| {
@@ -297,7 +317,9 @@ impl Daemon {
         step.worked
     }
 
-    /// Reclaim chunks that have been orphaned for the retention period.
+    /// Reclaim chunks that have been orphaned for the retention period, once
+    /// the reclaim gate opens: this node has caught up with every current
+    /// member since the orphan became eligible.
     fn collect_garbage(&self) -> bool {
         let Some(retention) = self
             .membership
@@ -309,15 +331,58 @@ impl Daemon {
             return false;
         };
         let now = self.clock.now();
+        let synced = self.synced_with_peers();
         let mut last = self.last_gc.lock().unwrap();
-        if last.is_some_and(|t| now.saturating_sub(t) < GC_INTERVAL.as_nanos() as u64) {
+        let peers = self.membership.lock().unwrap().peers();
+        // A pass the gate held back runs again as soon as the gate would open for it.
+        let gate_now_open = self
+            .gc
+            .lock()
+            .unwrap()
+            .last
+            .held_since
+            .is_some_and(|since| peers.iter().all(|p| caught_up(&synced, p, since)));
+        let due = last.is_none_or(|t| now.saturating_sub(t) >= GC_INTERVAL.as_nanos() as u64);
+        if !due && !gate_now_open {
             return false;
         }
         *last = Some(now);
-        self.fs
-            .collect_garbage(retention)
-            .is_ok_and(|r| r.reclaimed_chunks > 0)
+        let Ok(report) = self.fs.collect_garbage(retention, |since| {
+            peers.iter().all(|p| caught_up(&synced, p, since))
+        }) else {
+            eprintln!("startfs: garbage collection failed");
+            return false;
+        };
+        let mut gc = self.gc.lock().unwrap();
+        gc.reclaimed_chunks += report.reclaimed_chunks;
+        gc.reclaimed_bytes += report.reclaimed_bytes;
+        gc.last = report;
+        report.reclaimed_chunks > 0
     }
+
+    /// For each peer, when it last reported its own frontier while we held
+    /// everything up to it. A peer the syncer does not know yet is missing.
+    fn synced_with_peers(&self) -> BTreeMap<NodeId, Option<Nanos>> {
+        self.syncer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(Syncer::synced_with)
+            .unwrap_or_default()
+    }
+
+    /// The members the reclaim gate is waiting on to free orphans eligible since `since`.
+    pub(super) fn gc_waiting_on(&self, since: Nanos) -> Vec<MemberId> {
+        let synced = self.synced_with_peers();
+        let m = self.membership.lock().unwrap();
+        m.members()
+            .into_iter()
+            .filter(|x| m.peers().contains(&x.endpoint))
+            .filter(|x| !caught_up(&synced, &x.endpoint, since))
+            .map(|x| x.id)
+            .collect()
+    }
+
     fn with_view<T>(&self, f: impl FnOnce(&View<'_>) -> T) -> Option<T> {
         let (me, copies, grace, members, offer) = {
             let m = self.membership.lock().unwrap();

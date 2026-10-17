@@ -4,6 +4,10 @@
 //! in the visible tree references is an orphan; it is removed once it has been
 //! an orphan for the retention period. There is no reference counting: each
 //! pass looks at what the tree references right now.
+//!
+//! An eligible orphan is only reclaimed once the reclaim gate opens for it:
+//! the caller vouches that this member has caught up with every other member
+//! since the orphan became eligible, so no re-reference can be pending.
 
 use super::*;
 use std::collections::HashSet;
@@ -17,12 +21,20 @@ pub struct GcReport {
     /// Orphans still waiting out the retention period.
     pub pending_chunks: u64,
     pub pending_bytes: u64,
+    /// When the latest orphan the reclaim gate is holding back became
+    /// eligible; `None` if the gate held nothing back.
+    pub held_since: Option<u64>,
 }
 
 impl LocalFs {
     /// Remove chunks (replicas and staged) that have been unreferenced for
-    /// at least `retention`, as observed by this node.
-    pub fn collect_garbage(&self, retention: Duration) -> FsResult<GcReport> {
+    /// at least `retention`, as observed by this node, and for which
+    /// `gate_open(eligible_at)` holds.
+    pub fn collect_garbage(
+        &self,
+        retention: Duration,
+        gate_open: impl Fn(u64) -> bool,
+    ) -> FsResult<GcReport> {
         let now = self.clock.now();
         let retention = retention.as_nanos() as u64;
         self.run(true, |t| {
@@ -57,7 +69,12 @@ impl LocalFs {
                     continue;
                 }
                 let first = *since.entry(id.to_vec()).or_insert(now);
-                if now.saturating_sub(first) >= retention {
+                let eligible_at = first.saturating_add(retention);
+                let held = now >= eligible_at && !gate_open(eligible_at);
+                if held {
+                    report.held_since = report.held_since.max(Some(eligible_at));
+                }
+                if now >= eligible_at && !held {
                     self.chunks.remove(&id);
                     self.staging.remove(&id);
                     t.orphans.remove(id.as_slice()).map_err(db)?;

@@ -126,7 +126,8 @@ fn a_stale_node_returning_after_the_reclaim_cannot_resurrect_deleted_data() {
     c.crash(2);
     c.fs(0).unlink(ROOT_INO, "doomed").unwrap();
     pass(&c, 9 * DAY, 12 * HOUR);
-    assert_eq!(total_replicas(&c), 2, "the live nodes reclaimed the orphan");
+    // The reclaim gate holds the orphan until node 2 is back and caught up.
+    assert_eq!(total_replicas(&c), 4, "reclaimed while node 2 was away");
 
     c.restart(2);
     pass(&c, 2 * HOUR, Duration::from_secs(600));
@@ -342,4 +343,81 @@ fn deleted_files_leave_no_metadata_behind_once_every_member_has_caught_up() {
         assert!(names(&c.fs(i)).is_empty(), "node {i} resurrected files");
         assert!(objects(&c, i) < 5, "node {i}: {}", objects(&c, i));
     }
+}
+
+/// The members (by id) that node `i` says GC is waiting on.
+fn gc_waiting_on(c: &Cluster, i: usize) -> Vec<startfs_core::members::MemberId> {
+    c.control(i).status().unwrap().gc.waiting_on
+}
+
+fn member_id(c: &Cluster, i: usize) -> startfs_core::members::MemberId {
+    let s = c.control(i).status().unwrap();
+    s.members.iter().find(|m| m.is_self).unwrap().id
+}
+
+#[test]
+fn gc_waits_for_a_partitioned_member_before_reclaiming() {
+    let c = cluster_with(2, 3, "gc_retention_secs = 7200");
+    put(&c.fs(0), "doomed", &noise(8 * 1024, 11));
+    pass(&c, HOUR, Duration::from_secs(1200));
+    let on = |c: &Cluster, i| c.control(i).status().unwrap().usage.chunks;
+    // The chunk is held by two nodes (A and B); the third (C) is cut off.
+    let cut = (0..3)
+        .find(|&i| on(&c, i) == 0)
+        .expect("a node without a copy");
+    let rest: Vec<NodeId> = (0..3)
+        .filter(|&i| i != cut)
+        .map(|i| NodeId(i as u32))
+        .collect();
+    let [a, b] = [rest[0].0 as usize, rest[1].0 as usize];
+    assert_eq!(on(&c, a) + on(&c, b), 2);
+
+    c.network().partition(&[&rest, &[NodeId(cut as u32)]]);
+    c.fs(a).unlink(ROOT_INO, "doomed").unwrap();
+    pass(&c, 3 * HOUR, Duration::from_secs(1200));
+
+    let c_id = member_id(&c, cut);
+    for i in [a, b] {
+        let gc = c.control(i).status().unwrap().gc;
+        assert_eq!(
+            on(&c, i),
+            1,
+            "node {i} reclaimed while node {cut} was cut off"
+        );
+        assert_eq!(gc.pending_chunks, 1, "node {i}");
+        assert_eq!(gc.reclaimed_chunks, 0, "node {i}");
+        assert_eq!(gc_waiting_on(&c, i), vec![c_id], "node {i}");
+    }
+
+    c.network().heal();
+    pass(&c, 3 * HOUR, Duration::from_secs(1200));
+    assert_eq!(total_replicas(&c), 0);
+    for i in [a, b] {
+        let gc = c.control(i).status().unwrap().gc;
+        assert_eq!((gc.reclaimed_chunks, gc.pending_chunks), (1, 0), "node {i}");
+        assert!(gc.waiting_on.is_empty(), "node {i}");
+    }
+}
+
+#[test]
+fn content_rewritten_on_the_far_side_of_a_partition_is_not_lost() {
+    let c = cluster_with(2, 3, "gc_retention_secs = 7200");
+    let data = noise(8 * 1024, 12);
+    put(&c.fs(0), "old", &data);
+    c.sync();
+
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    c.fs(0).unlink(ROOT_INO, "old").unwrap();
+    put(&c.fs(2), "again", &data);
+    pass(&c, 3 * HOUR, Duration::from_secs(1200));
+
+    c.network().heal();
+    pass(&c, 12 * HOUR, Duration::from_secs(1200));
+    for i in 0..3 {
+        let f = c.fs(i).lookup(ROOT_INO, "again").unwrap();
+        assert_eq!(c.fs(i).read(f.ino, 0, u32::MAX).unwrap(), data, "node {i}");
+        assert!(c.control(i).status().unwrap().unreplicated.is_empty());
+    }
+    assert!(total_replicas(&c) >= 2);
 }
