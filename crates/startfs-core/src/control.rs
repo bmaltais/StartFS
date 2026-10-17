@@ -117,6 +117,8 @@ pub struct Status {
     pub nodes: u32,
     /// Best-effort redundancy: min(N, nodes) copies are actually possible.
     pub copies_possible: u32,
+    /// Roughly how much data fits: offered space divided by N.
+    pub usable_bytes: u64,
     /// Files this node wrote that are not yet on N nodes, worst first.
     pub unreplicated: Vec<FileHealth>,
     /// Things the user should know: redundancy that cannot be met, full nodes.
@@ -130,7 +132,7 @@ pub enum Response {
     Created { token: String },
     Joined,
     Done,
-    Status(Status),
+    Status(Box<Status>),
     Error(String),
 }
 
@@ -283,7 +285,7 @@ impl Client {
 
     pub fn status(&self) -> Result<Status, String> {
         match self.call(&Request::Status)? {
-            Response::Status(s) => Ok(s),
+            Response::Status(s) => Ok(*s),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
         }

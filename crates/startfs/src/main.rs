@@ -2,7 +2,7 @@
 
 use startfs_core::clock::SystemClock;
 use startfs_core::config::Config;
-use startfs_core::control::{self, Client, NodeState, Status};
+use startfs_core::control::{self, Client, NodeState, Status, Tier};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::net::NodeId;
@@ -212,6 +212,14 @@ fn render(s: &Status) -> String {
         s.nodes,
         if s.nodes == 1 { "" } else { "s" }
     ));
+    out.push_str(&format!("usable: about {}\n", human(s.usable_bytes)));
+    if s.staging.chunks > 0 {
+        out.push_str(&format!(
+            "staging: {} in {} chunks waiting for replication\n",
+            human(s.staging.bytes),
+            s.staging.chunks
+        ));
+    }
     out.push_str(&format!(
         "cache: {} used of {}\n",
         human(s.cache.used_bytes),
@@ -231,6 +239,27 @@ fn render(s: &Status) -> String {
             human(m.offer_bytes),
             if m.is_self { "  (this node)" } else { "" }
         ));
+    }
+    for w in &s.warnings {
+        out.push_str(&format!("warning: {w}\n"));
+    }
+    if !s.unreplicated.is_empty() {
+        out.push_str(&format!(
+            "not fully replicated: {} file{}\n",
+            s.unreplicated.len(),
+            if s.unreplicated.len() == 1 { "" } else { "s" }
+        ));
+        for f in &s.unreplicated {
+            let tier = match f.tier {
+                Tier::Healthy => "healthy",
+                Tier::Degraded => "degraded",
+                Tier::AtRisk => "at risk",
+            };
+            out.push_str(&format!(
+                "  {:<8} {} of {} copies  {}\n",
+                tier, f.copies, f.wanted, f.path
+            ));
+        }
     }
     if !s.conflicts.is_empty() {
         out.push_str(&format!(

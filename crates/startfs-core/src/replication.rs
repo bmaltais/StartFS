@@ -60,13 +60,20 @@ struct Track {
     sent: HashMap<u32, Nanos>,
     /// Every node placement allows holds it, yet there are fewer than N.
     settled: bool,
+    /// Some peer has answered about this chunk, so the holders are known.
+    heard: bool,
 }
+
+/// N and each member's (id, offer, revision): what placement depends on.
+type Epoch = (u32, Vec<(u32, u64, u64)>);
 
 #[derive(Default)]
 struct State {
     tracks: BTreeMap<ChunkId, Track>,
     /// Members that turned a chunk away for lack of room; placement skips them.
     full: HashSet<u32>,
+    /// The copies and membership (id, offer, revision) placement last used.
+    epoch: Option<Epoch>,
 }
 
 pub struct Replicator {
@@ -101,6 +108,23 @@ impl Replicator {
     pub fn poll(&self, view: &View<'_>, transport: &dyn Transport) -> bool {
         let mut busy = false;
         let mut st = self.state.lock().unwrap();
+        let epoch = (
+            view.copies,
+            view.members
+                .iter()
+                .map(|m| (m.id, m.offer_bytes, m.rev))
+                .collect::<Vec<_>>(),
+        );
+        if st.epoch.as_ref() != Some(&epoch) {
+            // Membership or offers changed: placement may differ, so check
+            // every chunk held here against it.
+            st.epoch = Some(epoch);
+            st.full.clear();
+            st.tracks.clear();
+            for id in self.fs.held().unwrap_or_default() {
+                st.tracks.entry(id).or_default();
+            }
+        }
         self.track_staged(&mut st);
         let ids: Vec<ChunkId> = st.tracks.keys().copied().collect();
         for id in ids {
@@ -120,12 +144,14 @@ impl Replicator {
         if st.tracks[id].settled {
             return false;
         }
-        if !self.fs.has_staged(id) {
+        let staged = self.fs.has_staged(id);
+        if !staged && !self.fs.has_replica(id) {
             st.tracks.remove(id);
             return false;
         }
         let targets = place(id, view.members, view.copies, &st.full);
-        if targets.contains(&view.me)
+        if staged
+            && targets.contains(&view.me)
             && !self.fs.has_replica(id)
             && self.fs.promote(id, view.offer).ok() != Some(Replica::Stored)
         {
@@ -134,7 +160,12 @@ impl Replicator {
             return true;
         }
         let track = st.tracks.get_mut(id).expect("tracked");
-        let have_here = self.fs.has_replica(id);
+        let held = self.fs.has_replica(id);
+        // Of several holders, only the lowest-numbered pushes to targets that
+        // lack the chunk, so a new target is not sent it more than once.
+        let steward = staged
+            || !targets.contains(&view.me)
+            || track.holders.first().is_none_or(|h| view.me < *h);
         for t in &targets {
             if *t == view.me || track.holders.contains(t) {
                 continue;
@@ -149,7 +180,7 @@ impl Replicator {
             if !due {
                 continue;
             }
-            let data = if track.missing.contains(t) {
+            let data = if steward && track.missing.contains(t) {
                 self.fs.local_chunk(id)
             } else {
                 None
@@ -158,14 +189,19 @@ impl Replicator {
             track.sent.insert(*t, view.now);
             busy = true;
         }
-        let replicas = track.holders.len() as u32 + u32::from(have_here);
-        let complete = targets
-            .iter()
-            .all(|t| *t == view.me && have_here || track.holders.contains(t));
-        // Never let go of the staged copy while no replica exists.
-        if complete && replicas > 0 {
+        let complete = !targets.is_empty()
+            && targets
+                .iter()
+                .all(|t| *t == view.me && held || track.holders.contains(t));
+        // Never let go of a copy while no replica exists elsewhere or here.
+        if complete && track.holders.len() + usize::from(held) > 0 {
             self.fs.release(id);
+            // Placement no longer asks this node to hold it: hand-off done.
+            if held && !targets.contains(&view.me) {
+                self.fs.drop_replica(id);
+            }
             busy = true;
+            let replicas = track.holders.len() as u32 + u32::from(self.fs.has_replica(id));
             // With fewer copies than wanted the chunk stays listed as
             // degraded: everything placement allows has been done.
             if replicas >= view.copies {
@@ -202,6 +238,7 @@ impl Replicator {
             return;
         };
         track.sent.remove(&member);
+        track.heard = true;
         match standing {
             Replica::Stored => {
                 track.holders.insert(member);
@@ -226,6 +263,8 @@ impl Replicator {
         let copies: HashMap<ChunkId, u32> = st
             .tracks
             .iter()
+            // A held chunk is only reported once a peer has said how many copies exist.
+            .filter(|(id, t)| t.heard || self.fs.has_staged(id))
             .map(|(id, t)| {
                 // A staged copy only counts while it is the sole copy.
                 let replicas = t.holders.len() as u32 + u32::from(self.fs.has_replica(id));

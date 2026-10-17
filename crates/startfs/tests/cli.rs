@@ -66,7 +66,14 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     assert!(token.trim().starts_with("startfs1-"), "{token}");
 
     let text = stdout(&startfs(data, &["status"]));
-    for needle in ["home", "3 copies", "online", "1 of 3"] {
+    for needle in [
+        "home",
+        "3 copies",
+        "online",
+        "1 of 3",
+        "3 wanted, 1 possible",
+        "usable",
+    ] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
 }

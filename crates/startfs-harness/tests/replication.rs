@@ -218,6 +218,71 @@ fn a_write_survives_a_crash_before_replication_and_replicates_after_restart() {
     assert_eq!(c.control(2).status().unwrap().staging.chunks, 0);
 }
 
+#[test]
+fn a_new_member_takes_over_only_its_share_and_nothing_moves_between_old_members() {
+    // Nodes 0-2 store; node 3 joins later; node 4 is the pure client that writes.
+    let c = Cluster::start(5);
+    let token = c.control(0).create("home", 1).unwrap();
+    for i in [1, 2] {
+        c.control(i).join(&token, None).unwrap();
+    }
+    c.control(4).join(&token, Some(0)).unwrap();
+    for i in 0..120 {
+        put(&c.fs(4), &format!("f{i}"), &noise(8 * 1024, i + 1));
+    }
+    c.sync();
+    let before = replicas(&c);
+    assert_eq!(before[..3].iter().sum::<u64>(), 120, "{before:?}");
+
+    c.control(3).join(&token, None).unwrap();
+    for _ in 0..3 {
+        c.advance(RETRY);
+        c.sync();
+    }
+
+    let after = replicas(&c);
+    assert_eq!(after.iter().sum::<u64>(), 120, "{after:?}");
+    // A quarter of the space is new, so about 30 chunks move, all to node 3.
+    assert!((15..=50).contains(&after[3]), "{after:?}");
+    // Old members only gave chunks away: none took any from another.
+    for i in 0..3 {
+        assert!(after[i] <= before[i], "{before:?} -> {after:?}");
+    }
+}
+
+#[test]
+fn a_node_that_drops_its_offer_to_zero_hands_its_replicas_to_the_others() {
+    let c = cluster(1, &[BIG, BIG, 0]);
+    for i in 0..20 {
+        put(&c.fs(2), &format!("f{i}"), &noise(8 * 1024, i + 1));
+    }
+    c.sync();
+    assert!(replicas(&c)[0] > 0);
+
+    c.control(0).set_offer(0).unwrap();
+    for _ in 0..3 {
+        c.advance(RETRY);
+        c.sync();
+    }
+
+    assert_eq!(replicas(&c), [0, 20, 0]);
+    // Everything is still readable.
+    for i in 0..20 {
+        let ino = c.fs(0).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+        assert_eq!(
+            c.fs(0).read(ino, 0, u32::MAX).unwrap(),
+            noise(8 * 1024, i + 1)
+        );
+    }
+}
+
+#[test]
+fn usable_size_is_the_offered_space_divided_by_the_copies_wanted() {
+    let c = cluster(2, &[4000, 2000, 0]);
+    // Pure clients add nothing; 6000 bytes offered, two copies of everything.
+    assert_eq!(c.control(2).status().unwrap().usable_bytes, 3000);
+}
+
 fn replicas(c: &Cluster) -> Vec<u64> {
     (0..c.node_count())
         .map(|i| c.control(i).status().unwrap().usage.chunks)

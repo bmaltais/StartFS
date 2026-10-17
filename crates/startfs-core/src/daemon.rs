@@ -431,6 +431,10 @@ impl Daemon {
                 let copies_possible = filesystem
                     .as_ref()
                     .map_or(0, |f| f.copies.min(storage_nodes));
+                let offered: u64 = members.iter().map(|m| m.offer_bytes).sum();
+                let usable_bytes = filesystem
+                    .as_ref()
+                    .map_or(0, |f| offered / u64::from(f.copies.max(1)));
                 let mut warnings = Vec::new();
                 for m in &members {
                     if full.contains(&m.id) {
@@ -452,7 +456,7 @@ impl Daemon {
                         if storage_nodes == 1 { "" } else { "s" }
                     ));
                 }
-                Response::Status(Status {
+                Response::Status(Box::new(Status {
                     filesystem,
                     node_state: NodeState::Online,
                     usage: Usage {
@@ -471,13 +475,14 @@ impl Daemon {
                     members,
                     nodes,
                     copies_possible,
+                    usable_bytes,
                     unreplicated,
                     warnings,
                     conflicts: match self.fs.conflicts() {
                         Ok(c) => c,
                         Err(e) => return Response::Error(e.to_string()),
                     },
-                })
+                }))
             }
         }
     }
