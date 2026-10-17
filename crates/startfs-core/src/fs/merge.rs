@@ -392,12 +392,13 @@ impl LocalFs {
             let mut bytes = 0;
             let mut last = true;
             for row in t.objects.range(from..).map_err(db)? {
-                if bytes >= max_bytes {
+                let (k, v) = row.map_err(db)?;
+                let size = std::mem::size_of::<Ino>() + v.value().len();
+                if !objects.is_empty() && bytes + size > max_bytes {
                     last = false;
                     break;
                 }
-                let (k, v) = row.map_err(db)?;
-                bytes += v.value().len();
+                bytes += size;
                 objects.push((k.value(), v.value().to_vec()));
             }
             Ok(StateChunk {

@@ -85,9 +85,9 @@ fn a_node_behind_a_compaction_is_caught_up_in_bounded_messages() {
         .map(|(_, len, _)| len)
         .collect();
     assert!(chunks.len() >= 10, "only {} chunks", chunks.len());
-    // A chunk may overshoot the bound by the one object that crossed it.
+    // The bound covers the objects; the pinned frontier and framing add a little.
     assert!(
-        chunks.iter().all(|len| *len < 2 * CHUNK_BYTES),
+        chunks.iter().all(|len| *len <= CHUNK_BYTES + 256),
         "{chunks:?}"
     );
 }

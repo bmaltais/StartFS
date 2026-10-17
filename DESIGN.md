@@ -127,9 +127,13 @@ same code with a different membership scope.
   when the tick had no other work, paused on battery power. A corrupt replica is deleted and the
   node asks other members for the chunk until one supplies it (the replicator's heal path).
 - **Log compaction:** hourly, entries every non-lost peer has itself reported holding are dropped.
-  A peer that missed dropped entries is sent a copy of the merge registers instead, which it joins
-  into its own. Superseded-version bookkeeping and tombstones are only purged when every member,
-  lost ones included, has reported the same frontier; a member that is gone for good has to be
+  A peer that missed dropped entries is sent the merge registers instead, as a state transfer in
+  bounded `StateChunk`s (`state_chunk_bytes`, 1 MiB by default), one per poll on the ordered metadata
+  stream. The sender pins its frontier when it starts; the receiver joins each chunk's registers as it
+  arrives (idempotent) and moves its frontier only with the last chunk, so a transfer that breaks off
+  never claims history the receiver lacks. If the peer's next `Hello` after the last chunk still shows
+  it behind, the transfer starts over. Superseded-version bookkeeping and tombstones are only purged
+  when every member, lost ones included, has reported the same frontier; a member that is gone for good has to be
   removed to unblock that. A node offline longer than the retention period is not otherwise
   special: its state joins in like any other.
 
@@ -150,7 +154,6 @@ members' addresses reach the transport through `Transport::learn`.
   protocol version byte (`PROTOCOL_VERSION`); a mismatch fails at the handshake and in `Message::decode`.
 - Certificates are throwaway and unchecked; identity is whois only. The `whois_socket` config option
   points at a non-default `tailscaled` socket (macOS needs it set).
-- Not done: a full-state transfer is still one message (bounded by the cap) rather than chunked.
 
 ## Future: personal (group-of-1) scope
 
