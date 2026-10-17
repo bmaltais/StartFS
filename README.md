@@ -23,8 +23,17 @@ cargo build --release
 install -Dm755 target/release/startfs ~/.local/bin/startfs
 ```
 
-To run it as a user service that mounts `~/StartFS` at boot, follow the comments in
-`dist/startfs.service`. To try it by hand: `startfs daemon --mount ~/StartFS`.
+The recommended way to run it is as a systemd user service that mounts `~/StartFS`
+and restarts after a crash:
+
+```sh
+install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
+systemctl --user daemon-reload
+systemctl --user enable --now startfs.service
+loginctl enable-linger "$USER"     # start at boot, before you log in
+```
+
+To try it by hand instead: `startfs daemon --mount ~/StartFS`.
 
 ### macOS (untested)
 
@@ -38,14 +47,14 @@ until someone verifies it.
 On the first machine:
 
 ```sh
-startfs daemon --mount ~/StartFS &       # or enable the service unit
+startfs daemon --mount ~/StartFS &       # skip this if the service is already enabled
 startfs create --name home --copies 2    # prints a join token
 ```
 
 On each further machine, with the token from above:
 
 ```sh
-startfs daemon --mount ~/StartFS &       # or enable the service unit
+startfs daemon --mount ~/StartFS &       # skip this if the service is already enabled
 startfs join <token> --offer 100G        # --offer: space this machine contributes
 ```
 
