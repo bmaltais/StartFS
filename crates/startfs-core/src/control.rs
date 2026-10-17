@@ -119,6 +119,8 @@ pub struct Status {
     pub copies_possible: u32,
     /// Files this node wrote that are not yet on N nodes, worst first.
     pub unreplicated: Vec<FileHealth>,
+    /// Things the user should know: redundancy that cannot be met, full nodes.
+    pub warnings: Vec<String>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).
     pub conflicts: Vec<ConflictCopy>,
 }

@@ -58,11 +58,15 @@ struct Track {
     missing: BTreeSet<u32>,
     /// When we last asked or pushed, per member.
     sent: HashMap<u32, Nanos>,
+    /// Every node placement allows holds it, yet there are fewer than N.
+    settled: bool,
 }
 
 #[derive(Default)]
 struct State {
     tracks: BTreeMap<ChunkId, Track>,
+    /// Members that turned a chunk away for lack of room; placement skips them.
+    full: HashSet<u32>,
 }
 
 pub struct Replicator {
@@ -105,21 +109,31 @@ impl Replicator {
         busy
     }
 
-    fn work(&self, st: &mut State, view: &View<'_>, transport: &dyn Transport, id: &ChunkId) -> bool {
+    fn work(
+        &self,
+        st: &mut State,
+        view: &View<'_>,
+        transport: &dyn Transport,
+        id: &ChunkId,
+    ) -> bool {
         let mut busy = false;
-        let staged = self.fs.has_staged(id);
-        if !staged {
+        if st.tracks[id].settled {
+            return false;
+        }
+        if !self.fs.has_staged(id) {
             st.tracks.remove(id);
             return false;
         }
-        let targets = place(id, view.members, view.copies, &HashSet::new());
-        let track = st.tracks.get_mut(id).expect("tracked");
+        let targets = place(id, view.members, view.copies, &st.full);
         if targets.contains(&view.me)
             && !self.fs.has_replica(id)
             && self.fs.promote(id, view.offer).ok() != Some(Replica::Stored)
         {
-            return false;
+            // No room here: choose again without this node.
+            st.full.insert(view.me);
+            return true;
         }
+        let track = st.tracks.get_mut(id).expect("tracked");
         let have_here = self.fs.has_replica(id);
         for t in &targets {
             if *t == view.me || track.holders.contains(t) {
@@ -144,13 +158,21 @@ impl Replicator {
             track.sent.insert(*t, view.now);
             busy = true;
         }
+        let replicas = track.holders.len() as u32 + u32::from(have_here);
         let complete = targets
             .iter()
             .all(|t| *t == view.me && have_here || track.holders.contains(t));
-        if complete {
+        // Never let go of the staged copy while no replica exists.
+        if complete && replicas > 0 {
             self.fs.release(id);
-            st.tracks.remove(id);
             busy = true;
+            // With fewer copies than wanted the chunk stays listed as
+            // degraded: everything placement allows has been done.
+            if replicas >= view.copies {
+                st.tracks.remove(id);
+            } else {
+                track.settled = true;
+            }
         }
         busy
     }
@@ -173,6 +195,9 @@ impl Replicator {
             return;
         };
         let mut st = self.state.lock().unwrap();
+        if standing == Replica::Full {
+            st.full.insert(member);
+        }
         let Some(track) = st.tracks.get_mut(id) else {
             return;
         };
@@ -189,6 +214,11 @@ impl Replicator {
         }
     }
 
+    /// Members known to be out of room.
+    pub fn full_members(&self) -> HashSet<u32> {
+        self.state.lock().unwrap().full.clone()
+    }
+
     /// Files with a chunk on fewer than `view.copies` nodes, as far as this node knows.
     pub fn unreplicated(&self, view: &View<'_>) -> Vec<FileHealth> {
         let mut st = self.state.lock().unwrap();
@@ -196,7 +226,16 @@ impl Replicator {
         let copies: HashMap<ChunkId, u32> = st
             .tracks
             .iter()
-            .map(|(id, t)| (*id, t.holders.len() as u32 + 1))
+            .map(|(id, t)| {
+                // A staged copy only counts while it is the sole copy.
+                let replicas = t.holders.len() as u32 + u32::from(self.fs.has_replica(id));
+                let copies = if replicas == 0 && self.fs.has_staged(id) {
+                    1
+                } else {
+                    replicas
+                };
+                (*id, copies)
+            })
             .collect();
         let ids: HashSet<ChunkId> = copies.keys().copied().collect();
         let files = self.fs.files_using(&ids).unwrap_or_default();

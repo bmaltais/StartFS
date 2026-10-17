@@ -394,7 +394,7 @@ impl Daemon {
                     .with_view(|v| self.replicator.unreplicated(v))
                     .unwrap_or_default();
                 let membership = self.membership.lock().unwrap();
-                let filesystem =membership.filesystem().cloned();
+                let filesystem = membership.filesystem().cloned();
                 let now = self.clock.now();
                 let heard = self.heard.lock().unwrap();
                 let members: Vec<MemberStatus> = membership
@@ -420,11 +420,37 @@ impl Daemon {
                     })
                     .collect();
                 let nodes = members.len() as u32;
-                // Only members offering space can hold a copy.
-                let storage_nodes = members.iter().filter(|m| m.offer_bytes > 0).count() as u32;
+                // Only members offering space, and with room left, can hold a copy.
+                let full = self.replicator.full_members();
+                let storage_nodes = membership
+                    .members()
+                    .iter()
+                    .filter(|m| m.offer_bytes > 0 && !full.contains(&m.id))
+                    .count() as u32;
                 let copies_possible = filesystem
                     .as_ref()
                     .map_or(0, |f| f.copies.min(storage_nodes));
+                let mut warnings = Vec::new();
+                for m in &members {
+                    if full.contains(&m.id) {
+                        warnings.push(format!(
+                            "{} is full: it cannot take new copies{}",
+                            m.addr,
+                            if m.is_self { " (this node)" } else { "" }
+                        ));
+                    }
+                }
+                if let Some(f) = &filesystem
+                    && copies_possible < f.copies
+                {
+                    warnings.push(format!(
+                        "redundancy: {} wanted, {} possible (only {} node{} can store copies)",
+                        f.copies,
+                        copies_possible,
+                        storage_nodes,
+                        if storage_nodes == 1 { "" } else { "s" }
+                    ));
+                }
                 Response::Status(Status {
                     filesystem,
                     node_state: NodeState::Online,
@@ -445,6 +471,7 @@ impl Daemon {
                     nodes,
                     copies_possible,
                     unreplicated,
+                    warnings,
                     conflicts: match self.fs.conflicts() {
                         Ok(c) => c,
                         Err(e) => return Response::Error(e.to_string()),

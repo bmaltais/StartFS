@@ -36,7 +36,11 @@ impl LocalFs {
     pub fn replica_standing(&self, id: &ChunkId, offer: u64) -> Replica {
         if self.has_replica(id) {
             Replica::Stored
-        } else if self.chunks.stats().map_or(true, |s| s.stored_bytes >= offer) {
+        } else if self
+            .chunks
+            .stats()
+            .map_or(true, |s| s.stored_bytes >= offer)
+        {
             Replica::Full
         } else {
             Replica::Missing
