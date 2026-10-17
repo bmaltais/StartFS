@@ -115,7 +115,7 @@ fn daemon(
         tailnet_address(),
     )
     .map_err(|e| e.to_string())?;
-    let server = control::serve(Arc::new(d), socket)
+    let server = control::serve(d, socket)
         .map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
     server.wait();
     Ok(())

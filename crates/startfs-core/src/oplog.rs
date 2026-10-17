@@ -1,6 +1,7 @@
 //! Per-node operation logs stamped with hybrid logical clocks, and the small
 //! wire protocol peers use to exchange them.
 
+use crate::fs::Content;
 use crate::ops::{FileKind, Ino, Nanos};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -70,9 +71,9 @@ pub struct Snapshot {
     pub mode: u32,
     pub mtime: Nanos,
     pub xattrs: BTreeMap<String, Vec<u8>>,
-    /// File bytes or symlink target; empty for directories. Carried inline
-    /// until chunk replication exists.
-    pub data: Vec<u8>,
+    /// Tiny files and symlink targets inline; otherwise chunk references.
+    /// Empty for directories.
+    pub content: Content,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

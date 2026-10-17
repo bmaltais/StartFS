@@ -9,6 +9,8 @@ pub struct Config {
     pub port: u16,
     /// Space this node offers to the filesystem, in bytes.
     pub offer_bytes: u64,
+    /// Most bytes of fetched chunks kept on this node (the LRU cache).
+    pub cache_bytes: u64,
     /// How long a join token stays valid, in seconds.
     pub token_ttl_secs: u64,
 }
@@ -18,6 +20,7 @@ impl Default for Config {
         Self {
             port: 7600,
             offer_bytes: 10 << 30,
+            cache_bytes: 1 << 30,
             token_ttl_secs: 24 * 3600,
         }
     }

@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod chunker;
 pub mod chunkstore;
 pub mod clock;
@@ -5,9 +6,9 @@ pub mod config;
 pub mod control;
 pub mod daemon;
 pub mod fs;
+pub mod members;
 pub mod net;
 pub mod oplog;
 pub mod ops;
-pub mod sync;
-pub mod members;
 pub mod protocol;
+pub mod sync;

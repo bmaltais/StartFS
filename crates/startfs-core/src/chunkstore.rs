@@ -96,6 +96,35 @@ impl ChunkStore {
         Ok(data)
     }
 
+    /// Delete a chunk; absent chunks are fine.
+    pub fn remove(&self, id: &ChunkId) {
+        let _ = fs::remove_file(self.path(id));
+    }
+
+    /// Bytes the chunk occupies on disk, if stored.
+    pub fn size_of(&self, id: &ChunkId) -> Option<u64> {
+        fs::metadata(self.path(id)).ok().map(|m| m.len())
+    }
+
+    /// Every stored chunk with its size on disk and last modification time.
+    pub fn list(&self) -> FsResult<Vec<(ChunkId, u64, std::time::SystemTime)>> {
+        let mut out = Vec::new();
+        for shard in fs::read_dir(&self.root).map_err(io)? {
+            let shard = shard.map_err(io)?.path();
+            for f in fs::read_dir(&shard).map_err(io)? {
+                let f = f.map_err(io)?;
+                let name = f.file_name().to_string_lossy().into_owned();
+                let Ok(hash) = blake3::Hash::from_hex(&name) else {
+                    continue; // temporary files
+                };
+                let meta = f.metadata().map_err(io)?;
+                let mtime = meta.modified().map_err(io)?;
+                out.push((*hash.as_bytes(), meta.len(), mtime));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn stats(&self) -> FsResult<StoreStats> {
         let mut stats = StoreStats::default();
         for shard in fs::read_dir(&self.root).map_err(io)? {

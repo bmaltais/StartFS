@@ -2,10 +2,10 @@
 //! control interface and FsOps on a cluster with a simulated network.
 
 use startfs_core::control::NodeState;
-use startfs_core::ops::*;
-use startfs_harness::Cluster;
 use startfs_core::net::NodeId;
+use startfs_core::ops::*;
 use startfs_core::sync::HELLO_INTERVAL;
+use startfs_harness::Cluster;
 use std::time::Duration;
 
 fn names(fs: &impl FsOps, dir: Ino) -> Vec<String> {
@@ -32,7 +32,10 @@ fn every_node_gets_its_own_identity_so_inode_numbers_never_clash() {
     let c = joined(3, 3);
     let mut inos = Vec::new();
     for i in 0..3 {
-        let f = c.fs(i).create(ROOT_INO, &format!("from-{i}"), 0o644).unwrap();
+        let f = c
+            .fs(i)
+            .create(ROOT_INO, &format!("from-{i}"), 0o644)
+            .unwrap();
         inos.push(f.ino);
     }
     c.sync();
@@ -152,7 +155,8 @@ fn a_member_that_goes_quiet_is_shown_down_and_comes_back_up() {
     assert_eq!(states(&c, 0), [up, up, up]);
 
     // Node 2 is cut off; its silence is noticed once a few hellos are missed.
-    c.network().partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
     for _ in 0..4 {
         c.advance(HELLO_INTERVAL);
         c.sync();
@@ -212,4 +216,44 @@ fn an_offer_of_zero_makes_a_pure_client_that_adds_no_storage() {
     c.advance(HELLO_INTERVAL);
     c.sync();
     assert_eq!(c.control(0).status().unwrap().copies_possible, 2);
+}
+
+/// Incompressible bytes, so a file really needs chunk storage.
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 32) as u8
+        })
+        .collect()
+}
+
+fn write_file(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
+    let f = fs.create(ROOT_INO, name, 0o644).unwrap();
+    fs.write(f.ino, 0, data).unwrap();
+    f.ino
+}
+
+#[test]
+fn file_contents_are_fetched_from_a_peer_when_read() {
+    let c = Cluster::start(2);
+    let token = c.control(0).create("home", 2).unwrap();
+    let data = noise(300_000, 7);
+    write_file(&c.fs(0), "big", &data);
+    c.control(1).join(&token, None).unwrap();
+    c.sync();
+
+    // The joiner pulled metadata only: it can see the file but not read it
+    // unless a peer can supply the bytes.
+    let b = c.fs(1);
+    let on_b = b.lookup(ROOT_INO, "big").unwrap();
+    assert_eq!(on_b.size, 300_000);
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    assert_eq!(b.read(on_b.ino, 0, u32::MAX), Err(FsError::Unavailable));
+
+    c.network().heal();
+    assert_eq!(b.read(on_b.ino, 0, u32::MAX).unwrap(), data);
 }

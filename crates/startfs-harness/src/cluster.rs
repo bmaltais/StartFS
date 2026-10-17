@@ -257,7 +257,6 @@ fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<M
             pump(&nodes);
         }
     }));
-    let daemon = Arc::new(daemon);
     *node.fs.slot.lock().unwrap() = Some(daemon.fs());
     *node.daemon.lock().unwrap() = Some(daemon.clone());
     let server = control::serve(daemon, &socket_path(node)).expect("serve control socket");

@@ -79,6 +79,8 @@ pub enum FsError {
     NotPermitted,
     #[error("no such attribute")]
     NoData,
+    #[error("file contents are not available: no reachable peer holds them")]
+    Unavailable,
     #[error("node is not running")]
     NodeDown,
     #[error("i/o error: {0}")]
@@ -99,6 +101,7 @@ impl FsError {
             FsError::NotSupported => libc::ENOTSUP,
             FsError::NotPermitted => libc::EPERM,
             FsError::NoData => libc::ENODATA,
+            FsError::Unavailable => libc::EHOSTUNREACH,
             FsError::NodeDown => libc::ENOTCONN,
             FsError::Io(_) => libc::EIO,
         }

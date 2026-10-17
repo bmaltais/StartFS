@@ -3,6 +3,7 @@
 //! Metadata records are versioned (first byte) so the format can grow, for
 //! example to add an encryption envelope, without a redesign.
 
+use crate::cache::{CacheStats, ChunkCache};
 use crate::chunker;
 use crate::chunkstore::{ChunkId, ChunkStore};
 use crate::clock::Clock;
@@ -11,7 +12,7 @@ use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
 use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,14 +47,16 @@ pub struct NodeConfig {
     pub gid: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct ChunkRef {
-    id: ChunkId,
-    len: u32,
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChunkRef {
+    pub id: ChunkId,
+    pub len: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub(crate) enum Content {
+/// What a file holds. Only the references travel in the operation log:
+/// chunks are fetched from a peer when a read needs them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Content {
     /// File bytes, or the target of a symlink.
     Inline(Vec<u8>),
     Chunks(Vec<ChunkRef>),
@@ -149,9 +152,27 @@ impl Tables<'_> {
     }
 }
 
+/// Where chunks this node lacks can be fetched from.
+pub trait ChunkSource: Send + Sync {
+    /// Ask peers for a chunk. `accept` says whether received bytes are the
+    /// right chunk; a source tries another peer when it says no.
+    fn fetch(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>>;
+}
+
+/// Chunks fetched during one operation, and the one it is waiting for.
+#[derive(Default)]
+struct Spill {
+    got: HashMap<ChunkId, Vec<u8>>,
+    miss: Option<ChunkId>,
+}
+
 pub struct LocalFs {
     db: Database,
+    /// Replica storage: chunks this node is responsible for.
     chunks: ChunkStore,
+    /// Chunks fetched on demand; bounded, and apart from replica storage.
+    cache: ChunkCache,
+    source: Mutex<Option<Arc<dyn ChunkSource>>>,
     clock: Arc<dyn Clock>,
     config: NodeConfig,
     /// This node's member id; changes once, when it joins a filesystem.
@@ -177,12 +198,19 @@ fn is_acl(name: &str) -> bool {
 }
 
 impl LocalFs {
-    pub fn open(dir: &Path, config: NodeConfig, clock: Arc<dyn Clock>) -> FsResult<Self> {
+    pub fn open(
+        dir: &Path,
+        config: NodeConfig,
+        cache_bytes: u64,
+        clock: Arc<dyn Clock>,
+    ) -> FsResult<Self> {
         std::fs::create_dir_all(dir).map_err(db)?;
         let database = Database::create(dir.join("meta.redb")).map_err(db)?;
         let fs = Self {
             db: database,
             chunks: ChunkStore::open(&dir.join("chunks"))?,
+            cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
+            source: Mutex::new(None),
             clock,
             node: AtomicU32::new(config.node.0),
             config,
@@ -313,7 +341,7 @@ impl LocalFs {
         p.mtime = self.clock.now();
         p.ctime = p.mtime;
         t.put(parent, &p)?;
-        let snap = self.snapshot(&inode)?;
+        let snap = self.snapshot(&inode);
         self.emit(
             t,
             Op::Create {
@@ -334,13 +362,72 @@ impl LocalFs {
         t.put(dir, &p)
     }
 
-    fn read_all(&self, i: &Inode) -> FsResult<Vec<u8>> {
+    /// Where to fetch chunks this node does not hold.
+    pub fn set_chunk_source(&self, source: Arc<dyn ChunkSource>) {
+        *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// A chunk held here, replica or cached, verified against its hash.
+    /// This is what a peer's fetch is answered from.
+    pub fn local_chunk(&self, id: &ChunkId) -> Option<Vec<u8>> {
+        self.chunks.get(id).ok().or_else(|| self.cache.get(id))
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        self.cache.stats()
+    }
+
+    fn chunk(&self, id: &ChunkId, spill: &mut Spill) -> FsResult<Vec<u8>> {
+        if let Some(data) = self.local_chunk(id).or_else(|| spill.got.get(id).cloned()) {
+            return Ok(data);
+        }
+        spill.miss = Some(*id);
+        Err(FsError::Unavailable)
+    }
+
+    /// Fetch a chunk from a peer, never accepting bytes that fail their hash.
+    fn fetch_remote(&self, id: &ChunkId) -> FsResult<Vec<u8>> {
+        let source = self.source.lock().unwrap().clone();
+        let is_chunk = |d: &[u8]| blake3::hash(d).as_bytes() == id;
+        match source.and_then(|s| s.fetch(id, &is_chunk)) {
+            Some(data) if is_chunk(&data) => {
+                self.cache.put(&data);
+                Ok(data)
+            }
+            // A damaged local copy that no peer could replace is an I/O error.
+            _ if self.chunks.size_of(id).is_some() => Err(FsError::Io("chunk is corrupt".into())),
+            _ => Err(FsError::Unavailable),
+        }
+    }
+
+    /// Run `f`, fetching from peers (outside any lock) each chunk it finds
+    /// missing and then running it again.
+    fn fetching<T>(
+        &self,
+        write: bool,
+        mut f: impl FnMut(&mut Tables<'_>, &mut Spill) -> FsResult<T>,
+    ) -> FsResult<T> {
+        let mut spill = Spill::default();
+        loop {
+            spill.miss = None;
+            match self.run(write, |t| f(t, &mut spill)) {
+                Err(FsError::Unavailable) if spill.miss.is_some() => {
+                    let id = spill.miss.take().expect("checked");
+                    let data = self.fetch_remote(&id)?;
+                    spill.got.insert(id, data);
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn read_all(&self, i: &Inode, spill: &mut Spill) -> FsResult<Vec<u8>> {
         match &i.content {
             Content::Inline(b) => Ok(b.clone()),
             Content::Chunks(refs) => {
                 let mut out = Vec::with_capacity(i.size as usize);
                 for r in refs {
-                    out.extend(self.chunks.get(&r.id)?);
+                    out.extend(self.chunk(&r.id, spill)?);
                 }
                 Ok(out)
             }
@@ -401,12 +488,12 @@ impl FsOps for LocalFs {
     }
 
     fn setattr(&self, ino: Ino, set: SetAttr) -> FsResult<Attr> {
-        self.run(true, |t| {
+        self.fetching(true, |t, spill| {
             let mut i = t.inode(ino)?;
             let now = self.clock.now();
             if let Some(size) = set.size {
                 let mut i2 = Self::file(t, ino)?;
-                let mut data = self.read_all(&i2)?;
+                let mut data = self.read_all(&i2, spill)?;
                 data.resize(size as usize, 0);
                 self.store(&mut i2, &data)?;
                 i2.mtime = now;
@@ -471,7 +558,7 @@ impl FsOps for LocalFs {
     }
 
     fn read(&self, ino: Ino, offset: u64, len: u32) -> FsResult<Vec<u8>> {
-        self.run(false, |t| {
+        self.fetching(false, |t, spill| {
             let i = Self::file(t, ino)?;
             let end = offset.saturating_add(len as u64).min(i.size);
             if offset >= end {
@@ -491,7 +578,7 @@ impl FsOps for LocalFs {
                         if start >= end {
                             break;
                         }
-                        let data = self.chunks.get(&r.id)?;
+                        let data = self.chunk(&r.id, spill)?;
                         let from = offset.saturating_sub(start) as usize;
                         let to = (end.min(stop) - start) as usize;
                         out.extend_from_slice(&data[from..to]);
@@ -503,9 +590,9 @@ impl FsOps for LocalFs {
     }
 
     fn write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
-        self.run(true, |t| {
+        self.fetching(true, |t, spill| {
             let mut i = Self::file(t, ino)?;
-            let mut buf = self.read_all(&i)?;
+            let mut buf = self.read_all(&i, spill)?;
             let end = offset as usize + data.len();
             if buf.len() < end {
                 buf.resize(end, 0);

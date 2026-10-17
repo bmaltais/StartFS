@@ -151,14 +151,14 @@ impl Tables<'_> {
 }
 
 impl LocalFs {
-    /// The bytes and attributes of an inode as a log snapshot.
-    pub(super) fn snapshot(&self, i: &Inode) -> FsResult<Snapshot> {
-        Ok(Snapshot {
+    /// The content and attributes of an inode as a log snapshot.
+    pub(super) fn snapshot(&self, i: &Inode) -> Snapshot {
+        Snapshot {
             mode: i.mode,
             mtime: i.mtime,
             xattrs: i.xattrs.clone(),
-            data: self.read_all(i)?,
-        })
+            content: i.content.clone(),
+        }
     }
 
     /// Record a new state of `ino` (already applied to the visible tree).
@@ -167,7 +167,7 @@ impl LocalFs {
             Some(v) => Some(v.hlc),
             None => t.conflict(ino)?.and_then(|c| c.seed),
         };
-        let snap = self.snapshot(i)?;
+        let snap = self.snapshot(i);
         self.emit(t, Op::Set { ino, base, snap })
     }
 
@@ -203,28 +203,20 @@ impl LocalFs {
         self.register(t, e)
     }
 
-    fn version(&self, hlc: Hlc, base: Option<Hlc>, snap: &Snapshot) -> FsResult<Version> {
-        let mut i = Inode {
-            kind: FileKind::File,
-            mode: snap.mode,
-            nlink: 1,
-            size: 0,
-            mtime: snap.mtime,
-            ctime: snap.mtime,
-            parent: 0,
-            content: Content::Inline(Vec::new()),
-            xattrs: BTreeMap::new(),
+    fn version(&self, hlc: Hlc, base: Option<Hlc>, snap: &Snapshot) -> Version {
+        let size = match &snap.content {
+            Content::Inline(b) => b.len() as u64,
+            Content::Chunks(refs) => refs.iter().map(|r| u64::from(r.len)).sum(),
         };
-        self.store(&mut i, &snap.data)?;
-        Ok(Version {
+        Version {
             hlc,
             base,
-            size: i.size,
+            size,
             mode: snap.mode,
             mtime: snap.mtime,
             xattrs: snap.xattrs.clone(),
-            content: i.content,
-        })
+            content: snap.content.clone(),
+        }
     }
 
     fn register(&self, t: &mut Tables<'_>, e: &Entry) -> FsResult<()> {
@@ -242,13 +234,13 @@ impl LocalFs {
                     o.loc = Some((e.hlc, *parent, name.clone()));
                 }
                 o.max_live = o.max_live.max(e.hlc);
-                o.add_version(self.version(e.hlc, None, snap)?);
+                o.add_version(self.version(e.hlc, None, snap));
                 t.put_object(*ino, &o)
             }
             Op::Set { ino, base, snap } => {
                 let mut o = t.object(*ino)?;
                 o.max_live = o.max_live.max(e.hlc);
-                o.add_version(self.version(e.hlc, *base, snap)?);
+                o.add_version(self.version(e.hlc, *base, snap));
                 t.put_object(*ino, &o)
             }
             Op::Rename { ino, parent, name } => {

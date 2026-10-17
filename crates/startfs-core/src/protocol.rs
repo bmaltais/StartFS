@@ -1,5 +1,6 @@
 //! The wire protocol peers speak over a [`Transport`](crate::net::Transport).
 
+use crate::chunkstore::ChunkId;
 use crate::members::{Admission, Member};
 use crate::oplog::{Entry, Frontier};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,10 @@ pub enum Message {
         offer_bytes: u64,
     },
     JoinReply(Result<Admission, String>),
+    /// "Send me this chunk if you hold it."
+    ChunkRequest(ChunkId),
+    /// The chunk's bytes, or `None` when the sender does not hold it.
+    ChunkReply(ChunkId, Option<Vec<u8>>),
 }
 
 impl Message {

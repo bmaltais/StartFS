@@ -4,19 +4,20 @@
 //! transport and sends whatever is due. A real daemon calls it from a
 //! background thread, the test harness calls it to drive simulated time.
 
+use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::control::{FilesystemInfo, MemberStatus, NodeState, Request, Response, Status, Usage};
-use crate::fs::{LocalFs, NodeConfig};
+use crate::fs::{ChunkSource, LocalFs, NodeConfig};
 use crate::members::{Membership, Token};
 use crate::net::{NodeId, Transport};
+use crate::ops::Nanos;
 use crate::ops::{FsOps, FsResult};
 use crate::protocol::Message;
-use crate::ops::Nanos;
 use crate::sync::{HELLO_INTERVAL, Syncer};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Called while a control request waits for a peer's answer. A real daemon
 /// sleeps (its background thread makes progress meanwhile); the test harness
@@ -27,7 +28,8 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 const WAIT_ROUNDS: usize = 300;
 
 /// A member not heard from for this long is shown as down.
-const DOWN_AFTER: std::time::Duration = std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
+const DOWN_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
 
 pub struct Daemon {
     fs: Arc<LocalFs>,
@@ -45,6 +47,17 @@ pub struct Daemon {
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
+    /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
+    chunk_replies: Mutex<HashMap<(NodeId, ChunkId), Option<Vec<u8>>>>,
+}
+
+/// Fetches chunks from peers on behalf of the filesystem.
+struct PeerChunks(Weak<Daemon>);
+
+impl ChunkSource for PeerChunks {
+    fn fetch(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+        self.0.upgrade()?.fetch_chunk(id, accept)
+    }
 }
 
 impl Daemon {
@@ -54,27 +67,31 @@ impl Daemon {
         node: NodeConfig,
         clock: Arc<dyn Clock>,
         advertise_host: String,
-    ) -> FsResult<Self> {
+    ) -> FsResult<Arc<Self>> {
         let membership = Membership::load(&dir.join("membership.json"));
-        let fs = Arc::new(LocalFs::open(dir, node, clock.clone())?);
+        let fs = Arc::new(LocalFs::open(dir, node, config.cache_bytes, clock.clone())?);
         if let Some(me) = membership.me() {
             fs.set_node(NodeId(me));
         }
-        Ok(Self {
-            fs,
-            clock,
-            transport: Mutex::new(None),
-            syncer: Mutex::new(None),
-            join_reply: Mutex::new(None),
-            heard: Mutex::new(HashMap::new()),
-            last_gossip: Mutex::new(None),
-            wait: Mutex::new(Arc::new(|| {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })),
-            membership: Mutex::new(membership),
-            config,
-            advertise_host,
-        })
+        Ok(Arc::new_cyclic(|me| {
+            fs.set_chunk_source(Arc::new(PeerChunks(me.clone())));
+            Self {
+                fs,
+                clock,
+                chunk_replies: Mutex::new(HashMap::new()),
+                transport: Mutex::new(None),
+                syncer: Mutex::new(None),
+                join_reply: Mutex::new(None),
+                heard: Mutex::new(HashMap::new()),
+                last_gossip: Mutex::new(None),
+                wait: Mutex::new(Arc::new(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                })),
+                membership: Mutex::new(membership),
+                config,
+                advertise_host,
+            }
+        }))
     }
 
     pub fn fs(&self) -> Arc<LocalFs> {
@@ -149,11 +166,14 @@ impl Daemon {
                 offer_bytes,
             } => {
                 let now = self.clock.now();
-                let result = self
-                    .membership
-                    .lock()
-                    .unwrap()
-                    .admit(now, &fs_id, &token_id, from, addr, offer_bytes);
+                let result = self.membership.lock().unwrap().admit(
+                    now,
+                    &fs_id,
+                    &token_id,
+                    from,
+                    addr,
+                    offer_bytes,
+                );
                 if let Ok(adm) = &result {
                     let members = Message::Members(adm.members.clone()).encode();
                     for peer in self.membership.lock().unwrap().peers() {
@@ -164,6 +184,17 @@ impl Daemon {
             }
             Message::JoinReply(reply) => {
                 *self.join_reply.lock().unwrap() = Some(reply);
+            }
+            Message::ChunkRequest(id) => {
+                if self.membership.lock().unwrap().is_member_endpoint(from) {
+                    let data = self.fs.local_chunk(&id);
+                    transport.send(from, Message::ChunkReply(id, data).encode());
+                }
+            }
+            Message::ChunkReply(id, data) => {
+                if self.membership.lock().unwrap().is_member_endpoint(from) {
+                    self.chunk_replies.lock().unwrap().insert((from, id), data);
+                }
             }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
@@ -188,6 +219,25 @@ impl Daemon {
             hook();
         }
         poll()
+    }
+
+    /// Ask peers, most recently heard first, until one supplies the chunk.
+    fn fetch_chunk(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+        let transport = self.transport()?;
+        let mut peers = self.membership.lock().unwrap().peers();
+        let heard = self.heard.lock().unwrap().clone();
+        peers.sort_by_key(|p| std::cmp::Reverse(heard.get(p).copied()));
+        for peer in peers {
+            self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+            transport.send(peer, Message::ChunkRequest(*id).encode());
+            let reply = self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
+            if let Some(Some(data)) = reply
+                && accept(&data)
+            {
+                return Some(data);
+            }
+        }
+        None
     }
 
     fn join(&self, token: &str, offer_bytes: Option<u64>) -> Result<(), String> {
@@ -297,7 +347,11 @@ impl Daemon {
                         MemberStatus {
                             id: m.id,
                             addr: m.addr,
-                            state: if up { NodeState::Online } else { NodeState::Down },
+                            state: if up {
+                                NodeState::Online
+                            } else {
+                                NodeState::Down
+                            },
                             offer_bytes: m.offer_bytes,
                             is_self,
                         }

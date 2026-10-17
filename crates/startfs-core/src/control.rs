@@ -14,14 +14,21 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    Create { name: String, copies: u32 },
+    Create {
+        name: String,
+        copies: u32,
+    },
     Status,
     /// Mint another join token (valid for the configured time).
     NewToken,
     /// Change settings of this node; unset fields stay as they are.
-    Config { offer_bytes: Option<u64> },
+    Config {
+        offer_bytes: Option<u64>,
+    },
     /// Make a token we issued stop working.
-    Revoke { token: String },
+    Revoke {
+        token: String,
+    },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
         token: String,
