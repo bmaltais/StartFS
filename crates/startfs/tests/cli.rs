@@ -30,11 +30,56 @@ impl Drop for Daemon {
     }
 }
 
+/// A stand-in for `tailscaled`'s local API: every address is a tailnet
+/// machine carrying `tag:startfs`, unless `known` is false (then nobody is).
+fn fake_tailscaled(socket: &Path, known: bool) {
+    use std::io::{Read, Write};
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let (status, body) = if known {
+                (
+                    "200 OK",
+                    r#"{"Node":{"Name":"peer.ts.net.","Tags":["tag:startfs"]}}"#,
+                )
+            } else {
+                ("404 Not Found", r#"{"error":"no match"}"#)
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.0 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+}
+
 fn start_daemon(data: &Path) -> Daemon {
+    start_daemon_with(data, true, "")
+}
+
+fn start_daemon_with(data: &Path, tailnet_knows_peers: bool, extra_config: &str) -> Daemon {
+    std::fs::create_dir_all(data).unwrap();
+    let whois = data.join("whois.sock");
+    fake_tailscaled(&whois, tailnet_knows_peers);
+    let config = data.join("test-config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "port = 0\nwhois_socket = \"{}\"\n{extra_config}",
+            whois.display()
+        ),
+    )
+    .unwrap();
     let daemon = Daemon(
         Command::new(env!("CARGO_BIN_EXE_startfs"))
             .arg("--data-dir")
             .arg(data)
+            .arg("--config")
+            .arg(&config)
             .arg("daemon")
             .spawn()
             .unwrap(),
@@ -125,6 +170,65 @@ fn cli_leaves_and_removes_members() {
     assert!(!startfs(data, &["remove", "bob"]).status.success());
 
     stdout(&startfs(data, &["leave"]));
-    let text = stdout(&startfs(data, &["status"]));
-    assert!(text.contains("leaving"), "{text}");
+    // The daemon now runs its background work, so a lone member, which has
+    // nothing to hand over, finishes leaving at once.
+    let started = Instant::now();
+    loop {
+        let text = stdout(&startfs(data, &["status"]));
+        if text.contains("leaving") || text.contains("no filesystem on this node") {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "{text}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn two_daemon_processes_create_join_and_see_each_other_over_quic() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _a = start_daemon_with(da.path(), true, "allowed_tags = [\"tag:startfs\"]");
+    let _b = start_daemon(db.path());
+
+    let token = stdout(&startfs(
+        da.path(),
+        &["create", "--name", "home", "--copies", "2"],
+    ));
+    stdout(&startfs(
+        db.path(),
+        &["join", token.trim(), "--offer", "100M"],
+    ));
+
+    // Both ends list both members, and each sees the other as up.
+    let started = Instant::now();
+    loop {
+        let (a, b) = (
+            stdout(&startfs(da.path(), &["status"])),
+            stdout(&startfs(db.path(), &["status"])),
+        );
+        let both_up = |t: &str| t.matches(" up ").count() + t.matches("(this node)").count() >= 2;
+        if a.contains("(2 nodes)") && b.contains("(2 nodes)") && both_up(&a) && both_up(&b) {
+            assert!(b.contains("100.0 MiB"), "{b}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "members never converged:\n{a}\n{b}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_join_to_an_unidentifiable_peer_fails_with_the_reason() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _a = start_daemon(da.path());
+    let _b = start_daemon_with(db.path(), false, "");
+    let token = stdout(&startfs(
+        da.path(),
+        &["create", "--name", "home", "--copies", "2"],
+    ));
+    let out = startfs(db.path(), &["join", token.trim()]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("tailscaled does not know"), "{err}");
 }

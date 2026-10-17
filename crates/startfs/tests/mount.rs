@@ -70,9 +70,13 @@ fn standard_tools_work_on_a_real_mount() {
     let data = dir.path().join("data");
     let mp = dir.path().join("mnt");
     std::fs::create_dir(&mp).unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "port = 0\n").unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_startfs"))
         .arg("--data-dir")
         .arg(&data)
+        .arg("--config")
+        .arg(&config)
         .arg("daemon")
         .arg("--mount")
         .arg(&mp)

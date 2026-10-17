@@ -118,6 +118,25 @@ same code with a different membership scope.
   removed to unblock that. A node offline longer than the retention period is not otherwise
   special: its state joins in like any other.
 
+## Transport (as built)
+
+`crates/startfs/src/quic.rs` implements the poll-based `Transport` over quinn on a private background
+runtime; the core stays free of async. A node's transport endpoint (`NodeId`) is a stable hash of the
+`ip:port` it listens on, so every member derives the same endpoint for a peer without coordination;
+members' addresses reach the transport through `Transport::learn`.
+
+- One QUIC connection per direction per peer. The dialer opens a handshake stream carrying a magic
+  and the protocol version; the acceptor checks the version, looks the dialer up with `tailscaled`
+  (whois) and the `allowed_tags` policy, and answers "ok" or the reason. The reason is kept
+  (`Transport::last_error`) and shows up in e.g. `startfs join` failures. Dialing is vetted the same way.
+- Metadata messages share one ordered unidirectional stream; messages carrying chunk bytes
+  (`Message::is_bulk`) each get their own lower-priority stream, so a big transfer never delays them.
+- Frames are a 4-byte length plus the message, capped at 256 MiB. Every encoded message starts with a
+  protocol version byte (`PROTOCOL_VERSION`); a mismatch fails at the handshake and in `Message::decode`.
+- Certificates are throwaway and unchecked; identity is whois only. The `whois_socket` config option
+  points at a non-default `tailscaled` socket (macOS needs it set).
+- Not done: a full-state transfer is still one message (bounded by the cap) rather than chunked.
+
 ## Future: personal (group-of-1) scope
 
 Not in v1. Needs:

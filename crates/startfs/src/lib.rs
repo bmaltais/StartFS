@@ -2,4 +2,5 @@
 
 pub mod identity;
 pub mod mount;
+pub mod node;
 pub mod quic;

@@ -31,6 +31,12 @@ pub struct Config {
     /// Where the daemon mounts the filesystem (`startfs daemon --mount DIR`
     /// overrides it). Unset: the daemon runs without a mount.
     pub mountpoint: Option<String>,
+    /// Tailscale ACL tags (such as `tag:startfs`) a machine must carry, at
+    /// least one of them, to talk to this node. Empty: any machine on the tailnet.
+    pub allowed_tags: Vec<String>,
+    /// The `tailscaled` unix socket used to identify peers. Unset: the
+    /// platform default.
+    pub whois_socket: Option<String>,
 }
 
 impl Default for Config {
@@ -46,6 +52,8 @@ impl Default for Config {
             repair_bytes_per_sec: 8 << 20,
             scrub_period_secs: 30 * 24 * 3600,
             mountpoint: None,
+            allowed_tags: Vec::new(),
+            whois_socket: None,
         }
     }
 }

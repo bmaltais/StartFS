@@ -1,6 +1,7 @@
 //! The `startfs` binary: the daemon (`startfs daemon`) and the CLI that talks to it.
 
 use startfs::mount;
+use startfs::node::{self, Ticker};
 use startfs_core::clock::SystemClock;
 use startfs_core::config::Config;
 use startfs_core::control::{self, Client, NodeState, ScrubState, Status, Tier};
@@ -8,6 +9,7 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::net::NodeId;
 use startfs_core::power::SystemPower;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
@@ -172,7 +174,7 @@ fn daemon(
     mountpoint: Option<PathBuf>,
 ) -> Result<(), String> {
     // A missing config file is normal: every setting has a default.
-    let config = match std::fs::read_to_string(config_file) {
+    let mut config = match std::fs::read_to_string(config_file) {
         Ok(text) => Config::parse(&text).map_err(|e| format!("{}: {e}", config_file.display()))?,
         Err(_) => Config::default(),
     };
@@ -184,14 +186,19 @@ fn daemon(
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
     };
+    let host = tailnet_address();
+    let whois = node::tailscale_whois(&config);
+    let transport = node::bind(&mut config, host, whois)
+        .map_err(|e| format!("cannot listen on {host}:{}: {e}", config.port))?;
     let d = Daemon::open(
         &data_dir,
         config,
         node,
         Arc::new(SystemClock),
-        tailnet_address(),
+        host.to_string(),
     )
     .map_err(|e| e.to_string())?;
+    let ticker = Ticker::start(d.clone(), transport);
     d.set_power_source(Arc::new(SystemPower));
     let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
     let server = control::serve(d.clone(), socket)
@@ -207,6 +214,7 @@ fn daemon(
     // Run until asked to stop, then unmount so no dead mount is left behind.
     wait_for_stop();
     drop(server);
+    drop(ticker);
     if let Some(m) = mount {
         m.unmount()?;
     }
@@ -232,15 +240,15 @@ fn wait_for_stop() {
 }
 
 /// This machine's tailnet address, or loopback when Tailscale is unavailable.
-fn tailnet_address() -> String {
+fn tailnet_address() -> IpAddr {
     Command::new("tailscale")
         .args(["ip", "-4"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.lines().next().map(str::to_string))
-        .unwrap_or_else(|| "127.0.0.1".into())
+        .and_then(|s| s.lines().next().and_then(|l| l.trim().parse().ok()))
+        .unwrap_or(IpAddr::from([127, 0, 0, 1]))
 }
 
 fn render(s: &Status) -> String {

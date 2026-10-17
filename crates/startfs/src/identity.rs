@@ -37,6 +37,76 @@ pub fn check_allowed(peer: &PeerIdentity, allowed_tags: &[String]) -> Result<(),
     ))
 }
 
+/// Asks the local `tailscaled` over its unix-socket API.
+pub struct TailscaleWhois {
+    socket: std::path::PathBuf,
+}
+
+impl TailscaleWhois {
+    /// Where `tailscaled` listens by default on Linux.
+    pub const DEFAULT_SOCKET: &'static str = "/var/run/tailscale/tailscaled.sock";
+
+    pub fn new(socket: &std::path::Path) -> Self {
+        Self {
+            socket: socket.into(),
+        }
+    }
+
+    fn get(&self, path: &str) -> Result<(u16, Vec<u8>), String> {
+        use std::io::{Read, Write};
+        let unreachable = |e: std::io::Error| {
+            format!("cannot reach tailscaled at {}: {e}", self.socket.display())
+        };
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(&self.socket).map_err(unreachable)?;
+        let timeout = Some(std::time::Duration::from_secs(5));
+        let _ = stream.set_read_timeout(timeout);
+        let _ = stream.set_write_timeout(timeout);
+        write!(
+            stream,
+            "GET {path} HTTP/1.0\r\nHost: local-tailscaled.sock\r\n\r\n"
+        )
+        .map_err(unreachable)?;
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).map_err(unreachable)?;
+        let split = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or("tailscaled sent a malformed answer")?;
+        let status = String::from_utf8_lossy(&raw[..split])
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .ok_or("tailscaled sent a malformed answer")?;
+        Ok((status, raw[split + 4..].to_vec()))
+    }
+}
+
+impl Whois for TailscaleWhois {
+    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, String> {
+        let (status, body) = self.get(&format!("/localapi/v0/whois?addr={addr}"))?;
+        let json: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| format!("tailscaled answered {status} with something unreadable"))?;
+        if status != 200 {
+            let why = json["error"].as_str().unwrap_or("unknown");
+            return Err(format!("tailscaled does not know {addr}: {why}"));
+        }
+        let node = &json["Node"];
+        Ok(PeerIdentity {
+            name: node["Name"].as_str().unwrap_or_default().to_string(),
+            tags: node["Tags"]
+                .as_array()
+                .map(|t| {
+                    t.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+}
+
 /// A fixed table of peers by IP address; for tests and for running without Tailscale.
 #[derive(Default)]
 pub struct StaticWhois(Mutex<HashMap<IpAddr, PeerIdentity>>);

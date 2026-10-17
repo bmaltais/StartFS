@@ -186,8 +186,13 @@ impl Transport for QuicTransport {
                 return;
             };
             let (tx, rx) = unbounded_channel();
-            self.runtime()
-                .spawn(peer_sender(self.shared.clone(), self.endpoint.clone(), to, addr, rx));
+            self.runtime().spawn(peer_sender(
+                self.shared.clone(),
+                self.endpoint.clone(),
+                to,
+                addr,
+                rx,
+            ));
             senders.insert(to, tx);
         }
         let _ = senders[&to].send(msg);
@@ -225,7 +230,9 @@ impl Transport for QuicTransport {
 fn transport_config() -> quinn::TransportConfig {
     let mut cfg = quinn::TransportConfig::default();
     cfg.keep_alive_interval(Some(Duration::from_secs(5)));
-    cfg.max_idle_timeout(Some(Duration::from_secs(30).try_into().expect("idle timeout")));
+    cfg.max_idle_timeout(Some(
+        Duration::from_secs(30).try_into().expect("idle timeout"),
+    ));
     cfg
 }
 
@@ -376,10 +383,16 @@ async fn peer_sender(
     let mut failed_at: Option<Instant> = None;
     while let Some(msg) = queue.recv().await {
         if msg.len() > MAX_MESSAGE {
-            shared.fail(peer, format!("message of {} bytes exceeds the limit", msg.len()));
+            shared.fail(
+                peer,
+                format!("message of {} bytes exceeds the limit", msg.len()),
+            );
             continue;
         }
-        if link.as_ref().is_some_and(|l| l.conn.close_reason().is_some()) {
+        if link
+            .as_ref()
+            .is_some_and(|l| l.conn.close_reason().is_some())
+        {
             link = None;
         }
         if link.is_none() {

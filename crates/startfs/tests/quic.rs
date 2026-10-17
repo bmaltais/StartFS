@@ -179,3 +179,102 @@ fn a_bulk_chunk_transfer_does_not_stall_metadata() {
     let (_, second) = recv_within(&b, Duration::from_secs(60)).expect("chunk arrives");
     assert!(second == bulk);
 }
+
+// ---- the real whois client, against a stand-in for tailscaled's local API ----
+
+mod local_api {
+    use startfs::identity::{TailscaleWhois, Whois};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::path::Path;
+
+    /// Answers one request per connection with `status` and `body`; returns
+    /// the request lines it saw.
+    fn serve(socket: &Path, status: &str, body: &str) -> std::sync::mpsc::Receiver<String> {
+        let listener = UnixListener::bind(socket).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let _ = tx.send(request.lines().next().unwrap().to_string());
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        rx
+    }
+
+    #[test]
+    fn asks_tailscaled_who_a_peer_is_and_reads_its_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tailscaled.sock");
+        let seen = serve(
+            &socket,
+            "200 OK",
+            r#"{"Node":{"ID":5,"Name":"laptop.tail1234.ts.net.","Tags":["tag:startfs","tag:other"]},"UserProfile":{"LoginName":"tagged-devices"},"CapMap":null}"#,
+        );
+        let peer = TailscaleWhois::new(&socket)
+            .lookup("100.64.0.7:7600".parse().unwrap())
+            .unwrap();
+        assert_eq!(peer.name, "laptop.tail1234.ts.net.");
+        assert_eq!(peer.tags, ["tag:startfs", "tag:other"]);
+        assert_eq!(
+            seen.recv().unwrap(),
+            "GET /localapi/v0/whois?addr=100.64.0.7:7600 HTTP/1.0"
+        );
+    }
+
+    /// Run by hand on a machine with Tailscale up:
+    /// `cargo test -p startfs --test quic real_tailscaled -- --ignored`
+    #[test]
+    #[ignore = "needs a running tailscaled"]
+    fn real_tailscaled_identifies_this_machine() {
+        let me = std::process::Command::new("tailscale")
+            .args(["ip", "-4"])
+            .output()
+            .expect("tailscale installed");
+        let ip = String::from_utf8(me.stdout).unwrap();
+        let addr = format!("{}:7600", ip.lines().next().unwrap().trim());
+        let peer = TailscaleWhois::new(Path::new(TailscaleWhois::DEFAULT_SOCKET))
+            .lookup(addr.parse().unwrap())
+            .unwrap();
+        assert!(peer.name.contains(".ts.net"), "{peer:?}");
+    }
+
+    #[test]
+    fn an_untagged_machine_has_no_tags_and_an_unknown_address_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("a.sock");
+        serve(
+            &socket,
+            "200 OK",
+            r#"{"Node":{"Name":"desk.ts.net.","Tags":null},"UserProfile":{}}"#,
+        );
+        let peer = TailscaleWhois::new(&socket)
+            .lookup("100.64.0.8:1".parse().unwrap())
+            .unwrap();
+        assert!(peer.tags.is_empty());
+
+        let socket = dir.path().join("b.sock");
+        serve(
+            &socket,
+            "404 Not Found",
+            r#"{"error":"no match for \"8.8.8.8\""}"#,
+        );
+        let err = TailscaleWhois::new(&socket)
+            .lookup("8.8.8.8:1".parse().unwrap())
+            .unwrap_err();
+        assert!(err.contains("8.8.8.8"), "{err}");
+
+        let err = TailscaleWhois::new(&dir.path().join("missing.sock"))
+            .lookup("100.64.0.9:1".parse().unwrap())
+            .unwrap_err();
+        assert!(err.contains("tailscaled"), "{err}");
+    }
+}

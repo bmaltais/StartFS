@@ -112,7 +112,10 @@ mod tests {
             }
         );
         let text = err.to_string();
-        assert!(text.contains("version") && text.contains("mismatch"), "{text}");
+        assert!(
+            text.contains("version") && text.contains("mismatch"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -358,7 +358,15 @@ impl Daemon {
 
     /// Exchange logs with exactly the other members.
     fn sync_peers(&self) {
-        let peers = self.membership.lock().unwrap().peers();
+        let peers = {
+            let m = self.membership.lock().unwrap();
+            if let Some(t) = self.transport() {
+                for member in m.members() {
+                    t.learn(member.endpoint, &member.addr);
+                }
+            }
+            m.peers()
+        };
         if let Some(s) = self.syncer.lock().unwrap().as_mut() {
             s.set_peers(&peers);
         }
@@ -492,7 +500,10 @@ impl Daemon {
         );
         let reply = self
             .wait_for(|| self.join_reply.lock().unwrap().take())
-            .ok_or_else(|| format!("no answer from {}", token.addr))??;
+            .ok_or_else(|| match transport.last_error(bootstrap) {
+                Some(why) => format!("no answer from {}: {why}", token.addr),
+                None => format!("no answer from {}", token.addr),
+            })??;
         self.fs.set_node(NodeId(reply.id));
         self.membership.lock().unwrap().install(reply, offer)?;
         self.fs.set_replicating();
