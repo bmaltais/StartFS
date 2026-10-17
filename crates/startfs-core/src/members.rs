@@ -475,6 +475,41 @@ impl Membership {
         self.save_or_report();
     }
 
+    /// Set the number of copies and bump its revision so the others take it.
+    pub fn set_copies(&mut self, copies: u32) -> Result<(), Error> {
+        let fs = self.fs.as_mut().ok_or(Error::NotInFilesystem)?;
+        if copies == 0 {
+            return Err(Error::BadFilesystemSpec);
+        }
+        if fs.copies == copies {
+            return Ok(());
+        }
+        fs.copies = copies;
+        fs.copies_rev += 1;
+        self.save()
+    }
+
+    /// The copies setting as gossiped: `(copies, revision)`.
+    pub fn copies_setting(&self) -> Option<(u32, u64)> {
+        self.fs.as_ref().map(|fs| (fs.copies, fs.copies_rev))
+    }
+
+    /// Fold in a peer's copies setting; the higher revision wins, and equal
+    /// revisions (concurrent changes) go to the higher count so every member
+    /// settles on the same value. Returns whether anything changed.
+    pub fn merge_copies(&mut self, copies: u32, rev: u64) -> bool {
+        let Some(fs) = self.fs.as_mut() else {
+            return false;
+        };
+        if copies == 0 || (fs.copies_rev, fs.copies) >= (rev, copies) {
+            return false;
+        }
+        fs.copies = copies;
+        fs.copies_rev = rev;
+        self.save_or_report();
+        true
+    }
+
     pub fn set_offer(&mut self, bytes: u64) -> Result<(), Error> {
         self.offer = Some(bytes);
         let me = self.me;

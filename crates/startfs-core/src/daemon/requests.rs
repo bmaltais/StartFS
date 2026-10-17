@@ -22,8 +22,11 @@ impl Daemon {
             Request::NewToken => Response::Created {
                 token: self.new_token()?,
             },
-            Request::Config { offer_bytes } => {
-                self.configure(offer_bytes)?;
+            Request::Config {
+                offer_bytes,
+                copies,
+            } => {
+                self.configure(offer_bytes, copies)?;
                 Response::Done
             }
             Request::Revoke { token } => {

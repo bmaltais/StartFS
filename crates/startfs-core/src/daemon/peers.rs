@@ -75,6 +75,12 @@ impl Daemon {
                     self.peer_health.lock().unwrap().insert(from, health);
                 }
             }
+            Message::Copies { copies, rev } => {
+                let mut m = self.membership.lock().unwrap();
+                if m.is_member_endpoint(from) {
+                    m.merge_copies(copies, rev);
+                }
+            }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
                 if m.is_member_endpoint(from) && m.merge(list) {
