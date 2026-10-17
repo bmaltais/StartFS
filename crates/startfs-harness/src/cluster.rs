@@ -58,6 +58,9 @@ impl FsOps for NodeFs {
     fn flush(&self, i: Ino) -> FsResult<()> {
         self.fs()?.flush(i)
     }
+    fn fsync(&self, i: Ino) -> FsResult<()> {
+        self.fs()?.fsync(i)
+    }
     fn unlink(&self, p: Ino, n: &str) -> FsResult<()> {
         self.fs()?.unlink(p, n)
     }
@@ -216,6 +219,7 @@ impl Cluster {
     fn commit_writes(&self, i: usize) {
         if let Ok(fs) = self.nodes[i].fs.fs() {
             fs.flush_all(true).expect("commit buffered writes");
+            fs.sync().expect("sync");
         }
     }
 

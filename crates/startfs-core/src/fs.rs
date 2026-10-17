@@ -10,7 +10,7 @@ use crate::clock::Clock;
 use crate::net::NodeId;
 use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
-use redb::{Database, ReadableTable, Table, TableDefinition};
+use redb::{Database, Durability, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -200,6 +200,8 @@ pub struct LocalFs {
     write_buffer_limit: AtomicU64,
     /// The last commit failure logged by `flush_all_logged`.
     flush_error: Mutex<Option<String>>,
+    /// Whether lazy commits have happened since the last durable one.
+    unsynced: AtomicBool,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -243,6 +245,7 @@ impl LocalFs {
             dirty: Mutex::new(HashMap::new()),
             write_buffer_limit: AtomicU64::new(DEFAULT_WRITE_BUFFER),
             flush_error: Mutex::new(None),
+            unsynced: AtomicBool::new(false),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
@@ -295,8 +298,21 @@ impl LocalFs {
 
     /// Run `f` in one transaction; read-only runs are rolled back.
     fn run<T>(&self, write: bool, f: impl FnOnce(&mut Tables<'_>) -> FsResult<T>) -> FsResult<T> {
+        self.run_as(write, Durability::Immediate, f)
+    }
+
+    /// [`Self::run`] with a chosen durability. A `None` commit is atomic and
+    /// visible at once but only reaches disk with the next durable commit
+    /// (see [`Self::sync`]), which saves the fsyncs.
+    fn run_as<T>(
+        &self,
+        write: bool,
+        durability: Durability,
+        f: impl FnOnce(&mut Tables<'_>) -> FsResult<T>,
+    ) -> FsResult<T> {
         let _guard = self.lock.lock().unwrap();
-        let txn = self.db.begin_write().map_err(db)?;
+        let mut txn = self.db.begin_write().map_err(db)?;
+        txn.set_durability(durability).map_err(db)?;
         let out = {
             let mut t = Tables {
                 inodes: txn.open_table(INODES).map_err(db)?,
@@ -314,6 +330,8 @@ impl LocalFs {
         match out {
             Ok(v) if write => {
                 txn.commit().map_err(db)?;
+                self.unsynced
+                    .store(matches!(durability, Durability::None), Ordering::SeqCst);
                 Ok(v)
             }
             other => {
@@ -321,6 +339,15 @@ impl LocalFs {
                 other
             }
         }
+    }
+
+    /// Make every lazy commit durable. Cheap when there is nothing to make durable.
+    pub fn sync(&self) -> FsResult<()> {
+        if self.unsynced.load(Ordering::SeqCst) {
+            // An empty durable commit persists the ones before it.
+            self.run_as(true, Durability::Immediate, |_| Ok(()))?;
+        }
+        Ok(())
     }
 
     fn attr(&self, ino: Ino, i: &Inode) -> Attr {
@@ -438,12 +465,21 @@ impl LocalFs {
     fn fetching<T>(
         &self,
         write: bool,
+        f: impl FnMut(&mut Tables<'_>, &mut Spill) -> FsResult<T>,
+    ) -> FsResult<T> {
+        self.fetching_as(write, Durability::Immediate, f)
+    }
+
+    fn fetching_as<T>(
+        &self,
+        write: bool,
+        durability: Durability,
         mut f: impl FnMut(&mut Tables<'_>, &mut Spill) -> FsResult<T>,
     ) -> FsResult<T> {
         let mut spill = Spill::default();
         loop {
             spill.miss = None;
-            match self.run(write, |t| f(t, &mut spill)) {
+            match self.run_as(write, durability, |t| f(t, &mut spill)) {
                 Err(FsError::Unavailable) if spill.miss.is_some() => {
                     let id = spill.miss.take().expect("checked");
                     let data = self.fetch_remote(&id)?;
@@ -594,7 +630,8 @@ impl FsOps for LocalFs {
     }
 
     fn create(&self, parent: Ino, name: &str, mode: u32) -> FsResult<Attr> {
-        self.run(true, |t| {
+        // Not durable until fsync or the next background sync: close is not a durability point.
+        self.run_as(true, Durability::None, |t| {
             let i = self.new_inode(FileKind::File, mode, parent, Content::Inline(Vec::new()), 0);
             self.add(t, parent, name, i)
         })
@@ -658,6 +695,11 @@ impl FsOps for LocalFs {
 
     fn flush(&self, ino: Ino) -> FsResult<()> {
         self.flush_ino(ino)
+    }
+
+    fn fsync(&self, ino: Ino) -> FsResult<()> {
+        self.flush_ino(ino)?;
+        self.sync()
     }
 
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()> {
@@ -811,5 +853,8 @@ impl Drop for LocalFs {
     /// A clean shutdown commits what is still buffered.
     fn drop(&mut self) {
         self.flush_all_logged(true, 0);
+        if let Err(e) = self.sync() {
+            eprintln!("startfs: could not sync on shutdown: {e:?}");
+        }
     }
 }

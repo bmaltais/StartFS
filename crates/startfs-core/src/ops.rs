@@ -127,8 +127,10 @@ pub trait FsOps: Send + Sync {
     /// Writes are buffered and committed in batches; the data is visible to
     /// reads at once but is only durable after `flush` (or a later commit).
     fn write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize>;
-    /// Commit this file's buffered writes (flush, fsync and release all map here).
+    /// Commit this file's buffered writes (flush and release map here; they are durable only after `fsync` or a background sync).
     fn flush(&self, ino: Ino) -> FsResult<()>;
+    /// Like `flush`, and everything committed so far is on disk when it returns.
+    fn fsync(&self, ino: Ino) -> FsResult<()>;
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()>;
     fn rmdir(&self, parent: Ino, name: &str) -> FsResult<()>;
     fn rename(&self, parent: Ino, name: &str, new_parent: Ino, new_name: &str) -> FsResult<()>;
@@ -173,6 +175,9 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     }
     fn flush(&self, i: Ino) -> FsResult<()> {
         (**self).flush(i)
+    }
+    fn fsync(&self, i: Ino) -> FsResult<()> {
+        (**self).fsync(i)
     }
     fn unlink(&self, p: Ino, n: &str) -> FsResult<()> {
         (**self).unlink(p, n)

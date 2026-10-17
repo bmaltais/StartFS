@@ -123,7 +123,7 @@ impl LocalFs {
         let Some(d) = dirty.remove(&ino) else {
             return Ok(());
         };
-        let done = self.fetching(true, |t, spill| {
+        let done = self.fetching_as(true, Durability::None, |t, spill| {
             let mut i = Self::file(t, ino)?;
             let Some(spliced) = self.splice(&i, &d, last, spill)? else {
                 return Ok(None);

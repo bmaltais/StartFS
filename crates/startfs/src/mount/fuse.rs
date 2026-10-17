@@ -118,9 +118,14 @@ impl FuseAdapter {
         ok(self.fs.write(ino, offset, data)).map(|n| n as u32)
     }
 
-    /// Commit the file's buffered writes (flush, fsync and release).
+    /// Commit the file's buffered writes (flush and release).
     pub fn op_flush(&self, ino: u64) -> Result<(), Errno> {
         ok(self.fs.flush(ino))
+    }
+
+    /// Commit the file's buffered writes and make everything committed durable.
+    pub fn op_fsync(&self, ino: u64) -> Result<(), Errno> {
+        ok(self.fs.fsync(ino))
     }
 
     pub fn op_unlink(&self, parent: u64, n: &OsStr) -> Result<(), Errno> {
@@ -411,7 +416,7 @@ impl Filesystem for FuseAdapter {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        match self.op_flush(ino.0) {
+        match self.op_fsync(ino.0) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e),
         }

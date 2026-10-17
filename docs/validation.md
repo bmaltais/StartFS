@@ -99,8 +99,12 @@ baseline but FUSE reads here always go through the daemon; `O_DIRECT` removes th
 | 128 MiB | read, page cache | 0.011 s | 0.157 s | 14x |
 | 128 MiB | read, `O_DIRECT` | 0.159 s | 0.152 s | 1.0x |
 | 64 MiB | read, `O_DIRECT` | 0.082 s | 0.078 s | 1.0x |
-| 1000 x 8 B | create and write | 0.032 s | 2.5 to 3.7 s | about 100x (3 ms per file) |
+| 1000 x 8 B | create and write | 0.030 s | 0.19 s | about 6x (0.19 ms per file) |
 | 1000 x 8 B | read | 0.011 s | 0.061 s | 5.5x |
+
+The tiny-file row was 2.5 to 3.7 s before create and close stopped waiting for disk: each file cost
+two metadata commits at two fsyncs each. Now only `fsync(2)`, a periodic sync and shutdown make
+metadata durable, so a crash can lose the last seconds of closed but unfsynced files.
 
 FUSE write times are the range over four runs on a shared machine; the spread is large, the
 trend is not. Before write buffering the write rows were 0.259, 0.716, 2.593 and 10.197 s (43x to 276x

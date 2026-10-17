@@ -64,7 +64,9 @@ same code with a different membership scope.
 12. **Write durability:** local first, background replication. A write is durable on the local node's
     disk and returns immediately; replication to the other N-1 nodes follows. There is a window with
     a single copy, and `startfs status` must show files not yet fully replicated. Nodes with offer 0
-    need a local staging area for writes until replication completes.
+    need a local staging area for writes until replication completes. "Durable" means after
+    `fsync`, the periodic sync tick or shutdown; `close` alone does not wait for disk, as on a
+    local filesystem.
 
 13. **Metadata sync:** per-node operation log (create, write, rename, delete) stamped with hybrid
     logical clocks. Peers exchange missing entries: push when online, catch-up on reconnect. Applying

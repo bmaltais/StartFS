@@ -273,3 +273,17 @@ fn bad_names_are_rejected() {
 fn libc_eperm() -> i32 {
     1
 }
+
+#[test]
+fn fsynced_file_survives_a_node_crash_and_restart() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "synced", 0o600).unwrap();
+    fs.write(f.ino, 0, b"on disk").unwrap();
+    fs.fsync(f.ino).unwrap();
+
+    c.crash(0);
+    c.restart(0);
+    let again = fs.lookup(ROOT_INO, "synced").unwrap();
+    assert_eq!(fs.read(again.ino, 0, 10).unwrap(), b"on disk");
+}

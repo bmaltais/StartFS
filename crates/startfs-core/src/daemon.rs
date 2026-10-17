@@ -214,6 +214,10 @@ impl Daemon {
         // written keeps batching until it has been quiet for the commit delay.
         self.fs
             .flush_all_logged(false, self.config.write_commit_delay_ms * 1_000_000);
+        // Lazy commits reach disk here, before peers or replication build on them.
+        if let Err(e) = self.fs.sync() {
+            eprintln!("startfs: could not sync: {e:?}");
+        }
         self.sync_peers();
         let offer = self
             .membership
@@ -590,6 +594,9 @@ impl Daemon {
 
     pub fn handle(&self, req: Request) -> Response {
         self.fs.flush_all_logged(true, 0);
+        if let Err(e) = self.fs.sync() {
+            eprintln!("startfs: could not sync: {e:?}");
+        }
         match req {
             Request::Create { name, copies } => {
                 let mut membership = self.membership.lock().unwrap();
