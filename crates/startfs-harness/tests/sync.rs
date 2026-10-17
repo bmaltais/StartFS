@@ -143,3 +143,138 @@ fn deleting_a_conflict_copy_resolves_it_everywhere() {
     c.sync();
     assert_eq!(names(&c.fs(0), ROOT_INO), ["report.txt"]);
 }
+
+#[test]
+fn renames_and_deletes_propagate() {
+    let c = pair();
+    let (a, b) = (c.fs(0), c.fs(1));
+    let d = a.mkdir(ROOT_INO, "dir", 0o755).unwrap();
+    let f = a.create(ROOT_INO, "old", 0o644).unwrap();
+    a.write(f.ino, 0, b"keep me").unwrap();
+    a.create(ROOT_INO, "doomed", 0o644).unwrap();
+    c.sync();
+
+    c.advance(Duration::from_secs(1));
+    a.rename(ROOT_INO, "old", d.ino, "new").unwrap();
+    a.unlink(ROOT_INO, "doomed").unwrap();
+    c.sync();
+
+    assert_eq!(names(&b, ROOT_INO), ["dir"]);
+    let moved = b.lookup(d.ino, "new").unwrap();
+    assert_eq!(read_all(&b, moved.ino), b"keep me");
+}
+
+/// Both nodes hold file `x`; while partitioned, one renames it and the other
+/// deletes it, in the given order 10 seconds apart; then the partition heals.
+fn rename_delete_race(rename_first: bool) -> Cluster {
+    let c = pair();
+    let f = c.fs(0).create(ROOT_INO, "x", 0o644).unwrap();
+    c.fs(0).write(f.ino, 0, b"data").unwrap();
+    c.sync();
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    let rename = || c.fs(0).rename(ROOT_INO, "x", ROOT_INO, "y").unwrap();
+    let delete = || c.fs(1).unlink(ROOT_INO, "x").unwrap();
+    c.advance(Duration::from_secs(10));
+    if rename_first {
+        rename();
+        c.advance(Duration::from_secs(10));
+        delete();
+    } else {
+        delete();
+        c.advance(Duration::from_secs(10));
+        rename();
+    }
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    c
+}
+
+#[test]
+fn a_delete_newer_than_a_rename_wins() {
+    let c = rename_delete_race(true);
+    for i in 0..2 {
+        assert!(names(&c.fs(i), ROOT_INO).is_empty(), "node {i}");
+    }
+}
+
+#[test]
+fn a_rename_newer_than_a_delete_wins() {
+    let c = rename_delete_race(false);
+    for i in 0..2 {
+        assert_eq!(names(&c.fs(i), ROOT_INO), ["y"], "node {i}");
+        let y = c.fs(i).lookup(ROOT_INO, "y").unwrap();
+        assert_eq!(read_all(&c.fs(i), y.ino), b"data");
+    }
+}
+
+/// Both nodes hold empty directory `d`; while partitioned, A removes it and B
+/// adds `d/late`, in the given order 10 seconds apart; then the partition heals.
+fn write_into_deleted_dir(delete_first: bool) -> Cluster {
+    let c = pair();
+    c.fs(0).mkdir(ROOT_INO, "d", 0o755).unwrap();
+    c.sync();
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    let delete = || c.fs(0).rmdir(ROOT_INO, "d").unwrap();
+    let write = || {
+        let d = c.fs(1).lookup(ROOT_INO, "d").unwrap();
+        let f = c.fs(1).create(d.ino, "late", 0o644).unwrap();
+        c.fs(1).write(f.ino, 0, b"offline work").unwrap();
+    };
+    c.advance(Duration::from_secs(10));
+    if delete_first {
+        delete();
+        c.advance(Duration::from_secs(10));
+        write();
+    } else {
+        write();
+        c.advance(Duration::from_secs(10));
+        delete();
+    }
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    c
+}
+
+#[test]
+fn a_write_into_a_deleted_directory_recreates_the_path() {
+    for delete_first in [true, false] {
+        let c = write_into_deleted_dir(delete_first);
+        for i in 0..2 {
+            let fs = c.fs(i);
+            let d = fs.lookup(ROOT_INO, "d").unwrap();
+            let late = fs.lookup(d.ino, "late").unwrap();
+            assert_eq!(read_all(&fs, late.ino), b"offline work", "node {i}");
+        }
+    }
+}
+
+#[test]
+fn recreation_restores_every_deleted_ancestor() {
+    let c = pair();
+    let a = c.fs(0);
+    let x = a.mkdir(ROOT_INO, "x", 0o755).unwrap();
+    a.mkdir(x.ino, "y", 0o755).unwrap();
+    c.sync();
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    c.advance(Duration::from_secs(10));
+    let y = a.lookup(x.ino, "y").unwrap();
+    a.rmdir(x.ino, "y").unwrap();
+    a.rmdir(ROOT_INO, "x").unwrap();
+    c.advance(Duration::from_secs(10));
+    let b = c.fs(1);
+    let bx = b.lookup(ROOT_INO, "x").unwrap();
+    let by = b.lookup(bx.ino, "y").unwrap();
+    assert_eq!(by.ino, y.ino);
+    b.create(by.ino, "deep", 0o644).unwrap();
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    for i in 0..2 {
+        let fs = c.fs(i);
+        let x = fs.lookup(ROOT_INO, "x").unwrap();
+        let y = fs.lookup(x.ino, "y").unwrap();
+        assert_eq!(names(&fs, y.ino), ["deep"], "node {i}");
+    }
+}

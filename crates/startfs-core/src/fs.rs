@@ -559,6 +559,14 @@ impl FsOps for LocalFs {
             src_inode.parent = new_parent;
             src_inode.ctime = self.clock.now();
             t.put(src, &src_inode)?;
+            self.emit(
+                t,
+                Op::Rename {
+                    ino: src,
+                    parent: new_parent,
+                    name: new_name.to_string(),
+                },
+            )?;
             self.touch_dir(t, parent)?;
             self.touch_dir(t, new_parent)
         })

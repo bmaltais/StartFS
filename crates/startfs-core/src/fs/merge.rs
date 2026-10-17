@@ -5,7 +5,7 @@
 //! all nodes holding the same entries show the same tree.
 
 use super::*;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// One recorded state of an object.
 #[derive(Serialize, Deserialize, Clone)]
@@ -350,13 +350,37 @@ impl LocalFs {
             seed: Option<Hlc>,
             conflict: bool,
         }
+        // Live objects, plus any directory a live object needs to sit in: a
+        // write into a deleted directory recreates the path.
+        let mut alive: HashSet<Ino> = objects
+            .iter()
+            .filter(|(_, o)| o.kind.is_some() && o.loc.is_some() && o.alive())
+            .map(|(ino, _)| *ino)
+            .collect();
+        for start in alive.clone() {
+            let mut cur = start;
+            for _ in 0..4096 {
+                let Some((_, parent, _)) = objects.get(&cur).and_then(|o| o.loc.as_ref()) else {
+                    break;
+                };
+                let is_dir = objects
+                    .get(parent)
+                    .is_some_and(|p| p.kind == Some(FileKind::Dir) && p.loc.is_some());
+                if *parent == ROOT_INO || !is_dir {
+                    break;
+                }
+                alive.insert(*parent);
+                cur = *parent;
+            }
+        }
+
         let mut placed: Vec<Placed> = Vec::new();
         for (ino, o) in &objects {
             let (Some(kind), Some((_, parent, name)), Some(v)) = (o.kind, &o.loc, o.winner())
             else {
                 continue;
             };
-            if o.alive() {
+            if alive.contains(ino) {
                 placed.push(Placed {
                     ino: *ino,
                     kind,
