@@ -216,4 +216,51 @@ fn at_risk_chunks_are_repaired_before_degraded_ones() {
         "{made} copies made for {start:?}"
     );
 }
+
+#[test]
+fn the_grace_period_is_configurable() {
+    let c = cluster_with(2, 4, "repair_grace_secs = 600");
+    write_files(&c, 24);
+    let before = replicas(&c);
+
+    c.crash(3);
+    c.advance(9 * MINUTE);
+    c.sync();
+    assert_eq!(&replicas(&c)[..3], &before[..3], "repaired too early");
+
+    c.advance(2 * MINUTE);
+    c.sync();
+    let after = replicas(&c);
+    assert_eq!(after[..3].iter().sum::<u64>(), before.iter().sum::<u64>());
+}
+
+#[test]
+fn any_n_minus_one_nodes_can_fail_once_replication_completed() {
+    let c = cluster(3, 5);
+    let files: Vec<_> = (0..10)
+        .map(|i| {
+            let data = noise(8 * 1024, i + 1);
+            (put(&c.fs(0), &format!("f{i}"), &data), data)
+        })
+        .collect();
+    c.sync();
+    drop(files);
+
+    for (down_a, down_b) in [(0, 1), (2, 3), (3, 4)] {
+        c.crash(down_a);
+        c.crash(down_b);
+        for reader in (0..5).filter(|r| *r != down_a && *r != down_b) {
+            for i in 0..10 {
+                let ino = c.fs(reader).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+                assert_eq!(
+                    c.fs(reader).read(ino, 0, u32::MAX).unwrap(),
+                    noise(8 * 1024, i + 1),
+                    "node {reader} lost f{i} with {down_a} and {down_b} down"
+                );
+            }
+        }
+        c.restart(down_a);
+        c.restart(down_b);
+    }
+}
 // NEXT
