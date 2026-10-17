@@ -29,3 +29,10 @@ _Avoid_: Path, alias
 **Link**:
 An additional name for an existing file or symlink (hardlink). The object lives on until its last name is removed. Directories cannot be linked.
 _Avoid_: Reference, alias
+
+**Protocol version**:
+The number two members must share before they exchange messages. It changes when messages change shape, and is distinct from the release version.
+_Avoid_: Wire version, Version skew
+
+**Incompatible member**:
+A member whose protocol version differs from this node's, so the two refuse each other. `status` lists it as unreachable and says which version it speaks.

@@ -16,10 +16,21 @@ Needs Tailscale running, plus `fuse3` (Linux) or FUSE-T (macOS).
 curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
 ```
 
-Done when `startfs --version` prints a version and `startfs status` answers (on Linux the
+Done when `startfs --version` prints a version (for example `startfs 1.0.1 (protocol 4)`)
+and `startfs status` answers (on Linux the
 installer started the `startfs` systemd user service; read failures with
 `journalctl --user -u startfs`). On macOS start the daemon by hand:
 `startfs daemon --mount ~/StartFS &`.
+
+## Upgrade
+
+Run the same install command on every machine. It skips a machine that is already current,
+otherwise stops the service, swaps the binary (the old one stays as `startfs.prev`),
+restarts and checks the daemon, and rolls back if it does not answer. Data and config are
+untouched. If it warns that the protocol changed, upgrade every member: until they match,
+`startfs status` lists the others as down with `cannot reach: protocol version mismatch`.
+Done when `startfs status` on each machine shows all members `up`.
+`STARTFS_VERSION=vX.Y.Z` pins a release (older ones warn).
 
 ## Create a filesystem (first machine)
 
@@ -54,8 +65,8 @@ Read the `data:` line first:
 | `DEGRADED` | a file is short of copies, a repair is running, or a member is `down` or `lost` |
 | `AT RISK` | some data has a single copy left; act now |
 
-For anything but `SAFE`, quote the `redundancy:` line, the `members:` states and any
-`repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
+For anything but `SAFE`, quote the `redundancy:` line, the `members:` states, any
+`cannot reach:` reason under a member and any `repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
 call for a new machine to join, or `remove` once the machine is gone for good.
 
 ## Retire or remove a machine

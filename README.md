@@ -90,6 +90,66 @@ install -Dm755 target/release/startfs ~/.local/bin/startfs
 install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
 ```
 
+## Upgrading
+
+Run the installer again on each machine. It is the same command as the first install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
+```
+
+On a machine that already has StartFS, this is what it does, in order:
+
+1. **Picks the release.** The latest published release, or the one named by
+   `STARTFS_VERSION=v1.0.1`. If that is the version already installed it prints
+   "already up to date" and stops without touching anything. If it is older than the
+   installed one it refuses, unless you named it with `STARTFS_VERSION`, in which case
+   it warns and goes ahead.
+2. **Downloads and verifies.** It fetches the tarball for this OS and CPU and checks its
+   SHA-256 checksum. Nothing on your machine changes until this passes.
+3. **Warns about protocol changes.** If the new release speaks a different
+   [protocol version](GLOSSARY.md) from the installed one (`startfs --version` shows
+   both), it prints a warning: members on different protocols cannot sync, so upgrade
+   every member.
+4. **Stops the service.** The daemon unmounts `~/StartFS` cleanly. Programs with files
+   open on the mount will see it go away; close them first.
+5. **Replaces the binary**, keeping the old one next to it as `startfs.prev`, and
+   refreshes the systemd unit (Linux) before reloading it.
+6. **Starts the service and checks it.** It waits up to 15 seconds for the new daemon to
+   answer `startfs status`.
+7. **Rolls back if it does not answer.** The old binary is restored, the service is
+   started again, and the installer exits with an error, so the loop below stops at the
+   first machine that failed.
+
+It never touches your data directory (`~/.local/share/startfs`) or `config.toml`. A
+service that was stopped before the upgrade stays stopped. With `STARTFS_NO_SERVICE=1`
+it replaces the files and leaves the service alone. On macOS it restarts the launchd
+agent only if one is already loaded; it does not set one up.
+
+**Upgrade every member.** Nothing is lost while members run different releases, but if
+the release changes the protocol (step 3 warned you) the upgraded machine and the others
+cannot sync until all of them match. Until then `startfs status` lists the others as
+down with the reason, for example:
+
+```
+  2   100.64.0.7:7600   down  100G offered
+      cannot reach: protocol version mismatch: the peer speaks version 5, this node speaks version 4; upgrade this node
+```
+
+For several machines:
+
+```sh
+for host in alpha beta gamma; do
+  ssh "$host" 'curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh' || break
+done
+```
+
+Afterwards run `startfs status` on any machine: every member should be `up`.
+
+Downgrading is allowed but not recommended: a newer build can write state an older one
+refuses to read. If you built from source, rebuild and `systemctl --user restart
+startfs.service` instead.
+
 ## Quickstart
 
 The daemon is already running after the Linux install (on macOS or a manual install, run
