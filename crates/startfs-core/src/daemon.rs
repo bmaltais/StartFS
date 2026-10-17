@@ -371,6 +371,7 @@ impl Daemon {
                         stored_bytes: stats.stored_bytes,
                         offer_bytes: membership.my_offer(self.config.offer_bytes),
                     },
+                    cache: self.fs.cache_stats(),
                     members,
                     nodes,
                     copies_possible,

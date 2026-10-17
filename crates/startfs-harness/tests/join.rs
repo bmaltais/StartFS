@@ -220,7 +220,7 @@ fn an_offer_of_zero_makes_a_pure_client_that_adds_no_storage() {
 
 /// Incompressible bytes, so a file really needs chunk storage.
 fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed | 1;
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..len)
         .map(|_| {
             x ^= x << 13;
@@ -256,4 +256,102 @@ fn file_contents_are_fetched_from_a_peer_when_read() {
 
     c.network().heal();
     assert_eq!(b.read(on_b.ino, 0, u32::MAX).unwrap(), data);
+}
+
+#[test]
+fn recently_read_files_stay_readable_offline_and_unread_ones_do_not() {
+    let c = joined(2, 2);
+    let (a, b) = (c.fs(0), c.fs(1));
+    let seen = noise(100_000, 1);
+    let unseen = noise(100_000, 2);
+    write_file(&a, "seen", &seen);
+    write_file(&a, "unseen", &unseen);
+    c.sync();
+
+    let on_b = |name: &str| b.lookup(ROOT_INO, name).unwrap().ino;
+    assert_eq!(b.read(on_b("seen"), 0, u32::MAX).unwrap(), seen);
+
+    // Offline for good: the daemon can even restart and the cache survives.
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    c.crash(1);
+    c.restart(1);
+    assert_eq!(b.read(on_b("seen"), 0, u32::MAX).unwrap(), seen);
+    assert_eq!(b.read(on_b("unseen"), 0, 10), Err(FsError::Unavailable));
+}
+
+#[test]
+fn a_chunk_is_fetched_from_whichever_peer_can_supply_it() {
+    let c = joined(3, 3);
+    let data = noise(100_000, 3);
+    write_file(&c.fs(0), "f", &data);
+    c.sync();
+    // Node 1 reads (and so caches) the file, then the author goes away.
+    let on_1 = c.fs(1).lookup(ROOT_INO, "f").unwrap().ino;
+    assert_eq!(c.fs(1).read(on_1, 0, u32::MAX).unwrap(), data);
+    c.crash(0);
+
+    let on_2 = c.fs(2).lookup(ROOT_INO, "f").unwrap().ino;
+    assert_eq!(c.fs(2).read(on_2, 0, u32::MAX).unwrap(), data);
+}
+
+#[test]
+fn the_cache_is_bounded_and_drops_the_least_recently_used_file() {
+    // Room for two of the three 100 KB files.
+    let c = Cluster::start_with_config(2, "cache_bytes = 250000");
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    let a = c.fs(0);
+    let files: Vec<_> = (1..=3u64).map(|i| noise(100_000, 2 * i + 1)).collect();
+    for (i, data) in files.iter().enumerate() {
+        write_file(&a, &format!("f{i}"), data);
+    }
+    c.sync();
+
+    let b = c.fs(1);
+    let ino = |i: usize| b.lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+    for i in [0, 1, 0, 2] {
+        assert_eq!(b.read(ino(i), 0, u32::MAX).unwrap(), files[i]);
+    }
+    let cache = c.control(1).status().unwrap().cache;
+    assert_eq!(cache.capacity_bytes, 250_000);
+    assert!(cache.used_bytes <= 250_000, "{cache:?}");
+
+    // f1 was the least recently used when f2 arrived.
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    assert_eq!(b.read(ino(0), 0, u32::MAX).unwrap(), files[0]);
+    assert_eq!(b.read(ino(2), 0, u32::MAX).unwrap(), files[2]);
+    assert_eq!(b.read(ino(1), 0, 10), Err(FsError::Unavailable));
+}
+
+#[test]
+fn cache_eviction_never_touches_replica_storage() {
+    let c = Cluster::start_with_config(2, "cache_bytes = 120000");
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    let files: Vec<_> = (1..=3u64).map(|i| noise(100_000, 2 * i + 1)).collect();
+    for (i, data) in files.iter().enumerate() {
+        write_file(&c.fs(0), &format!("f{i}"), data);
+    }
+    c.sync();
+    let replicas_on_a = c.control(0).status().unwrap().usage;
+    assert_eq!(replicas_on_a.chunks, 3);
+
+    // Reading everything through a cache that holds one file churns it.
+    for round in 0..2 {
+        for i in 0..3 {
+            let ino = c.fs(1).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+            let got = c.fs(1).read(ino, 0, u32::MAX).unwrap();
+            assert_eq!(got, files[i], "round {round}");
+        }
+    }
+    // The reader stores no replicas; the author's replicas are untouched.
+    let b = c.control(1).status().unwrap();
+    assert_eq!((b.usage.chunks, b.usage.stored_bytes), (0, 0));
+    assert_eq!(b.cache.chunks, 1);
+    assert_eq!(c.control(0).status().unwrap().usage, replicas_on_a);
+
+    // The author's own files never depend on its cache.
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    let own = c.fs(0).lookup(ROOT_INO, "f0").unwrap().ino;
+    assert_eq!(c.fs(0).read(own, 0, u32::MAX).unwrap(), files[0]);
 }

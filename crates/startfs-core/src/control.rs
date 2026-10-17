@@ -1,6 +1,7 @@
 //! The control interface: how the CLI (and the test harness) talks to the
 //! daemon over a local unix socket. One JSON request line, one JSON response line.
 
+use crate::cache::CacheStats;
 use crate::daemon::Daemon;
 use crate::fs::ConflictCopy;
 use serde::{Deserialize, Serialize};
@@ -76,7 +77,10 @@ pub struct Status {
     /// `None` until a filesystem is created or joined.
     pub filesystem: Option<FilesystemInfo>,
     pub node_state: NodeState,
+    /// Replica storage on this node.
     pub usage: Usage,
+    /// Chunks fetched from peers; separate from replica storage.
+    pub cache: CacheStats,
     /// Members of the filesystem, by id.
     pub members: Vec<MemberStatus>,
     pub nodes: u32,
