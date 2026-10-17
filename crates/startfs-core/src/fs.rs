@@ -12,6 +12,7 @@ use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
 use redb::{Database, Durability, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -747,16 +748,24 @@ impl FsOps for LocalFs {
     }
 
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()> {
-        // Lazy like create: a crash may resurrect the entry, and `rm -rf` pays no fsync per entry.
+        let chunked = Cell::new(false);
+        // Lazy like create, so `rm -rf` pays no fsync per entry.
         self.run_as(true, Durability::None, |t| {
             t.dir(parent)?;
             let ino = t.entry(parent, name)?.ok_or(FsError::NotFound)?;
-            if t.inode(ino)?.kind == FileKind::Dir {
+            let inode = t.inode(ino)?;
+            if inode.kind == FileKind::Dir {
                 return Err(FsError::IsDir);
             }
+            chunked.set(matches!(inode.content, Content::Chunks(_)));
             self.remove_entry(t, parent, name, ino)?;
             self.touch_dir(t, parent)
-        })
+        })?;
+        // Dropping chunk references stays durable: the old chunks may be collected.
+        if chunked.get() {
+            self.sync()?;
+        }
+        Ok(())
     }
 
     fn rmdir(&self, parent: Ino, name: &str) -> FsResult<()> {

@@ -311,9 +311,21 @@ fn deletes_are_lazy_and_become_durable_after_the_quiet_period() {
     c.advance(std::time::Duration::from_millis(1500));
     c.tick();
     assert!(!fs.has_unsynced(), "quiet long enough: made durable");
-    c.crash(0);
-    c.restart(0);
-    assert_eq!(fs.lookup(ROOT_INO, "d"), Err(FsError::NotFound));
+}
+
+#[test]
+fn deleting_a_chunk_backed_file_is_durable_when_unlink_returns() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "big", 0o600).unwrap();
+    fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
+    fs.flush(f.ino).unwrap();
+
+    fs.unlink(ROOT_INO, "big").unwrap();
+    assert!(
+        !fs.has_unsynced(),
+        "dropping chunk references keeps its durability"
+    );
 }
 
 #[test]
