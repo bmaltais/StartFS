@@ -91,6 +91,10 @@ pub enum Op {
         ino: Ino,
         base: Option<Hlc>,
         snap: Snapshot,
+        /// The names (as stamped by their `Create` or `Link`) the writer saw
+        /// live. A write newer than the removal of one of them, made without
+        /// having seen that removal, keeps that name.
+        names: Vec<Hlc>,
     },
     /// An additional name for a file or symlink. The name is identified by
     /// the stamp of this entry.

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::oplog::{StateChunk, StatePin};
+use redb::ReadableTableMetadata;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// One recorded state of an object.
@@ -30,14 +31,18 @@ struct Name {
     loc: Option<Loc>,
     /// Latest unlink of this name.
     del: Option<Hlc>,
+    /// Latest write made while this name was live and not known to be unlinked.
+    seen: Option<Hlc>,
 }
 
 impl Name {
-    /// A name is live while it has been placed since it was last unlinked.
+    /// A name is live while it has been placed, or written through by someone
+    /// who had not seen it unlinked, since it was last unlinked.
     fn alive(&self) -> bool {
-        self.loc
-            .as_ref()
-            .is_some_and(|l| self.del.is_none_or(|d| l.0 > d))
+        self.loc.as_ref().is_some_and(|l| {
+            self.del
+                .is_none_or(|d| l.0 > d || self.seen.is_some_and(|s| s > d))
+        })
     }
 
     fn place(&mut self, at: Hlc, parent: Ino, name: &str) {
@@ -51,6 +56,7 @@ impl Name {
             self.loc = other.loc;
         }
         self.del = self.del.max(other.del);
+        self.seen = self.seen.max(other.seen);
     }
 }
 
@@ -61,8 +67,6 @@ struct Object {
     /// The names, by the stamp of the op that made each (`Hlc::ZERO` for the
     /// one a conflict copy gets when it is renamed or removed).
     names: BTreeMap<Hlc, Name>,
-    /// Latest op that is not an unlink.
-    max_live: Hlc,
     /// Versions nothing else is derived from.
     heads: Vec<Version>,
     /// Stamps of versions that something else is derived from.
@@ -76,7 +80,6 @@ impl Object {
         for (slot, n) in other.names {
             self.names.entry(slot).or_default().join(n);
         }
-        self.max_live = self.max_live.max(other.max_live);
         for s in other.superseded {
             if !self.superseded.contains(&s) {
                 self.superseded.push(s);
@@ -91,29 +94,13 @@ impl Object {
         self.heads.retain(|h| !superseded.contains(&h.hlc));
     }
 
-    /// The live names. An object with none that was written after its last
-    /// name went comes back under the name removed last.
+    /// The live names.
     fn live(&self) -> Vec<(Hlc, &Loc)> {
-        let live: Vec<_> = self
-            .names
+        self.names
             .iter()
             .filter(|(_, n)| n.alive())
             .filter_map(|(slot, n)| Some((*slot, n.loc.as_ref()?)))
-            .collect();
-        if !live.is_empty() {
-            return live;
-        }
-        let last = self
-            .names
-            .iter()
-            .filter(|(_, n)| n.loc.is_some())
-            .max_by_key(|(slot, n)| (n.del, **slot));
-        match last {
-            Some((slot, n)) if n.del.is_some_and(|d| self.max_live > d) => {
-                vec![(*slot, n.loc.as_ref().expect("filtered"))]
-            }
-            _ => Vec::new(),
-        }
+            .collect()
     }
 
     /// Where the most recently placed name is, live or not.
@@ -177,6 +164,11 @@ pub struct ConflictCopy {
 #[derive(Serialize, Deserialize)]
 struct ConflictRec {
     path: String,
+    /// The directory entry that shows it.
+    entry: (Ino, String),
+    /// The directory and name the copy is named after: the name it lost, or
+    /// the name of the object it was saved from.
+    base: (Ino, String),
     /// For a copy of an older version: the version it was saved from.
     seed: Option<Hlc>,
 }
@@ -284,25 +276,95 @@ impl Tables<'_> {
         self.objects.insert(ino, enc(o).as_slice()).map_err(db)?;
         Ok(())
     }
-    fn conflict(&self, ino: Ino) -> FsResult<Option<ConflictRec>> {
+    /// The records of the entries showing `ino` as a conflict: one for each
+    /// name of a hardlinked file that lost a collision.
+    fn conflict_recs(&self, ino: Ino) -> FsResult<Vec<ConflictRec>> {
         match self.conflicts.get(ino).map_err(db)? {
-            Some(g) => Ok(Some(dec(g.value())?)),
-            None => Ok(None),
+            Some(g) => dec(g.value()),
+            None => Ok(Vec::new()),
         }
     }
-    /// The names of the object that the entry `(parent, name)` shows: several
-    /// when names of one file landed on one string and show as one entry.
-    pub(super) fn slots(&self, parent: Ino, name: &str) -> FsResult<Vec<Hlc>> {
+    fn conflict(&self, ino: Ino) -> FsResult<Option<ConflictRec>> {
+        Ok(self.conflict_recs(ino)?.into_iter().next())
+    }
+    /// Forget the conflict record of one name of `ino`, which has gone.
+    pub(super) fn drop_conflict(&mut self, ino: Ino, parent: Ino, name: &str) -> FsResult<()> {
+        let mut recs = self.conflict_recs(ino)?;
+        let before = recs.len();
+        recs.retain(|r| r.entry != (parent, name.to_string()));
+        if recs.len() != before {
+            if recs.is_empty() {
+                self.conflicts.remove(ino).map_err(db)?;
+            } else {
+                self.conflicts
+                    .insert(ino, enc(&recs).as_slice())
+                    .map_err(db)?;
+            }
+        }
+        Ok(())
+    }
+    /// The names (object and name) that the entry `(parent, name)` shows. Several
+    /// when names of one file landed on one string, or directories of one name
+    /// were merged: the entry stands for all of them.
+    pub(super) fn slots(&self, parent: Ino, name: &str, shown: Ino) -> FsResult<Vec<(Ino, Hlc)>> {
         match self.names.get((parent, name)).map_err(db)? {
             Some(g) => dec(g.value()),
-            None => Ok(vec![Hlc::ZERO]),
+            None => Ok(vec![(shown, Hlc::ZERO)]),
         }
     }
-    pub(super) fn set_slots(&mut self, parent: Ino, name: &str, slots: &[Hlc]) -> FsResult<()> {
+    pub(super) fn set_slots(
+        &mut self,
+        parent: Ino,
+        name: &str,
+        slots: &[(Ino, Hlc)],
+    ) -> FsResult<()> {
         self.names
             .insert((parent, name), enc(&slots).as_slice())
             .map_err(db)?;
         Ok(())
+    }
+
+    /// Whether a directory only shows because something in it needs the path:
+    /// it was removed, and goes once its last entry does.
+    pub(super) fn is_ghost(&self, dir: Ino) -> FsResult<bool> {
+        Ok(dir != ROOT_INO && {
+            let o = self.object(dir)?;
+            o.kind == Some(FileKind::Dir) && !o.alive()
+        })
+    }
+
+    /// Whether a conflict copy is named after `(parent, name)`.
+    pub(super) fn copies_at(&self, parent: Ino, name: &str) -> FsResult<bool> {
+        for row in self.conflicts.iter().map_err(db)? {
+            let recs: Vec<ConflictRec> = dec(row.map_err(db)?.1.value())?;
+            if recs.iter().any(|r| r.base.0 == parent && r.base.1 == name) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether the object takes part in a name collision, which its newest
+    /// version decides: it lost one, or conflict copies are named after its name.
+    pub(super) fn collides(&self, ino: Ino) -> FsResult<bool> {
+        if self.conflicts.is_empty().map_err(db)? {
+            return Ok(false);
+        }
+        if self.conflicts.get(ino).map_err(db)?.is_some() {
+            return Ok(true);
+        }
+        for (_, loc) in self.object(ino)?.placements() {
+            if self.copies_at(loc.1, &loc.2)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether the object has versions shown as conflict copies, which take
+    /// their names from the object's.
+    pub(super) fn has_copies(&self, ino: Ino) -> FsResult<bool> {
+        Ok(self.object(ino)?.heads.len() > 1)
     }
     fn next_seq(&self, origin: MemberId) -> FsResult<u64> {
         Ok(self
@@ -323,6 +385,8 @@ struct Placed {
     version: Version,
     /// Set for conflict copies of an older version.
     seed: Option<Hlc>,
+    /// For those, the directory and name of the object they were saved from.
+    base: Option<(Ino, String)>,
     conflict: bool,
 }
 
@@ -356,8 +420,24 @@ impl LocalFs {
             None => t.conflict(ino)?.and_then(|c| c.seed),
         };
         let snap = self.snapshot(i);
-        self.emit_at(t, Op::Set { ino, base, snap }, wall)
-            .map(|_| ())
+        let names = t
+            .object(ino)?
+            .live()
+            .iter()
+            .map(|(slot, _)| *slot)
+            .collect();
+        let op = Op::Set {
+            ino,
+            base,
+            snap,
+            names,
+        };
+        self.emit_at(t, op, wall)?;
+        // The newest version decides who keeps a name two objects claim.
+        if t.collides(ino)? {
+            self.reconcile(t)?;
+        }
+        Ok(())
     }
 
     /// Append a local operation to this node's log.
@@ -429,13 +509,20 @@ impl LocalFs {
                     .entry(e.hlc)
                     .or_default()
                     .place(e.hlc, *parent, name);
-                o.max_live = o.max_live.max(e.hlc);
                 o.add_version(self.version(e.hlc, None, snap));
                 t.put_object(*ino, &o)
             }
-            Op::Set { ino, base, snap } => {
+            Op::Set {
+                ino,
+                base,
+                snap,
+                names,
+            } => {
                 let mut o = t.object(*ino)?;
-                o.max_live = o.max_live.max(e.hlc);
+                for slot in names {
+                    let n = o.names.entry(*slot).or_default();
+                    n.seen = n.seen.max(Some(e.hlc));
+                }
                 o.add_version(self.version(e.hlc, *base, snap));
                 t.put_object(*ino, &o)
             }
@@ -445,7 +532,6 @@ impl LocalFs {
                     .entry(e.hlc)
                     .or_default()
                     .place(e.hlc, *parent, name);
-                o.max_live = o.max_live.max(e.hlc);
                 t.put_object(*ino, &o)
             }
             Op::Rename {
@@ -459,7 +545,6 @@ impl LocalFs {
                     .entry(*slot)
                     .or_default()
                     .place(e.hlc, *parent, name);
-                o.max_live = o.max_live.max(e.hlc);
                 t.put_object(*ino, &o)
             }
             Op::Unlink { ino, slot } => {
@@ -628,8 +713,8 @@ impl LocalFs {
         self.run(false, |t| {
             let mut out = Vec::new();
             for row in t.conflicts.iter().map_err(db)? {
-                let rec: ConflictRec = dec(row.map_err(db)?.1.value())?;
-                out.push(ConflictCopy { path: rec.path });
+                let recs: Vec<ConflictRec> = dec(row.map_err(db)?.1.value())?;
+                out.extend(recs.into_iter().map(|r| ConflictCopy { path: r.path }));
             }
             out.sort_by(|a, b| a.path.cmp(&b.path));
             Ok(out)
@@ -712,6 +797,7 @@ impl LocalFs {
             slot: Hlc::ZERO,
             version,
             seed: None,
+            base: None,
             conflict: false,
         });
     }
@@ -769,6 +855,7 @@ impl LocalFs {
                     slot: *slot,
                     version: v.clone(),
                     seed: None,
+                    base: None,
                     conflict: false,
                 });
             }
@@ -777,18 +864,17 @@ impl LocalFs {
             }
             // Versions written concurrently with the winner survive as copies,
             // next to the object's first name.
-            let (_, (_, parent, name)) = places[0];
+            let (_, (_, primary_parent, primary_name)) = places[0];
             for loser in o.heads.iter().filter(|h| h.hlc != v.hlc) {
                 let cino = conflict_ino(*ino, loser.hlc);
                 let s = objects.get(&cino);
                 if s.is_some_and(Object::unlinked) {
                     continue; // the user resolved it
                 }
-                let (parent, name) = s
-                    .and_then(Object::home)
-                    .map_or((*parent, conflict_name(name, loser.hlc)), |(_, l)| {
-                        (l.1, l.2.clone())
-                    });
+                let (parent, name) = s.and_then(Object::home).map_or(
+                    (*primary_parent, conflict_name(primary_name, loser.hlc)),
+                    |(_, l)| (l.1, l.2.clone()),
+                );
                 placed.push(Placed {
                     ino: cino,
                     kind,
@@ -797,6 +883,7 @@ impl LocalFs {
                     slot: Hlc::ZERO,
                     version: s.and_then(Object::winner).unwrap_or(loser).clone(),
                     seed: Some(loser.hlc),
+                    base: Some((*primary_parent, primary_name.clone())),
                     conflict: true,
                 });
             }
@@ -820,8 +907,10 @@ impl LocalFs {
         let mut merged: HashMap<Ino, Vec<Ino>> = HashMap::new();
         // Names shown per file, for its link count.
         let mut links: HashMap<Ino, u32> = HashMap::new();
+        // Conflict records by file; a hardlinked file can lose several collisions.
+        let mut recs: HashMap<Ino, Vec<ConflictRec>> = HashMap::new();
         // The other names that a shown entry stands for, by index in `placed`.
-        let mut also: HashMap<usize, Vec<Hlc>> = HashMap::new();
+        let mut also: HashMap<usize, Vec<(Ino, Hlc)>> = HashMap::new();
         while let Some(dir) = queue.pop_front() {
             let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
             let sources = std::iter::once(dir).chain(merged.get(&dir).cloned().unwrap_or_default());
@@ -833,8 +922,8 @@ impl LocalFs {
                         .push(idx);
                 }
             }
-            // (index, name to show, whether it is shown as a conflict)
-            let mut shown: Vec<(usize, String, bool)> = Vec::new();
+            // (index, name to show, whether it is shown as a conflict, name it collided on)
+            let mut shown: Vec<(usize, String, bool, &str)> = Vec::new();
             for (name, mut group) in groups {
                 group.sort_by_key(|&i| std::cmp::Reverse(placed[i].version.hlc));
                 // Two names of one object under one string are one entry that
@@ -842,7 +931,9 @@ impl LocalFs {
                 let mut first: HashMap<Ino, usize> = HashMap::new();
                 group.retain(|&i| match first.get(&placed[i].ino) {
                     Some(&kept) => {
-                        also.entry(kept).or_default().push(placed[i].slot);
+                        also.entry(kept)
+                            .or_default()
+                            .push((placed[i].ino, placed[i].slot));
                         false
                     }
                     None => {
@@ -851,23 +942,34 @@ impl LocalFs {
                     }
                 });
                 let winner = group[0];
-                shown.push((winner, name.to_string(), placed[winner].conflict));
+                // A copy named earlier may have taken this very string: it gives way.
+                if let Some(pos) = shown.iter().position(|(_, n, _, _)| n == name) {
+                    let mut renamed = format!("{name} 2");
+                    while shown.iter().any(|(_, n, _, _)| *n == renamed) {
+                        renamed.push_str(" 2");
+                    }
+                    shown[pos].1 = renamed;
+                }
+                shown.push((winner, name.to_string(), placed[winner].conflict, name));
                 for &loser in &group[1..] {
                     if placed[winner].kind == FileKind::Dir && placed[loser].kind == FileKind::Dir {
                         merged
                             .entry(placed[winner].ino)
                             .or_default()
                             .push(placed[loser].ino);
+                        also.entry(winner)
+                            .or_default()
+                            .push((placed[loser].ino, placed[loser].slot));
                         continue;
                     }
                     let mut copy = conflict_name(name, placed[loser].version.hlc);
-                    while shown.iter().any(|(_, n, _)| *n == copy) {
+                    while shown.iter().any(|(_, n, _, _)| *n == copy) {
                         copy.push_str(" 2");
                     }
-                    shown.push((loser, copy, true));
+                    shown.push((loser, copy, true, name));
                 }
             }
-            for (idx, name, conflict) in shown {
+            for (idx, name, conflict, collided) in shown {
                 let p = &placed[idx];
                 let v = &p.version;
                 let inode = Inode {
@@ -883,7 +985,7 @@ impl LocalFs {
                 };
                 t.put(p.ino, &inode)?;
                 t.dirents.insert((dir, name.as_str()), p.ino).map_err(db)?;
-                let slots: Vec<Hlc> = std::iter::once(p.slot)
+                let slots: Vec<(Ino, Hlc)> = std::iter::once((p.ino, p.slot))
                     .chain(also.get(&idx).into_iter().flatten().copied())
                     .collect();
                 t.set_slots(dir, &name, &slots)?;
@@ -894,17 +996,20 @@ impl LocalFs {
                 if conflict {
                     let rec = ConflictRec {
                         path: path.clone(),
+                        entry: (dir, name.clone()),
+                        base: p.base.clone().unwrap_or((dir, collided.to_string())),
                         seed: p.seed,
                     };
-                    t.conflicts
-                        .insert(p.ino, enc(&rec).as_slice())
-                        .map_err(db)?;
+                    recs.entry(p.ino).or_default().push(rec);
                 }
                 if p.kind == FileKind::Dir {
                     paths.insert(p.ino, path);
                     queue.push_back(p.ino);
                 }
             }
+        }
+        for (ino, recs) in recs {
+            t.conflicts.insert(ino, enc(&recs).as_slice()).map_err(db)?;
         }
         for (ino, n) in links.into_iter().filter(|&(_, n)| n > 1) {
             let mut inode = t.inode(ino)?;

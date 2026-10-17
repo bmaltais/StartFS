@@ -22,9 +22,13 @@ same object, so "where does it live" becomes "which names does it have", and
   name converging on one location, as before.
 - **Ops**: `Create` and `Link` add a name; `Rename` and `Unlink` act on a named
   one. `Delete` is gone: removing the last name is an `Unlink`.
-- **Liveness**: an object is alive while it has a live name. If it has none, a
-  write newer than every removal revives it under the name removed last, as a
-  write into a deleted file always has.
+- **Liveness**: a name is live while it has been placed since it was last
+  unlinked, or written through since by someone who had not seen it unlinked: a
+  write records the names it saw live (`Set.names`), and a write newer than the
+  removal of such a name keeps the name, as a write into a deleted file always
+  has. A write made after seeing the removal does not bring the name back, and
+  linking another name changes nothing about the others. An object is alive
+  while it has a live name.
 - **Last name against a new name (the real decision)**: an `Unlink` of the last
   name racing a `Link` of a new one resolves as **link wins**. The new name is
   live, so the object survives and no data is lost to a race. This is add-wins,
@@ -57,6 +61,8 @@ whole.
 
 - `nlink` is the number of live names, computed in `reconcile` and kept in step
   by the local `link`/`unlink` path.
+- A hardlinked file can lose several name collisions, so conflict records are
+  kept per displayed entry, not per file.
 - A hardlinked file's conflict copies are separate objects, as before; a
   conflict copy itself cannot be hardlinked (`EPERM`) until it is resolved.
 - Concurrent writes through different names still conflict like writes through

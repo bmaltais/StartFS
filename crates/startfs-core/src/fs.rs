@@ -459,7 +459,7 @@ impl LocalFs {
                 snap,
             },
         )?;
-        t.set_slots(parent, name, &[slot])?;
+        t.set_slots(parent, name, &[(ino, slot)])?;
         Ok(self.attr(ino, &inode))
     }
 
@@ -617,9 +617,30 @@ impl LocalFs {
         }
     }
 
+    /// Conflict copies are named after a name: the one they lost, or their
+    /// object's, and a removed directory shows only while something is in it.
+    /// When such a name goes or moves here, or an object with copies
+    /// is renamed, the tree is derived again, as every other node will from
+    /// the log, so the copies are named alike everywhere.
+    fn rename_copies(
+        &self,
+        t: &mut Tables<'_>,
+        vacated: &[(Ino, &str)],
+        moved: &[Ino],
+    ) -> FsResult<()> {
+        let mut stale = false;
+        for (parent, name) in vacated {
+            stale |= t.copies_at(*parent, name)? || t.is_ghost(*parent)?;
+        }
+        for ino in moved {
+            stale |= t.has_copies(*ino)? || t.collides(*ino)?;
+        }
+        if stale { self.reconcile(t) } else { Ok(()) }
+    }
+
     /// Remove one name and record it in the log. The object goes with its last name.
     fn remove_entry(&self, t: &mut Tables<'_>, parent: Ino, name: &str, ino: Ino) -> FsResult<()> {
-        let slots = t.slots(parent, name)?;
+        let slots = t.slots(parent, name, ino)?;
         t.dirents.remove((parent, name)).map_err(db)?;
         t.names.remove((parent, name)).map_err(db)?;
         let mut i = t.inode(ino)?;
@@ -627,11 +648,12 @@ impl LocalFs {
             i.nlink -= 1;
             i.ctime = self.clock.now();
             t.put(ino, &i)?;
+            t.drop_conflict(ino, parent, name)?;
         } else {
             t.inodes.remove(ino).map_err(db)?;
             t.conflicts.remove(ino).map_err(db)?;
         }
-        for slot in slots {
+        for (ino, slot) in slots {
             self.emit(t, Op::Unlink { ino, slot })?;
         }
         Ok(())
@@ -749,7 +771,7 @@ impl FsOps for LocalFs {
                 name: new_name.to_string(),
             };
             let slot = self.emit(t, op)?;
-            t.set_slots(new_parent, new_name, &[slot])?;
+            t.set_slots(new_parent, new_name, &[(ino, slot)])?;
             Ok(self.attr(ino, &i))
         })?;
         Ok(self.with_buffered(attr))
@@ -803,7 +825,8 @@ impl FsOps for LocalFs {
             // Only the last name drops the chunk references.
             chunked.set(matches!(inode.content, Content::Chunks(_)) && inode.nlink <= 1);
             self.remove_entry(t, parent, name, ino)?;
-            self.touch_dir(t, parent)
+            self.touch_dir(t, parent)?;
+            self.rename_copies(t, &[(parent, name)], &[ino])
         })?;
         // Dropping chunk references stays durable: the old chunks may be collected.
         if chunked.get() {
@@ -821,7 +844,8 @@ impl FsOps for LocalFs {
                 return Err(FsError::NotEmpty);
             }
             self.remove_entry(t, parent, name, ino)?;
-            self.touch_dir(t, parent)
+            self.touch_dir(t, parent)?;
+            self.rename_copies(t, &[(parent, name)], &[ino])
         })
     }
 
@@ -846,10 +870,12 @@ impl FsOps for LocalFs {
                     cur = t.inode(cur)?.parent;
                 }
             }
+            let mut changed = vec![src];
             if let Some(dst) = t.entry(new_parent, new_name)? {
                 if dst == src {
                     return Ok(());
                 }
+                changed.push(dst);
                 let dst_is_dir = t.inode(dst)?.kind == FileKind::Dir;
                 match (is_dir, dst_is_dir) {
                     (true, false) => return Err(FsError::NotDir),
@@ -859,7 +885,7 @@ impl FsOps for LocalFs {
                 }
                 self.remove_entry(t, new_parent, new_name, dst)?;
             }
-            let slots = t.slots(parent, name)?;
+            let slots = t.slots(parent, name, src)?;
             t.dirents.remove((parent, name)).map_err(db)?;
             t.names.remove((parent, name)).map_err(db)?;
             t.dirents.insert((new_parent, new_name), src).map_err(db)?;
@@ -867,9 +893,9 @@ impl FsOps for LocalFs {
             src_inode.parent = new_parent;
             src_inode.ctime = self.clock.now();
             t.put(src, &src_inode)?;
-            for slot in slots {
+            for (ino, slot) in slots {
                 let op = Op::Rename {
-                    ino: src,
+                    ino,
                     slot,
                     parent: new_parent,
                     name: new_name.to_string(),
@@ -880,9 +906,10 @@ impl FsOps for LocalFs {
             self.touch_dir(t, new_parent)?;
             if parent == merge::lost_found_ino() {
                 // Leaving `lost+found` may empty it, and it then goes away.
-                self.reconcile(t)?;
+                self.reconcile(t)
+            } else {
+                self.rename_copies(t, &[(parent, name), (new_parent, new_name)], &changed)
             }
-            Ok(())
         })
     }
 
