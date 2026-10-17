@@ -223,17 +223,18 @@ impl Daemon {
                     .collect()
             })
             .unwrap_or_default();
-        let held = self
-            .syncer
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|s| s.held_by_all(&gone));
+        let (held, settled) = {
+            let syncer = self.syncer.lock().unwrap();
+            let Some(s) = syncer.as_ref() else {
+                return false;
+            };
+            (s.held_by_all(&gone), s.converged())
+        };
         let Some(held) = held else {
             return false;
         };
         *last = Some(now);
-        let _ = self.fs.compact(&held);
+        let _ = self.fs.compact(&held, settled);
         false
     }
 
@@ -721,6 +722,7 @@ impl Daemon {
                     repair,
                     log: LogStatus {
                         entries: self.fs.log_len().unwrap_or(0),
+                        objects: self.fs.object_count().unwrap_or(0),
                     },
                     scrub: self.scrubber.status(
                         now,

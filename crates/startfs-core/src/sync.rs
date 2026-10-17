@@ -22,6 +22,8 @@ const BATCH: usize = 256;
 struct Peer {
     /// What the peer is believed to hold, once it has said so.
     known: Option<Frontier>,
+    /// What the peer itself last said it holds (never a guess).
+    confirmed: Option<Frontier>,
     last_hello: Option<Nanos>,
 }
 
@@ -63,7 +65,8 @@ impl Syncer {
             Message::Hello(f) => {
                 let peer = self.peers.get_mut(&from).expect("known peer");
                 let first = peer.known.is_none();
-                peer.known = Some(f);
+                peer.known = Some(f.clone());
+                peer.confirmed = Some(f);
                 if first && let Ok(f) = self.fs.frontier() {
                     // The peer may not have heard from us yet: say what we hold.
                     self.send(from, &Message::Hello(f));
@@ -91,7 +94,7 @@ impl Syncer {
     pub fn held_by_all(&self, except: &[NodeId]) -> Option<Frontier> {
         let mut all: Option<Frontier> = None;
         for (_, p) in self.peers.iter().filter(|(id, _)| !except.contains(id)) {
-            let known = p.known.as_ref()?;
+            let known = p.confirmed.as_ref()?;
             all = Some(match all {
                 None => known.clone(),
                 Some(mut so_far) => {
@@ -108,6 +111,22 @@ impl Syncer {
             (None, true) => self.fs.frontier().ok(),
             (None, false) => None,
         }
+    }
+
+    /// Whether every peer, lost ones included, has itself said it holds exactly
+    /// what we hold: nobody has anything that is yet to reach anybody.
+    pub fn converged(&self) -> bool {
+        let Ok(ours) = self.fs.frontier() else {
+            return false;
+        };
+        let same = |a: &Frontier, b: &Frontier| {
+            a.keys()
+                .chain(b.keys())
+                .all(|o| a.get(o).unwrap_or(&0) == b.get(o).unwrap_or(&0))
+        };
+        self.peers
+            .values()
+            .all(|p| p.confirmed.as_ref().is_some_and(|k| same(k, &ours)))
     }
 
     /// Whether every peer not in `except` is known to hold all of our log.

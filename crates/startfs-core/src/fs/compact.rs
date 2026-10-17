@@ -13,9 +13,15 @@ impl LocalFs {
         self.run(false, |t| Ok(t.log.len().map_err(db)?))
     }
 
+    /// Objects whose merge state is kept.
+    pub fn object_count(&self) -> FsResult<u64> {
+        self.run(false, |t| Ok(t.objects.len().map_err(db)?))
+    }
+
     /// Drop log entries below `upto` (per origin, never beyond what this node
-    /// holds itself).
-    pub fn compact(&self, upto: &Frontier) -> FsResult<()> {
+    /// holds itself). With `settled`, every member holds the whole log, so the
+    /// bookkeeping that guards against late arrivals goes too.
+    pub fn compact(&self, upto: &Frontier, settled: bool) -> FsResult<()> {
         self.run(true, |t| {
             let mine: Vec<(u32, u64)> = t
                 .frontier
@@ -33,6 +39,9 @@ impl LocalFs {
                         .map_err(db)?;
                     t.logbase.insert(origin, target).map_err(db)?;
                 }
+            }
+            if settled {
+                t.purge_settled()?;
             }
             Ok(())
         })

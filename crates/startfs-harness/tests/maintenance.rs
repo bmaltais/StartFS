@@ -309,3 +309,30 @@ fn a_node_offline_across_a_compaction_still_converges() {
         assert_eq!(c.fs(i).read(n.ino, 0, u32::MAX).unwrap(), b"offline work");
     }
 }
+
+#[test]
+fn deleted_files_leave_no_metadata_behind_once_every_member_has_caught_up() {
+    let c = cluster(2, 3);
+    for i in 0..20 {
+        put(&c.fs(0), &format!("f{i}"), b"x");
+    }
+    c.sync();
+    let objects = |c: &Cluster, i| c.control(i).status().unwrap().log.objects;
+    assert!(objects(&c, 0) >= 20);
+
+    // Node 2 has not heard about the deletes, so tombstones must stay.
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    for i in 0..20 {
+        c.fs(0).unlink(ROOT_INO, &format!("f{i}")).unwrap();
+    }
+    pass(&c, 3 * HOUR, Duration::from_secs(1800));
+    assert!(objects(&c, 0) >= 20, "tombstones dropped too early");
+
+    c.network().heal();
+    pass(&c, 3 * HOUR, Duration::from_secs(1800));
+    for i in 0..3 {
+        assert!(names(&c.fs(i)).is_empty(), "node {i} resurrected files");
+        assert!(objects(&c, i) < 5, "node {i}: {}", objects(&c, i));
+    }
+}

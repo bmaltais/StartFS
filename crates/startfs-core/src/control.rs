@@ -164,6 +164,9 @@ pub struct ScrubStatus {
 pub struct LogStatus {
     /// Operation log entries not yet compacted away.
     pub entries: u64,
+    /// Objects (files, directories, symlinks) whose merge state is kept,
+    /// deleted ones included until every member has seen the delete.
+    pub objects: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

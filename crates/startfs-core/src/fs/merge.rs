@@ -148,6 +148,30 @@ fn dec<'a, T: Deserialize<'a>>(raw: &'a [u8]) -> FsResult<T> {
 }
 
 impl Tables<'_> {
+    /// Forget what only matters while some member might not have seen it:
+    /// superseded versions, and objects that are deleted. Safe only when every
+    /// member holds the whole log. Conflict copies keep their records: a
+    /// deleted one is how the tree remembers it was resolved.
+    pub(super) fn purge_settled(&mut self) -> FsResult<()> {
+        let mut all = Vec::new();
+        for row in self.objects.iter().map_err(db)? {
+            let (k, v) = row.map_err(db)?;
+            all.push((k.value(), dec::<Object>(v.value())?));
+        }
+        for (ino, mut o) in all {
+            if ino & (1 << 63) != 0 {
+                continue;
+            }
+            if o.kind.is_none() || !o.alive() {
+                self.objects.remove(ino).map_err(db)?;
+            } else if !o.superseded.is_empty() {
+                o.superseded.clear();
+                self.put_object(ino, &o)?;
+            }
+        }
+        Ok(())
+    }
+
     fn object(&self, ino: Ino) -> FsResult<Object> {
         match self.objects.get(ino).map_err(db)? {
             Some(g) => dec(g.value()),
