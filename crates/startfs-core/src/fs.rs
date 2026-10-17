@@ -747,7 +747,8 @@ impl FsOps for LocalFs {
     }
 
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()> {
-        self.run(true, |t| {
+        // Lazy like create: a crash may resurrect the entry, and `rm -rf` pays no fsync per entry.
+        self.run_as(true, Durability::None, |t| {
             t.dir(parent)?;
             let ino = t.entry(parent, name)?.ok_or(FsError::NotFound)?;
             if t.inode(ino)?.kind == FileKind::Dir {
@@ -759,7 +760,7 @@ impl FsOps for LocalFs {
     }
 
     fn rmdir(&self, parent: Ino, name: &str) -> FsResult<()> {
-        self.run(true, |t| {
+        self.run_as(true, Durability::None, |t| {
             t.dir(parent)?;
             let ino = t.entry(parent, name)?.ok_or(FsError::NotFound)?;
             t.dir(ino)?;

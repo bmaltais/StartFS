@@ -295,6 +295,28 @@ fn creates_become_durable_on_fsync_or_after_the_quiet_period_but_not_on_close() 
 }
 
 #[test]
+fn deletes_are_lazy_and_become_durable_after_the_quiet_period() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let d = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    fs.create(d.ino, "f", 0o644).unwrap();
+    fs.fsync(d.ino).unwrap();
+    assert!(!fs.has_unsynced());
+
+    fs.unlink(d.ino, "f").unwrap();
+    fs.rmdir(ROOT_INO, "d").unwrap();
+    assert!(fs.has_unsynced(), "a delete does not wait for disk");
+    assert_eq!(fs.lookup(ROOT_INO, "d"), Err(FsError::NotFound));
+
+    c.advance(std::time::Duration::from_millis(1500));
+    c.tick();
+    assert!(!fs.has_unsynced(), "quiet long enough: made durable");
+    c.crash(0);
+    c.restart(0);
+    assert_eq!(fs.lookup(ROOT_INO, "d"), Err(FsError::NotFound));
+}
+
+#[test]
 fn a_file_larger_than_inline_is_durable_when_its_close_returns() {
     let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
     let fs = c.fs(0);
