@@ -19,6 +19,11 @@ pub struct NodeFs {
 }
 
 impl NodeFs {
+    /// Whether the node holds commits that are not yet on disk.
+    pub fn has_unsynced(&self) -> bool {
+        self.fs().is_ok_and(|fs| fs.has_unsynced())
+    }
+
     fn fs(&self) -> FsResult<Arc<LocalFs>> {
         self.slot.lock().unwrap().clone().ok_or(FsError::NodeDown)
     }
@@ -122,6 +127,9 @@ impl Cluster {
         let mut config_for_nodes = Config::parse(config_toml).expect("valid config");
         // Tests that write and then let the cluster settle expect the write to
         // be committed by the next tick, unless they ask for a delay.
+        if !config_toml.contains("sync_quiet_ms") {
+            config_for_nodes.sync_quiet_ms = 0;
+        }
         if !config_toml.contains("write_commit_delay_ms") {
             config_for_nodes.write_commit_delay_ms = 0;
         }

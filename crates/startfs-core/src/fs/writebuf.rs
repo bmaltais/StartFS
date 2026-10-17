@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::chunker::MAX_CHUNK;
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
 /// Default cap on a file's buffered bytes before a batch is committed.
@@ -123,11 +124,13 @@ impl LocalFs {
         let Some(d) = dirty.remove(&ino) else {
             return Ok(());
         };
+        let chunked = Cell::new(false);
         let done = self.fetching_as(true, Durability::None, |t, spill| {
             let mut i = Self::file(t, ino)?;
             let Some(spliced) = self.splice(&i, &d, last, spill)? else {
                 return Ok(None);
             };
+            chunked.set(matches!(spliced.content, Content::Chunks(_)));
             i.content = spliced.content;
             i.size = spliced.size;
             i.mtime = d.mtime;
@@ -136,6 +139,11 @@ impl LocalFs {
             self.emit_set_at(t, ino, &i, d.mtime)?;
             Ok(Some(spliced.rest))
         });
+        // Chunk-backed content keeps its durability: only inline files commit lazily.
+        let done = match done {
+            Ok(Some(rest)) if chunked.get() => self.sync().map(|()| Some(rest)),
+            other => other,
+        };
         match done {
             Ok(Some(rest)) => {
                 if let Some(rest) = rest {
@@ -313,17 +321,7 @@ impl LocalFs {
     pub fn flush_all_logged(&self, wait: bool, idle: Nanos) {
         // Not held across the commit, which can re-enter through a peer wait.
         let result = self.flush_idle(wait, idle);
-        let mut last = self.flush_error.lock().unwrap();
-        match result {
-            Ok(()) => *last = None,
-            Err(e) => {
-                let msg = e.to_string();
-                if last.as_deref() != Some(&msg) {
-                    eprintln!("startfs: could not commit buffered writes: {msg}");
-                    *last = Some(msg);
-                }
-            }
-        }
+        self.log_failure(result, "could not commit buffered writes");
     }
 
     /// What a file reads as through its buffer: committed size, or further

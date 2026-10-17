@@ -73,6 +73,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `offer_bytes` | 10 GiB | space this node offers (0 = pure client) |
 | `cache_bytes` | 1 GiB | LRU cache of chunks fetched from peers |
 | `staging_bytes` | 4 GiB | unreplicated writes held before writes are refused |
+| `sync_quiet_ms` | 1000 | how long without a metadata commit before recent creates are made durable on disk |
 | `write_commit_delay_ms` | 1000 | how long a file must go unwritten before the background tick commits its buffered writes |
 | `write_buffer_bytes` | 8 MiB | most of one file's writes held in memory before a batch is committed (never below 8 MiB) |
 | `token_ttl_secs` | 86400 | join token lifetime |
@@ -88,6 +89,10 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 
 Limits found while validating v1 (details and numbers in `docs/validation.md`):
 
+- **Creates reach disk about a second late.** `create` and closing a small file do not wait for
+  an fsync; the daemon makes them durable after `sync_quiet_ms` without activity, on `fsync`, before
+  talking to peers and on clean shutdown. A power cut (not a killed process) can lose the last
+  second of creates unless the file was fsynced.
 - **Writes are buffered.** A write is held in memory (up to `write_buffer_bytes` per file) and
   committed on `flush`, `fsync` and close, when the buffer fills, and once the file has been
   quiet for `write_commit_delay_ms`. Other nodes see a new file's content after that point.

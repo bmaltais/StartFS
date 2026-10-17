@@ -206,6 +206,8 @@ impl Daemon {
 
     /// One round of background work: returns whether anything happened.
     pub fn tick(&self) -> bool {
+        self.fs
+            .sync_when_quiet(self.config.sync_quiet_ms * 1_000_000);
         let Some(transport) = self.transport() else {
             return false;
         };
@@ -214,9 +216,10 @@ impl Daemon {
         // written keeps batching until it has been quiet for the commit delay.
         self.fs
             .flush_all_logged(false, self.config.write_commit_delay_ms * 1_000_000);
-        // Lazy commits reach disk here, before peers or replication build on them.
-        if let Err(e) = self.fs.sync() {
-            eprintln!("startfs: could not sync: {e:?}");
+        // Lazy commits reach disk once quiet, and always before peers or
+        // replication can build on them.
+        if !self.membership.lock().unwrap().peers().is_empty() {
+            self.fs.sync_logged();
         }
         self.sync_peers();
         let offer = self
@@ -432,6 +435,8 @@ impl Daemon {
     }
 
     fn dispatch(&self, transport: &dyn Transport, from: NodeId, msg: Message) {
+        // Replies expose log entries and acknowledge chunks: make them durable first.
+        self.fs.sync_logged();
         // Chunk traffic is for members only.
         if matches!(
             msg,
@@ -594,9 +599,7 @@ impl Daemon {
 
     pub fn handle(&self, req: Request) -> Response {
         self.fs.flush_all_logged(true, 0);
-        if let Err(e) = self.fs.sync() {
-            eprintln!("startfs: could not sync: {e:?}");
-        }
+        self.fs.sync_logged();
         match req {
             Request::Create { name, copies } => {
                 let mut membership = self.membership.lock().unwrap();

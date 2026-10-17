@@ -202,6 +202,8 @@ pub struct LocalFs {
     flush_error: Mutex<Option<String>>,
     /// Whether lazy commits have happened since the last durable one.
     unsynced: AtomicBool,
+    /// When the last lazy commit happened.
+    last_lazy: AtomicU64,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -246,6 +248,7 @@ impl LocalFs {
             write_buffer_limit: AtomicU64::new(DEFAULT_WRITE_BUFFER),
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
+            last_lazy: AtomicU64::new(0),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
@@ -330,8 +333,12 @@ impl LocalFs {
         match out {
             Ok(v) if write => {
                 txn.commit().map_err(db)?;
-                self.unsynced
-                    .store(matches!(durability, Durability::None), Ordering::SeqCst);
+                let lazy = matches!(durability, Durability::None);
+                if lazy {
+                    self.last_lazy.store(self.clock.now(), Ordering::SeqCst);
+                }
+                // A durable commit also persists the lazy ones before it.
+                self.unsynced.store(lazy, Ordering::SeqCst);
                 Ok(v)
             }
             other => {
@@ -348,6 +355,43 @@ impl LocalFs {
             self.run_as(true, Durability::Immediate, |_| Ok(()))?;
         }
         Ok(())
+    }
+
+    /// Whether commits are waiting for a durable one.
+    pub fn has_unsynced(&self) -> bool {
+        self.unsynced.load(Ordering::SeqCst)
+    }
+
+    /// [`Self::sync_logged`] once no lazy commit has happened for `quiet` nanoseconds.
+    pub fn sync_when_quiet(&self, quiet: Nanos) {
+        let idle = self
+            .clock
+            .now()
+            .saturating_sub(self.last_lazy.load(Ordering::SeqCst));
+        if idle >= quiet {
+            self.sync_logged();
+        }
+    }
+
+    /// [`Self::sync`] for callers with nobody to return the error to: logged
+    /// once per distinct message, since the tick retries it.
+    pub fn sync_logged(&self) {
+        self.log_failure(self.sync(), "could not sync");
+    }
+
+    /// Log a failure once per distinct message; success re-arms the log.
+    fn log_failure(&self, result: FsResult<()>, what: &str) {
+        let mut last = self.flush_error.lock().unwrap();
+        match result {
+            Ok(()) => *last = None,
+            Err(e) => {
+                let msg = e.to_string();
+                if last.as_deref() != Some(&msg) {
+                    eprintln!("startfs: {what}: {msg}");
+                    *last = Some(msg);
+                }
+            }
+        }
     }
 
     fn attr(&self, ino: Ino, i: &Inode) -> Attr {
@@ -853,8 +897,6 @@ impl Drop for LocalFs {
     /// A clean shutdown commits what is still buffered.
     fn drop(&mut self) {
         self.flush_all_logged(true, 0);
-        if let Err(e) = self.sync() {
-            eprintln!("startfs: could not sync on shutdown: {e:?}");
-        }
+        self.sync_logged();
     }
 }

@@ -446,3 +446,18 @@ fn metadata_changes_propagate() {
     c.sync();
     assert_eq!(b.getxattr(on_b.ino, "user.tag"), Err(FsError::NoData));
 }
+
+#[test]
+fn a_node_makes_commits_durable_before_a_peer_can_see_them() {
+    let c = Cluster::start_with_config(2, "sync_quiet_ms = 1000000");
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    c.sync();
+    let (a, b) = (c.fs(0), c.fs(1));
+    a.create(ROOT_INO, "n", 0o644).unwrap();
+    assert!(a.has_unsynced());
+
+    c.sync();
+    assert!(!a.has_unsynced(), "durable before the entries went out");
+    assert!(b.lookup(ROOT_INO, "n").is_ok());
+}

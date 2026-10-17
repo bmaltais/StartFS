@@ -275,15 +275,34 @@ fn libc_eperm() -> i32 {
 }
 
 #[test]
-fn fsynced_file_survives_a_node_crash_and_restart() {
-    let c = Cluster::start(1);
+fn creates_become_durable_on_fsync_or_after_the_quiet_period_but_not_on_close() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
     let fs = c.fs(0);
-    let f = fs.create(ROOT_INO, "synced", 0o600).unwrap();
-    fs.write(f.ino, 0, b"on disk").unwrap();
-    fs.fsync(f.ino).unwrap();
+    let f = fs.create(ROOT_INO, "a", 0o600).unwrap();
+    fs.write(f.ino, 0, b"x").unwrap();
+    fs.flush(f.ino).unwrap();
+    assert!(fs.has_unsynced(), "close alone does not wait for disk");
 
-    c.crash(0);
-    c.restart(0);
-    let again = fs.lookup(ROOT_INO, "synced").unwrap();
-    assert_eq!(fs.read(again.ino, 0, 10).unwrap(), b"on disk");
+    c.advance(std::time::Duration::from_millis(1500));
+    c.tick();
+    assert!(!fs.has_unsynced(), "quiet long enough: made durable");
+
+    let g = fs.create(ROOT_INO, "b", 0o600).unwrap();
+    fs.write(g.ino, 0, b"y").unwrap();
+    fs.fsync(g.ino).unwrap();
+    assert!(!fs.has_unsynced(), "fsync is durable at once");
+    assert_eq!(fs.read(g.ino, 0, 10).unwrap(), b"y");
+}
+
+#[test]
+fn a_file_larger_than_inline_is_durable_when_its_close_returns() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "big", 0o600).unwrap();
+    fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
+    fs.flush(f.ino).unwrap();
+    assert!(
+        !fs.has_unsynced(),
+        "chunk-backed writes keep their durability"
+    );
 }
