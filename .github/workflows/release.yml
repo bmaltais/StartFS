@@ -29,10 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install FUSE-T
         if: runner.os == 'macOS'
-        run: |
-          brew tap macos-fuse-t/homebrew-cask
-          brew install --cask fuse-t
-          brew install pkg-config
+        run: scripts/macos-fuse-t.sh
       - name: Install FUSE headers
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 pkg-config
@@ -42,6 +39,8 @@ jobs:
           v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="startfs"))')
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != crate version v$v"; exit 1; }
       - run: cargo build --release --locked -p startfs
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
       - name: Package
         run: |
           name="startfs-${GITHUB_REF_NAME}-${{ matrix.target }}"
