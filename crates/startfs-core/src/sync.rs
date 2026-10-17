@@ -8,8 +8,8 @@
 use crate::clock::Clock;
 use crate::fs::{CatchUp, LocalFs};
 use crate::net::{NodeId, Transport};
-use crate::oplog::Frontier;
-use crate::ops::Nanos;
+use crate::oplog::{Frontier, StatePin};
+use crate::ops::{Ino, Nanos};
 use crate::protocol::Message;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,6 +17,15 @@ use std::time::Duration;
 
 pub const HELLO_INTERVAL: Duration = Duration::from_secs(5);
 const BATCH: usize = 256;
+/// Default bound on the encoded size of one state chunk.
+pub const STATE_CHUNK_BYTES: usize = 1 << 20;
+
+/// A state transfer under way to a peer.
+struct Transfer {
+    pin: StatePin,
+    /// The last object sent; the next chunk starts after it.
+    after: Option<Ino>,
+}
 
 #[derive(Default)]
 struct Peer {
@@ -30,6 +39,8 @@ struct Peer {
     /// everything up to that (its own word, not a second-hand one).
     synced: Option<Nanos>,
     last_hello: Option<Nanos>,
+    /// The state transfer being sent to the peer, if one is under way.
+    transfer: Option<Transfer>,
 }
 
 pub struct Syncer {
@@ -37,6 +48,7 @@ pub struct Syncer {
     transport: Arc<dyn Transport>,
     clock: Arc<dyn Clock>,
     peers: BTreeMap<NodeId, Peer>,
+    chunk_bytes: usize,
 }
 
 impl Syncer {
@@ -46,7 +58,13 @@ impl Syncer {
             transport,
             clock,
             peers: BTreeMap::new(),
+            chunk_bytes: STATE_CHUNK_BYTES,
         }
+    }
+
+    /// Bound the encoded size of the state chunks sent from now on.
+    pub fn set_chunk_bytes(&mut self, bytes: usize) {
+        self.chunk_bytes = bytes;
     }
 
     /// Exchange logs with exactly these peers.
@@ -86,12 +104,16 @@ impl Syncer {
                     self.send(from, &Message::Hello(f));
                 }
             }
-            Message::State(state) => {
-                if let Err(e) = self.fs.apply_state(&state) {
+            Message::StateChunk(chunk) => {
+                if let Err(e) = self.fs.apply_state_chunk(&chunk) {
                     eprintln!("startfs: cannot apply state from node {}: {e}", from.0);
                 }
-                self.note_synced(from);
-                self.reply_frontier(from);
+                // Only the last chunk moves our frontier; until then there is
+                // nothing new to tell the peer.
+                if chunk.last {
+                    self.note_synced(from);
+                    self.reply_frontier(from);
+                }
             }
             Message::Entries(entries) => {
                 if let Err(e) = self.fs.apply_remote(&entries) {
@@ -187,6 +209,28 @@ impl Syncer {
             })
     }
 
+    /// Send the next chunk of the state transfer to `id`, if one is under
+    /// way. Returns whether a chunk went out. After the last chunk we assume
+    /// the peer holds the pinned frontier; if its next `Hello` says otherwise,
+    /// the transfer starts over.
+    fn send_state_chunk(&mut self, id: NodeId) -> bool {
+        let Some(t) = self.peers.get_mut(&id).and_then(|p| p.transfer.take()) else {
+            return false;
+        };
+        let Ok(chunk) = self.fs.state_chunk(&t.pin, t.after, self.chunk_bytes) else {
+            return false;
+        };
+        let p = self.peers.get_mut(&id).expect("known peer");
+        if chunk.last {
+            p.known = Some(t.pin.frontier.clone());
+        } else {
+            let after = chunk.objects.last().map(|(ino, _)| *ino);
+            p.transfer = Some(Transfer { after, ..t });
+        }
+        self.send(id, &Message::StateChunk(chunk));
+        true
+    }
+
     /// Send what is due. Returns whether anything happened.
     pub fn poll(&mut self) -> bool {
         let mut busy = false;
@@ -202,16 +246,20 @@ impl Syncer {
                 p.last_hello = Some(now);
                 busy = true;
             }
+            if self.send_state_chunk(id) {
+                busy = true;
+                continue;
+            }
             let Some(known) = self.peers[&id].known.clone() else {
                 continue;
             };
             let entries = match self.fs.catch_up(&known, BATCH) {
                 Ok(CatchUp::Entries(entries)) => entries,
                 // What the peer misses was compacted away: send our state instead.
-                Ok(CatchUp::State(state)) => {
+                Ok(CatchUp::State(pin)) => {
                     let p = self.peers.get_mut(&id).expect("known peer");
-                    p.known = Some(state.frontier.clone());
-                    self.send(id, &Message::State(state));
+                    p.transfer = Some(Transfer { pin, after: None });
+                    self.send_state_chunk(id);
                     busy = true;
                     continue;
                 }

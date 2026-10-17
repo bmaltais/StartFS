@@ -82,7 +82,7 @@ impl Daemon {
                     self.sync_peers();
                 }
             }
-            msg @ (Message::Hello(_) | Message::Entries(_) | Message::State(_)) => {
+            msg @ (Message::Hello(_) | Message::Entries(_) | Message::StateChunk(_)) => {
                 if let Some(s) = self.syncer.lock().unwrap().as_mut() {
                     s.handle(from, msg);
                 }
