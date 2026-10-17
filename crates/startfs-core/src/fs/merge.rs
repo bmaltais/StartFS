@@ -290,16 +290,17 @@ impl Tables<'_> {
             None => Ok(None),
         }
     }
-    /// The name of the object that `(parent, name)` shows.
-    pub(super) fn slot(&self, parent: Ino, name: &str) -> FsResult<Hlc> {
+    /// The names of the object that the entry `(parent, name)` shows: several
+    /// when names of one file landed on one string and show as one entry.
+    pub(super) fn slots(&self, parent: Ino, name: &str) -> FsResult<Vec<Hlc>> {
         match self.names.get((parent, name)).map_err(db)? {
             Some(g) => dec(g.value()),
-            None => Ok(Hlc::ZERO),
+            None => Ok(vec![Hlc::ZERO]),
         }
     }
-    pub(super) fn set_slot(&mut self, parent: Ino, name: &str, slot: Hlc) -> FsResult<()> {
+    pub(super) fn set_slots(&mut self, parent: Ino, name: &str, slots: &[Hlc]) -> FsResult<()> {
         self.names
-            .insert((parent, name), enc(&slot).as_slice())
+            .insert((parent, name), enc(&slots).as_slice())
             .map_err(db)?;
         Ok(())
     }
@@ -819,6 +820,8 @@ impl LocalFs {
         let mut merged: HashMap<Ino, Vec<Ino>> = HashMap::new();
         // Names shown per file, for its link count.
         let mut links: HashMap<Ino, u32> = HashMap::new();
+        // The other names that a shown entry stands for, by index in `placed`.
+        let mut also: HashMap<usize, Vec<Hlc>> = HashMap::new();
         while let Some(dir) = queue.pop_front() {
             let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
             let sources = std::iter::once(dir).chain(merged.get(&dir).cloned().unwrap_or_default());
@@ -834,9 +837,19 @@ impl LocalFs {
             let mut shown: Vec<(usize, String, bool)> = Vec::new();
             for (name, mut group) in groups {
                 group.sort_by_key(|&i| std::cmp::Reverse(placed[i].version.hlc));
-                // Two names of one object under one string are one entry.
-                let mut seen = HashSet::new();
-                group.retain(|&i| seen.insert(placed[i].ino));
+                // Two names of one object under one string are one entry that
+                // stands for both.
+                let mut first: HashMap<Ino, usize> = HashMap::new();
+                group.retain(|&i| match first.get(&placed[i].ino) {
+                    Some(&kept) => {
+                        also.entry(kept).or_default().push(placed[i].slot);
+                        false
+                    }
+                    None => {
+                        first.insert(placed[i].ino, i);
+                        true
+                    }
+                });
                 let winner = group[0];
                 shown.push((winner, name.to_string(), placed[winner].conflict));
                 for &loser in &group[1..] {
@@ -870,7 +883,10 @@ impl LocalFs {
                 };
                 t.put(p.ino, &inode)?;
                 t.dirents.insert((dir, name.as_str()), p.ino).map_err(db)?;
-                t.set_slot(dir, &name, p.slot)?;
+                let slots: Vec<Hlc> = std::iter::once(p.slot)
+                    .chain(also.get(&idx).into_iter().flatten().copied())
+                    .collect();
+                t.set_slots(dir, &name, &slots)?;
                 if p.kind != FileKind::Dir {
                     *links.entry(p.ino).or_insert(0u32) += 1;
                 }

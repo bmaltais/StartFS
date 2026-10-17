@@ -459,7 +459,7 @@ impl LocalFs {
                 snap,
             },
         )?;
-        t.set_slot(parent, name, slot)?;
+        t.set_slots(parent, name, &[slot])?;
         Ok(self.attr(ino, &inode))
     }
 
@@ -619,7 +619,7 @@ impl LocalFs {
 
     /// Remove one name and record it in the log. The object goes with its last name.
     fn remove_entry(&self, t: &mut Tables<'_>, parent: Ino, name: &str, ino: Ino) -> FsResult<()> {
-        let slot = t.slot(parent, name)?;
+        let slots = t.slots(parent, name)?;
         t.dirents.remove((parent, name)).map_err(db)?;
         t.names.remove((parent, name)).map_err(db)?;
         let mut i = t.inode(ino)?;
@@ -631,7 +631,10 @@ impl LocalFs {
             t.inodes.remove(ino).map_err(db)?;
             t.conflicts.remove(ino).map_err(db)?;
         }
-        self.emit(t, Op::Unlink { ino, slot }).map(|_| ())
+        for slot in slots {
+            self.emit(t, Op::Unlink { ino, slot })?;
+        }
+        Ok(())
     }
 }
 
@@ -746,7 +749,7 @@ impl FsOps for LocalFs {
                 name: new_name.to_string(),
             };
             let slot = self.emit(t, op)?;
-            t.set_slot(new_parent, new_name, slot)?;
+            t.set_slots(new_parent, new_name, &[slot])?;
             Ok(self.attr(ino, &i))
         })?;
         Ok(self.with_buffered(attr))
@@ -856,23 +859,23 @@ impl FsOps for LocalFs {
                 }
                 self.remove_entry(t, new_parent, new_name, dst)?;
             }
-            let slot = t.slot(parent, name)?;
+            let slots = t.slots(parent, name)?;
             t.dirents.remove((parent, name)).map_err(db)?;
             t.names.remove((parent, name)).map_err(db)?;
             t.dirents.insert((new_parent, new_name), src).map_err(db)?;
-            t.set_slot(new_parent, new_name, slot)?;
+            t.set_slots(new_parent, new_name, &slots)?;
             src_inode.parent = new_parent;
             src_inode.ctime = self.clock.now();
             t.put(src, &src_inode)?;
-            self.emit(
-                t,
-                Op::Rename {
+            for slot in slots {
+                let op = Op::Rename {
                     ino: src,
                     slot,
                     parent: new_parent,
                     name: new_name.to_string(),
-                },
-            )?;
+                };
+                self.emit(t, op)?;
+            }
             self.touch_dir(t, parent)?;
             self.touch_dir(t, new_parent)?;
             if parent == merge::lost_found_ino() {

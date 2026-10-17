@@ -40,6 +40,19 @@ same object, so "where does it live" becomes "which names does it have", and
 | `Link` vs `Rename` of the only name | Both apply: the renamed name and the new one. |
 | Two `Link`s onto the same name | The existing name-collision rule: the object with the newer content version keeps the name; the other is shown as a conflict copy. |
 
+## Names are not `(parent, name)` pairs
+
+The first proposal keyed `Unlink` and `Rename` by `(parent, name)`. Identifying a
+name by the stamp of its creating op instead keeps a rename a rename of that
+name (concurrent renames of one name still converge on one location) and lets
+`Unlink` remove exactly the name it saw. `Rename` and `Unlink` therefore carry
+the name's stamp, not its old `(parent, name)`.
+
+Two names of one file can land on the same string (a `Link` onto a name while
+another name is renamed onto it). They show as one entry, and `unlink` and
+`rename` of that entry act on every name it stands for, so it goes or moves as a
+whole.
+
 ## Consequences
 
 - `nlink` is the number of live names, computed in `reconcile` and kept in step

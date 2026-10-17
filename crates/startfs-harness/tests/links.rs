@@ -248,3 +248,48 @@ fn a_conflict_copy_cannot_be_linked() {
         Err(FsError::NotPermitted)
     );
 }
+
+/// Node 0 moves one name of `f` onto `n` while node 1 links `f` as `n`: after
+/// the merge `n` shows once, standing for two names of the same file.
+fn two_names_under_one_string() -> Cluster {
+    race(
+        |c| {
+            file_f(c);
+            let f = c.fs(0).lookup(ROOT_INO, "f").unwrap();
+            c.fs(0).link(f.ino, ROOT_INO, "g").unwrap();
+        },
+        |c| c.fs(0).rename(ROOT_INO, "g", ROOT_INO, "n").unwrap(),
+        |c| {
+            let f = c.fs(1).lookup(ROOT_INO, "f").unwrap();
+            c.fs(1).link(f.ino, ROOT_INO, "n").unwrap();
+        },
+    )
+}
+
+#[test]
+fn two_names_of_one_file_under_one_string_show_once() {
+    let c = two_names_under_one_string();
+    let l = converged(&c);
+    assert_eq!(paths(&l), ["/f", "/n"]);
+    assert_eq!(l[0].2, 2);
+}
+
+#[test]
+fn unlinking_a_doubled_name_removes_it_on_every_node() {
+    let c = two_names_under_one_string();
+    c.fs(0).unlink(ROOT_INO, "n").unwrap();
+    c.sync();
+    let l = converged(&c);
+    assert_eq!(paths(&l), ["/f"]);
+    assert_eq!(l[0].2, 1);
+}
+
+#[test]
+fn renaming_a_doubled_name_moves_it_on_every_node() {
+    let c = two_names_under_one_string();
+    c.fs(1).rename(ROOT_INO, "n", ROOT_INO, "m").unwrap();
+    c.sync();
+    let l = converged(&c);
+    assert_eq!(paths(&l), ["/f", "/m"]);
+    assert_eq!(l[0].2, 2);
+}
