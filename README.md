@@ -42,7 +42,7 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
    curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
    ```
 
-   Set `STARTFS_VERSION=v1.0.0` to pin a release, `INSTALL_DIR` to change the
+   Set `STARTFS_VERSION=v1.0.1` to pin a release, `INSTALL_DIR` to change the
    target, or `STARTFS_NO_SERVICE=1` to install the unit without starting it. Make sure `~/.local/bin` is on your `PATH` (it is on Omarchy; on Ubuntu and
    Fedora, log out and in again after the directory is first created). `startfs --version`
    shows what is installed.

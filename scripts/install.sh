@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the latest prebuilt startfs release for this machine's OS and CPU.
 #   curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
-# Environment: STARTFS_VERSION=v1.0.0 pins a release; INSTALL_DIR overrides ~/.local/bin;
+# Environment: STARTFS_VERSION=v1.0.1 pins a release; INSTALL_DIR overrides ~/.local/bin;
 # STARTFS_NO_SERVICE=1 installs the systemd unit without enabling or starting it.
 set -eu
 

@@ -52,7 +52,7 @@ Read the `data:` line first:
 | `SAFE` | every file has as many copies as the machines allow, and the wanted number is possible |
 | `BEST-EFFORT` | fewer machines than wanted copies, so the full count is impossible; normal until more machines join |
 | `DEGRADED` | a file is short of copies, a repair is running, or a member is `down` or `lost` |
-| `AT RISK` | some data is down to its last copies; act now |
+| `AT RISK` | some data has a single copy left; act now |
 
 For anything but `SAFE`, quote the `redundancy:` line, the `members:` states and any
 `repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
