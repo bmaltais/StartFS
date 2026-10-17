@@ -386,6 +386,24 @@ fn render(s: &Status) -> String {
         "metadata log: {} entries, {} objects\n",
         s.log.entries, s.log.objects
     ));
+    if s.gc.pending_chunks > 0 || s.gc.reclaimed_chunks > 0 {
+        out.push_str(&format!(
+            "garbage collection: {} chunks ({} bytes) pending, {} chunks ({} bytes) reclaimed\n",
+            s.gc.pending_chunks, s.gc.pending_bytes, s.gc.reclaimed_chunks, s.gc.reclaimed_bytes
+        ));
+    }
+    if !s.gc.waiting_on.is_empty() {
+        let names: Vec<&str> = s
+            .members
+            .iter()
+            .filter(|m| s.gc.waiting_on.contains(&m.id))
+            .map(|m| m.addr.as_str())
+            .collect();
+        out.push_str(&format!(
+            "garbage collection is waiting to catch up with {} before reclaiming\n",
+            names.join(", ")
+        ));
+    }
     for w in &s.warnings {
         out.push_str(&format!("warning: {w}\n"));
     }

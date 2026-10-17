@@ -110,6 +110,19 @@ same code with a different membership scope.
   staged) unreferenced for the retention period (`gc_retention_secs`, fixed per filesystem at
   creation, default 7 days) is removed. "Unreferenced since" is when this node first saw it so,
   persisted across restarts, so a node that was away re-waits a full period after catching up.
+  An orphan past retention is reclaimed only through the **reclaim gate**: since it became eligible,
+  this node must have received each current member's own `Hello` frontier (lost members included,
+  removed ones excluded) and applied every log entry up to it. A frontier learned second-hand does
+  not count. If a member cannot be reached the gate holds and orphans stay, so space is freed late,
+  never wrongly; a member gone for good unblocks GC by being removed. `status` shows pending and
+  reclaimed counts and the members the gate is waiting on. No extra messages or quorum are needed.
+  A held pass runs again as soon as a peer syncs, rather than waiting for the next 10-minute pass.
+  Accepted residual window: a member may write identical content again just after we synced with it
+  and before we reclaim (about one GC pass, 10 minutes, and only for content last referenced over the
+  retention period ago). Other copies and repair restore the count; a handshake would close it and is
+  deliberately not built. A returning node re-waiting the retention period is intended, and a stale
+  node re-pushing reclaimed chunks is harmless: nobody can still reference them, so they are simply
+  collected again.
 - **Scrub:** one pass per `scrub_period_secs` (default 30 days), a few replicas per daemon tick, only
   when the tick had no other work, paused on battery power. A corrupt replica is deleted and the
   node asks other members for the chunk until one supplies it (the replicator's heal path).

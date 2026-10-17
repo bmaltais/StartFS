@@ -2,7 +2,8 @@
 
 use super::{DOWN_AFTER, Daemon};
 use crate::control::{
-    FileHealth, LogStatus, MemberStatus, NodeState, Repair, Staging, Status, Tier, Usage, Verdict,
+    FileHealth, GcStatus, LogStatus, MemberStatus, NodeState, Repair, Staging, Status, Tier, Usage,
+    Verdict,
 };
 use crate::error::Error;
 use crate::ops::FsOps;
@@ -73,6 +74,8 @@ impl Daemon {
     pub(super) fn status(&self) -> Result<Status, Error> {
         let stats = self.fs.stats()?;
         let mut health = self.local_health();
+        let held_since = self.gc.lock().unwrap().last.held_since;
+        let gc_waiting_on = held_since.map_or_else(Vec::new, |since| self.gc_waiting_on(since));
         let lost = self.with_view(|v| v.lost.clone()).unwrap_or_default();
         let membership = self.membership.lock().unwrap();
         let filesystem = membership.filesystem().cloned();
@@ -197,6 +200,16 @@ impl Daemon {
                 self.on_battery(),
                 self.replicator.healing(),
             ),
+            gc: {
+                let gc = self.gc.lock().unwrap();
+                GcStatus {
+                    pending_chunks: gc.last.pending_chunks,
+                    pending_bytes: gc.last.pending_bytes,
+                    reclaimed_chunks: gc.reclaimed_chunks,
+                    reclaimed_bytes: gc.reclaimed_bytes,
+                    waiting_on: gc_waiting_on,
+                }
+            },
             warnings,
             conflicts: self.fs.conflicts()?,
         })

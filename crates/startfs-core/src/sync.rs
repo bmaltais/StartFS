@@ -24,6 +24,11 @@ struct Peer {
     known: Option<Frontier>,
     /// What the peer itself last said it holds (never a guess).
     confirmed: Option<Frontier>,
+    /// When `confirmed` arrived.
+    confirmed_at: Option<Nanos>,
+    /// When the peer last said what it holds, if we have since applied
+    /// everything up to that (its own word, not a second-hand one).
+    synced: Option<Nanos>,
     last_hello: Option<Nanos>,
 }
 
@@ -74,6 +79,8 @@ impl Syncer {
                 let first = peer.known.is_none();
                 peer.known = Some(f.clone());
                 peer.confirmed = Some(f);
+                peer.confirmed_at = Some(self.clock.now());
+                self.note_synced(from);
                 if first && let Ok(f) = self.fs.frontier() {
                     // The peer may not have heard from us yet: say what we hold.
                     self.send(from, &Message::Hello(f));
@@ -83,16 +90,44 @@ impl Syncer {
                 if let Err(e) = self.fs.apply_state(&state) {
                     eprintln!("startfs: cannot apply state from node {}: {e}", from.0);
                 }
+                self.note_synced(from);
                 self.reply_frontier(from);
             }
             Message::Entries(entries) => {
                 if let Err(e) = self.fs.apply_remote(&entries) {
                     eprintln!("startfs: cannot apply entries from node {}: {e}", from.0);
                 }
+                self.note_synced(from);
                 self.reply_frontier(from);
             }
             _ => {}
         }
+    }
+
+    /// Record whether we now hold everything `peer` last said it holds.
+    fn note_synced(&mut self, peer: NodeId) {
+        let Ok(ours) = self.fs.frontier() else {
+            return;
+        };
+        let Some(p) = self.peers.get_mut(&peer) else {
+            return;
+        };
+        p.synced = match (&p.confirmed, p.confirmed_at) {
+            (Some(theirs), Some(at))
+                if theirs
+                    .iter()
+                    .all(|(o, seq)| ours.get(o).is_some_and(|s| s >= seq)) =>
+            {
+                Some(at)
+            }
+            _ => None,
+        };
+    }
+
+    /// For each peer, when it last reported its own frontier while we held
+    /// everything up to it; `None` if we have not caught up with it since.
+    pub fn synced_with(&self) -> BTreeMap<NodeId, Option<Nanos>> {
+        self.peers.iter().map(|(id, p)| (*id, p.synced)).collect()
     }
 
     /// What every peer not in `except` is known to hold, per origin: the log

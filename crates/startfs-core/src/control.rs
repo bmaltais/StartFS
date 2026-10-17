@@ -171,6 +171,20 @@ pub struct LogStatus {
     pub objects: u64,
 }
 
+/// Garbage collection of chunks no file references any more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcStatus {
+    /// Orphans on this node not yet reclaimed (retention or the reclaim gate).
+    pub pending_chunks: u64,
+    pub pending_bytes: u64,
+    /// Reclaimed by this daemon since it started.
+    pub reclaimed_chunks: u64,
+    pub reclaimed_bytes: u64,
+    /// Members the reclaim gate is waiting to catch up with before it lets
+    /// eligible orphans go. Empty when it holds nothing back.
+    pub waiting_on: Vec<MemberId>,
+}
+
 /// The overall answer to "is my data safe right now?", worst condition first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
@@ -225,6 +239,7 @@ pub struct Status {
     pub unheard: Vec<MemberId>,
     pub scrub: ScrubStatus,
     pub log: LogStatus,
+    pub gc: GcStatus,
     /// Things the user should know: redundancy that cannot be met, full nodes.
     pub warnings: Vec<String>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).
