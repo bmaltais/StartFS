@@ -1,0 +1,11 @@
+[package]
+name = "startfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+startfs-core = { version = "0.1.0", path = "../startfs-core" }
+libc = "0.2.191"
+
+[dev-dependencies]
+tempfile = "3.27.0"

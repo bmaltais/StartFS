@@ -1,5 +1,8 @@
 use crate::network::{SimNetwork, SimTransport};
 use startfs_core::clock::{Clock, ManualClock};
+use startfs_core::config::Config;
+use startfs_core::control::{self, Client};
+use startfs_core::daemon::Daemon;
 use startfs_core::fs::{LocalFs, NodeConfig};
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
@@ -84,6 +87,9 @@ struct Node {
     dir: TempDir,
     config: NodeConfig,
     fs: NodeFs,
+    /// Running control server; present while the node is up.
+    server: Mutex<Option<control::Server>>,
+    daemon_config: Config,
 }
 
 /// N real nodes sharing one injectable clock and one simulated network.
@@ -99,6 +105,12 @@ const START: Nanos = 1_700_000_000 * 1_000_000_000;
 impl Cluster {
     /// Start `n` nodes. Node `i` runs as local user `1000 + i`.
     pub fn start(n: usize) -> Self {
+        Self::start_with_config(n, "")
+    }
+
+    /// Like [`Cluster::start`], with every node's `config.toml` content given.
+    pub fn start_with_config(n: usize, config_toml: &str) -> Self {
+        let config_for_nodes = Config::parse(config_toml).expect("valid config");
         let clock = Arc::new(ManualClock::new(START));
         let network = SimNetwork::new(clock.clone());
         let nodes = (0..n)
@@ -111,8 +123,14 @@ impl Cluster {
                 let fs = NodeFs {
                     slot: Arc::new(Mutex::new(None)),
                 };
-                let node = Node { dir, config, fs };
-                open(&node, clock.clone());
+                let node = Node {
+                    dir,
+                    config,
+                    fs,
+                    server: Mutex::new(None),
+                    daemon_config: config_for_nodes.clone(),
+                };
+                open(&node, clock.clone(), i);
                 node
             })
             .collect();
@@ -129,6 +147,11 @@ impl Cluster {
 
     pub fn fs(&self, i: usize) -> NodeFs {
         self.nodes[i].fs.clone()
+    }
+
+    /// The control interface of node `i`, over its local socket (as the CLI uses it).
+    pub fn control(&self, i: usize) -> Client {
+        Client::new(socket_path(&self.nodes[i]))
     }
 
     pub fn network(&self) -> &SimNetwork {
@@ -149,6 +172,7 @@ impl Cluster {
 
     /// Kill the node process: in-memory state is lost, disk state survives.
     pub fn crash(&self, i: usize) {
+        self.nodes[i].server.lock().unwrap().take();
         self.nodes[i].fs.slot.lock().unwrap().take();
         self.network.set_down(NodeId(i as u32), true);
     }
@@ -174,12 +198,27 @@ impl Cluster {
 
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
-        open(&self.nodes[i], self.clock.clone());
+        open(&self.nodes[i], self.clock.clone(), i);
         self.network.set_down(NodeId(i as u32), false);
     }
 }
 
-fn open(node: &Node, clock: Arc<ManualClock>) {
-    let fs = LocalFs::open(node.dir.path(), node.config.clone(), clock).expect("open node");
-    *node.fs.slot.lock().unwrap() = Some(Arc::new(fs));
+fn socket_path(node: &Node) -> std::path::PathBuf {
+    node.dir.path().join("control.sock")
+}
+
+fn open(node: &Node, clock: Arc<ManualClock>, index: usize) {
+    let host = format!("100.64.0.{}", index + 1);
+    let daemon = Daemon::open(
+        node.dir.path(),
+        node.daemon_config.clone(),
+        node.config.clone(),
+        clock,
+        host,
+    )
+    .expect("open node");
+    let daemon = Arc::new(daemon);
+    *node.fs.slot.lock().unwrap() = Some(daemon.fs());
+    let server = control::serve(daemon, &socket_path(node)).expect("serve control socket");
+    *node.server.lock().unwrap() = Some(server);
 }

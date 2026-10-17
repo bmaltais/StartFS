@@ -1,6 +1,9 @@
 pub mod chunker;
 pub mod chunkstore;
 pub mod clock;
+pub mod config;
+pub mod control;
+pub mod daemon;
 pub mod fs;
 pub mod net;
 pub mod ops;
