@@ -70,6 +70,11 @@ impl Daemon {
                     m.merge_tokens(list);
                 }
             }
+            Message::Health(health) => {
+                if self.membership.lock().unwrap().is_member_endpoint(from) {
+                    self.peer_health.lock().unwrap().insert(from, health);
+                }
+            }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
                 if m.is_member_endpoint(from) && m.merge(list) {

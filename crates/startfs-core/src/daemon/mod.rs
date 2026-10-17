@@ -19,7 +19,7 @@ use crate::net::{NodeId, Transport};
 use crate::ops::FsResult;
 use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
-use crate::protocol::Message;
+use crate::protocol::{Health, Message};
 use crate::replication::{Replicator, View};
 use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
@@ -62,6 +62,8 @@ pub struct Daemon {
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
+    /// The latest replication health each peer gossiped.
+    peer_health: Mutex<HashMap<NodeId, Health>>,
     last_gc: Mutex<Option<Nanos>>,
     last_compact: Mutex<Option<Nanos>>,
     /// When this daemon started: how long a never-heard member has been unseen.
@@ -130,6 +132,7 @@ impl Daemon {
                 join_reply: Mutex::new(None),
                 heard: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
+                peer_health: Mutex::new(HashMap::new()),
                 last_gc: Mutex::new(None),
                 last_compact: Mutex::new(None),
                 started,
@@ -222,9 +225,11 @@ impl Daemon {
             *last = Some(now);
             let members_msg = Message::Members(members).encode();
             let tokens_msg = Message::Tokens(tokens).encode();
+            let health_msg = Message::Health(self.local_health()).encode();
             for p in &peers {
                 transport.send(*p, members_msg.clone());
                 transport.send(*p, tokens_msg.clone());
+                transport.send(*p, health_msg.clone());
             }
             busy |= !peers.is_empty();
         }
