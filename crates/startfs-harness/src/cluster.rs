@@ -4,6 +4,7 @@ use startfs_core::config::Config;
 use startfs_core::control::{self, Client};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::{LocalFs, NodeConfig};
+use startfs_core::members::MemberId;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::power::ManualPower;
@@ -140,7 +141,7 @@ impl Cluster {
                 dir: TempDir::new().expect("tempdir"),
                 // Every node starts as member 0, as the CLI does; `join` assigns real ids.
                 config: NodeConfig {
-                    node: NodeId(0),
+                    node: MemberId(0),
                     uid: 1000 + i as u32,
                     gid: 1000 + i as u32,
                 },

@@ -4,6 +4,7 @@
 //! Instead each connection's remote address is looked up with `tailscaled`
 //! (its `whois` API) and the answer decides whether the peer may talk to us.
 
+use crate::error::Error;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
@@ -21,20 +22,19 @@ pub struct PeerIdentity {
 pub trait Whois: Send + Sync {
     /// The peer at `addr`, or why it cannot be identified (unknown address,
     /// `tailscaled` unreachable).
-    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, String>;
+    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, Error>;
 }
 
 /// Whether a peer may join in: with `allowed_tags` empty, any tailnet machine;
 /// otherwise only machines carrying at least one of those tags.
-pub fn check_allowed(peer: &PeerIdentity, allowed_tags: &[String]) -> Result<(), String> {
+pub fn check_allowed(peer: &PeerIdentity, allowed_tags: &[String]) -> Result<(), Error> {
     if allowed_tags.is_empty() || peer.tags.iter().any(|t| allowed_tags.contains(t)) {
         return Ok(());
     }
-    Err(format!(
-        "{} is not allowed: it carries none of the tags {}",
-        peer.name,
-        allowed_tags.join(", ")
-    ))
+    Err(Error::PeerNotAllowed {
+        name: peer.name.clone(),
+        tags: allowed_tags.to_vec(),
+    })
 }
 
 /// Asks the local `tailscaled` over its unix-socket API.
@@ -52,10 +52,11 @@ impl TailscaleWhois {
         }
     }
 
-    fn get(&self, path: &str) -> Result<(u16, Vec<u8>), String> {
+    fn get(&self, path: &str) -> Result<(u16, Vec<u8>), Error> {
         use std::io::{Read, Write};
-        let unreachable = |e: std::io::Error| {
-            format!("cannot reach tailscaled at {}: {e}", self.socket.display())
+        let unreachable = |source: std::io::Error| Error::TailscaledUnreachable {
+            socket: self.socket.clone(),
+            source,
         };
         let mut stream =
             std::os::unix::net::UnixStream::connect(&self.socket).map_err(unreachable)?;
@@ -80,25 +81,28 @@ impl TailscaleWhois {
         let split = raw
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
-            .ok_or("tailscaled sent a malformed answer")?;
+            .ok_or(Error::TailscaledMalformed)?;
         let status = String::from_utf8_lossy(&raw[..split])
             .lines()
             .next()
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse().ok())
-            .ok_or("tailscaled sent a malformed answer")?;
+            .ok_or(Error::TailscaledMalformed)?;
         Ok((status, raw[split + 4..].to_vec()))
     }
 }
 
 impl Whois for TailscaleWhois {
-    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, String> {
+    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, Error> {
         let (status, body) = self.get(&format!("/localapi/v0/whois?addr={addr}"))?;
-        let json: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|_| format!("tailscaled answered {status} with something unreadable"))?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| Error::TailscaledUnreadable { status })?;
         if status != 200 {
             let why = json["error"].as_str().unwrap_or("unknown");
-            return Err(format!("tailscaled does not know {addr}: {why}"));
+            return Err(Error::TailscaledUnknownPeer {
+                addr: addr.to_string(),
+                why: why.to_string(),
+            });
         }
         let node = &json["Node"];
         Ok(PeerIdentity {
@@ -126,12 +130,12 @@ impl StaticWhois {
 }
 
 impl Whois for StaticWhois {
-    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, String> {
+    fn lookup(&self, addr: SocketAddr) -> Result<PeerIdentity, Error> {
         self.0
             .lock()
             .unwrap()
             .get(&addr.ip())
             .cloned()
-            .ok_or_else(|| format!("{} is not a known tailnet machine", addr.ip()))
+            .ok_or(Error::UnknownMachine(addr.ip()))
     }
 }

@@ -275,11 +275,11 @@ mod local_api {
         let err = TailscaleWhois::new(&socket)
             .lookup("8.8.8.8:1".parse().unwrap())
             .unwrap_err();
-        assert!(err.contains("8.8.8.8"), "{err}");
+        assert!(err.to_string().contains("8.8.8.8"), "{err}");
 
         let err = TailscaleWhois::new(&dir.path().join("missing.sock"))
             .lookup("100.64.0.9:1".parse().unwrap())
             .unwrap_err();
-        assert!(err.contains("tailscaled"), "{err}");
+        assert!(err.to_string().contains("tailscaled"), "{err}");
     }
 }

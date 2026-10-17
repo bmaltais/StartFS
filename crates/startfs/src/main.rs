@@ -7,7 +7,7 @@ use startfs_core::config::Config;
 use startfs_core::control::{self, Client, NodeState, ScrubState, Status, Tier};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
-use startfs_core::net::NodeId;
+use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -27,6 +27,47 @@ commands:
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
   config [--offer SIZE]               change this node's settings (sizes like 500M, 2T)";
+
+#[derive(Debug, thiserror::Error)]
+enum CliError {
+    #[error("{USAGE}")]
+    Usage,
+    #[error("missing {0}\n{USAGE}")]
+    MissingFlag(String),
+    #[error("missing value for {0}")]
+    MissingValue(String),
+    #[error("--copies must be a number")]
+    CopiesNotANumber,
+    #[error("remove needs a member number (see `startfs status`)")]
+    RemoveNeedsMember,
+    #[error("not a size: {0}")]
+    BadSize(String),
+    #[error("{}: {source}", path.display())]
+    Config {
+        path: PathBuf,
+        source: startfs_core::Error,
+    },
+    #[error("{}: {source}", path.display())]
+    Path {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("cannot listen on {addr}: {source}")]
+    Listen {
+        addr: String,
+        source: std::io::Error,
+    },
+    #[error("mounting is not supported here")]
+    MountUnsupported,
+    #[error(transparent)]
+    DataDir(std::io::Error),
+    #[error(transparent)]
+    Fs(#[from] startfs_core::ops::FsError),
+    #[error(transparent)]
+    Core(#[from] startfs_core::Error),
+    #[error(transparent)]
+    Lib(#[from] startfs::Error),
+}
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -48,7 +89,7 @@ fn home_dir(var: &str, fallback: &str) -> PathBuf {
     home.join(fallback).join("startfs")
 }
 
-fn run(mut args: Vec<String>) -> Result<(), String> {
+fn run(mut args: Vec<String>) -> Result<(), CliError> {
     let mut data_dir = None;
     let mut config_file = None;
     while let Some(flag) = args.first().cloned() {
@@ -68,7 +109,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     let data_dir = data_dir.unwrap_or_else(|| home_dir("XDG_DATA_HOME", ".local/share"));
     let socket = data_dir.join("control.sock");
     let Some(command) = args.first().cloned() else {
-        return Err(USAGE.into());
+        return Err(CliError::Usage);
     };
     let rest = &args[1..];
     match command.as_str() {
@@ -82,12 +123,12 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             let name = flag_value(rest, "--name")?;
             let copies = flag_value(rest, "--copies")?
                 .parse::<u32>()
-                .map_err(|_| "--copies must be a number".to_string())?;
+                .map_err(|_| CliError::CopiesNotANumber)?;
             println!("{}", Client::new(socket).create(&name, copies)?);
             Ok(())
         }
         "join" => {
-            let token = rest.first().ok_or(USAGE)?;
+            let token = rest.first().ok_or(CliError::Usage)?;
             let offer = optional_size(rest, "--offer")?;
             Client::new(socket).join(token, offer)?;
             println!("joined");
@@ -105,13 +146,13 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "remove" => {
             let member = rest
                 .first()
-                .and_then(|m| m.parse::<u32>().ok())
-                .ok_or("remove needs a member number (see `startfs status`)")?;
+                .and_then(|m| m.parse::<u32>().ok().map(MemberId))
+                .ok_or(CliError::RemoveNeedsMember)?;
             Client::new(socket).remove(member)?;
             Ok(())
         }
         "revoke" => {
-            Client::new(socket).revoke(rest.first().ok_or(USAGE)?)?;
+            Client::new(socket).revoke(rest.first().ok_or(CliError::Usage)?)?;
             Ok(())
         }
         "config" => {
@@ -124,21 +165,21 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             print!("{}", render(&Client::new(socket).status()?));
             Ok(())
         }
-        _ => Err(USAGE.into()),
+        _ => Err(CliError::Usage),
     }
 }
 
-fn flag_value(args: &[String], name: &str) -> Result<String, String> {
+fn flag_value(args: &[String], name: &str) -> Result<String, CliError> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
-        .ok_or_else(|| format!("missing {name}\n{USAGE}"))
+        .ok_or_else(|| CliError::MissingFlag(name.to_string()))
 }
 
 /// A size such as `500M` or `2T` (powers of 1024), or plain bytes.
-fn parse_size(text: &str) -> Result<u64, String> {
-    let bad = || format!("not a size: {text}");
+fn parse_size(text: &str) -> Result<u64, CliError> {
+    let bad = || CliError::BadSize(text.to_string());
     let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
         Some((i, _)) => text.split_at(i),
         None => (text, ""),
@@ -158,11 +199,14 @@ fn parse_size(text: &str) -> Result<u64, String> {
         .ok_or_else(bad)
 }
 
-fn optional_size(args: &[String], name: &str) -> Result<Option<u64>, String> {
+fn optional_size(args: &[String], name: &str) -> Result<Option<u64>, CliError> {
     match args.iter().position(|a| a == name) {
         None => Ok(None),
         Some(i) => {
-            parse_size(args.get(i + 1).ok_or(format!("missing value for {name}"))?).map(Some)
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| CliError::MissingValue(name.to_string()))?;
+            parse_size(value).map(Some)
         }
     }
 }
@@ -172,42 +216,51 @@ fn daemon(
     config_file: &std::path::Path,
     socket: &std::path::Path,
     mountpoint: Option<PathBuf>,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     // A missing config file is normal: every setting has a default.
     let mut config = match std::fs::read_to_string(config_file) {
-        Ok(text) => Config::parse(&text).map_err(|e| format!("{}: {e}", config_file.display()))?,
+        Ok(text) => Config::parse(&text).map_err(|source| CliError::Config {
+            path: config_file.to_path_buf(),
+            source,
+        })?,
         Err(_) => Config::default(),
     };
     let config_mountpoint = config.mountpoint.clone();
-    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(CliError::DataDir)?;
     // SAFETY: getuid/getgid have no preconditions and cannot fail.
     let node = NodeConfig {
-        node: NodeId(0), // `create` keeps 0; `join` assigns the real one
+        node: MemberId(0), // `create` keeps 0; `join` assigns the real one
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
     };
     let host = tailnet_address();
     let whois = node::tailscale_whois(&config);
-    let transport = node::bind(&mut config, host, whois)
-        .map_err(|e| format!("cannot listen on {host}:{}: {e}", config.port))?;
+    let transport = node::bind(&mut config, host, whois).map_err(|source| CliError::Listen {
+        addr: format!("{host}:{}", config.port),
+        source,
+    })?;
     let d = Daemon::open(
         &data_dir,
         config,
         node,
         Arc::new(SystemClock),
         host.to_string(),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let ticker = Ticker::start(d.clone(), transport);
     d.set_power_source(Arc::new(SystemPower));
     let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
-    let server = control::serve(d.clone(), socket)
-        .map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
+    let server = control::serve(d.clone(), socket).map_err(|source| CliError::Listen {
+        addr: socket.display().to_string(),
+        source,
+    })?;
     let mount = match mountpoint {
         None => None,
         Some(mp) => {
-            let mounter = mount::platform_mounter().ok_or("mounting is not supported here")?;
-            std::fs::create_dir_all(&mp).map_err(|e| format!("{}: {e}", mp.display()))?;
+            let mounter = mount::platform_mounter().ok_or(CliError::MountUnsupported)?;
+            std::fs::create_dir_all(&mp).map_err(|source| CliError::Path {
+                path: mp.clone(),
+                source,
+            })?;
             Some(mounter.mount(d.fs(), &mp)?)
         }
     };

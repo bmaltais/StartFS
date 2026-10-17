@@ -1,7 +1,7 @@
 //! The wire protocol peers speak over a [`Transport`](crate::net::Transport).
 
 use crate::chunkstore::ChunkId;
-use crate::members::{Admission, Member, TokenRec};
+use crate::members::{Admission, JoinRequest, Member, TokenRec};
 use crate::oplog::{Entry, Frontier, StateTransfer};
 use serde::{Deserialize, Serialize};
 
@@ -16,13 +16,10 @@ pub enum Message {
     /// A member's view of who belongs to the filesystem.
     Members(Vec<Member>),
     /// A new node asks the member named in its token to admit it.
-    JoinRequest {
-        fs_id: String,
-        token_id: String,
-        /// The joiner's advertised `host:port`.
-        addr: String,
-        offer_bytes: u64,
-    },
+    JoinRequest(JoinRequest),
+    /// The admission, or why the admitting member refused. Deliberate exception
+    /// to typed errors: the refusal is plain text, since the wire format has no
+    /// error codes and changing it would break the protocol.
     JoinReply(Result<Admission, String>),
     /// "Send me this chunk if you hold it."
     ChunkRequest(ChunkId),

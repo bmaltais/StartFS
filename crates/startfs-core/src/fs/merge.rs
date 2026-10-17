@@ -140,7 +140,7 @@ fn conflict_ino(of: Ino, from: Hlc) -> Ino {
     h.update(&of.to_le_bytes());
     h.update(&from.wall.to_le_bytes());
     h.update(&from.counter.to_le_bytes());
-    h.update(&from.node.to_le_bytes());
+    h.update(&from.node.0.to_le_bytes());
     let raw: [u8; 8] = h.finalize().as_bytes()[..8].try_into().expect("8 bytes");
     u64::from_le_bytes(raw) | (1 << 63)
 }
@@ -194,10 +194,10 @@ impl Tables<'_> {
             None => Ok(None),
         }
     }
-    fn next_seq(&self, origin: u32) -> FsResult<u64> {
+    fn next_seq(&self, origin: MemberId) -> FsResult<u64> {
         Ok(self
             .frontier
-            .get(origin)
+            .get(origin.0)
             .map_err(db)?
             .map_or(0, |g| g.value()))
     }
@@ -242,7 +242,7 @@ impl LocalFs {
     }
 
     fn emit_at(&self, t: &mut Tables<'_>, op: Op, wall: Nanos) -> FsResult<()> {
-        let origin = self.node().0;
+        let origin = self.node();
         let hlc = {
             let mut h = self.hlc.lock().unwrap();
             *h = Hlc::tick(*h, wall, origin);
@@ -261,9 +261,9 @@ impl LocalFs {
     /// Store an entry in the log and fold it into the registers.
     fn record(&self, t: &mut Tables<'_>, e: &Entry) -> FsResult<()> {
         t.log
-            .insert((e.origin, e.seq), enc(e).as_slice())
+            .insert((e.origin.0, e.seq), enc(e).as_slice())
             .map_err(db)?;
-        t.frontier.insert(e.origin, e.seq + 1).map_err(db)?;
+        t.frontier.insert(e.origin.0, e.seq + 1).map_err(db)?;
         let hlc = *self.hlc.lock().unwrap();
         t.counters.insert("hlc_wall", hlc.wall).map_err(db)?;
         t.counters
@@ -334,7 +334,7 @@ impl LocalFs {
         self.run(false, |t| {
             for row in t.logbase.iter().map_err(db)? {
                 let (origin, base) = row.map_err(db)?;
-                if have.get(&origin.value()).copied().unwrap_or(0) < base.value() {
+                if have.get(&MemberId(origin.value())).copied().unwrap_or(0) < base.value() {
                     return Ok(CatchUp::State(self.state_in(t)?));
                 }
             }
@@ -347,7 +347,7 @@ impl LocalFs {
         let mut frontier = Frontier::new();
         for row in t.frontier.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
-            frontier.insert(k.value(), v.value());
+            frontier.insert(MemberId(k.value()), v.value());
         }
         let mut objects = Vec::new();
         for row in t.objects.iter().map_err(db)? {
@@ -371,10 +371,10 @@ impl LocalFs {
                     ahead = true;
                     // Entries below it are folded into the state we are given.
                     t.log
-                        .retain_in((*origin, 0)..(*origin, *next), |_, _| false)
+                        .retain_in((origin.0, 0)..(origin.0, *next), |_, _| false)
                         .map_err(db)?;
-                    t.frontier.insert(*origin, *next).map_err(db)?;
-                    t.logbase.insert(*origin, *next).map_err(db)?;
+                    t.frontier.insert(origin.0, *next).map_err(db)?;
+                    t.logbase.insert(origin.0, *next).map_err(db)?;
                 }
             }
             if !ahead {
@@ -404,7 +404,7 @@ impl LocalFs {
             let mut out = Frontier::new();
             for row in t.frontier.iter().map_err(db)? {
                 let (k, v) = row.map_err(db)?;
-                out.insert(k.value(), v.value());
+                out.insert(MemberId(k.value()), v.value());
             }
             Ok(out)
         })
@@ -414,11 +414,11 @@ impl LocalFs {
     fn entries_in(t: &Tables<'_>, have: &Frontier, limit: usize) -> FsResult<Vec<Entry>> {
         let mut out = Vec::new();
         for row in t.frontier.iter().map_err(db)? {
-            let origin = row.map_err(db)?.0.value();
+            let origin = MemberId(row.map_err(db)?.0.value());
             let from = have.get(&origin).copied().unwrap_or(0);
             for row in t
                 .log
-                .range((origin, from)..=(origin, u64::MAX))
+                .range((origin.0, from)..=(origin.0, u64::MAX))
                 .map_err(db)?
             {
                 if out.len() >= limit {

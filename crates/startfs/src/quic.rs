@@ -14,6 +14,7 @@
 //! lower priority, so bulk transfers never hold up the metadata exchange.
 //! Each message is a 4-byte big-endian length followed by its bytes.
 
+use crate::error::Error;
 use crate::identity::{Whois, check_allowed};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -76,19 +77,18 @@ struct Shared {
 
 impl Shared {
     /// Look a peer up with `tailscaled` and apply the tag policy.
-    async fn authorize(self: &Arc<Self>, addr: SocketAddr) -> Result<(), String> {
+    async fn authorize(self: &Arc<Self>, addr: SocketAddr) -> Result<(), Error> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
             let peer = this.whois.lookup(addr)?;
             check_allowed(&peer, &this.allowed_tags)
         })
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
     }
 
-    fn fail(&self, peer: NodeId, why: String) {
+    fn fail(&self, peer: NodeId, why: Error) {
         eprintln!("startfs: peer {}: {why}", peer.0);
-        self.errors.lock().unwrap().insert(peer, why);
+        self.errors.lock().unwrap().insert(peer, why.to_string());
     }
 }
 
@@ -255,8 +255,8 @@ async fn serve_connection(shared: Arc<Shared>, incoming: quinn::Incoming) {
     match handshake_accept(&shared, &conn, remote).await {
         Ok(()) => {}
         Err(why) => {
-            shared.fail(peer, why.clone());
-            conn.close(CLOSE_REFUSED.into(), why.as_bytes());
+            conn.close(CLOSE_REFUSED.into(), why.to_string().as_bytes());
+            shared.fail(peer, why);
             return;
         }
     }
@@ -271,29 +271,28 @@ async fn handshake_accept(
     shared: &Arc<Shared>,
     conn: &quinn::Connection,
     remote: SocketAddr,
-) -> Result<(), String> {
-    let (mut reply, mut hello) = conn.accept_bi().await.map_err(|e| e.to_string())?;
+) -> Result<(), Error> {
+    let (mut reply, mut hello) = conn.accept_bi().await?;
     let mut raw = [0u8; 4];
     tokio::time::timeout(CONNECT_TIMEOUT, hello.read_exact(&mut raw))
         .await
-        .map_err(|_| "no handshake".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| Error::NoHandshake)??;
     let verdict = if &raw[..3] != MAGIC {
-        Err("not a StartFS peer".to_string())
+        Err(Error::NotAPeer)
     } else if raw[3] != shared.version {
-        Err(format!(
-            "protocol version mismatch: the peer speaks version {}, this node speaks version {}",
-            raw[3], shared.version
-        ))
+        Err(Error::VersionMismatch {
+            ours: shared.version,
+            theirs: raw[3],
+        })
     } else {
         shared.authorize(remote).await
     };
     let answer = match &verdict {
         Ok(()) => vec![0],
-        Err(why) => [&[1][..], why.as_bytes()].concat(),
+        Err(why) => [&[1][..], why.to_string().as_bytes()].concat(),
     };
-    reply.write_all(&answer).await.map_err(|e| e.to_string())?;
-    reply.finish().map_err(|e| e.to_string())?;
+    reply.write_all(&answer).await?;
+    reply.finish()?;
     // Let the verdict reach the dialer before the connection is torn down.
     if verdict.is_err() {
         #[allow(
@@ -313,7 +312,7 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
         }
         let len = u32::from_be_bytes(len) as usize;
         if len > MAX_MESSAGE {
-            shared.fail(from, format!("message of {len} bytes exceeds the limit"));
+            shared.fail(from, Error::MessageTooLarge(len));
             return;
         }
         let mut body = vec![0u8; len];
@@ -339,48 +338,42 @@ async fn connect(
     shared: &Arc<Shared>,
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
-) -> Result<Link, String> {
+) -> Result<Link, Error> {
     shared.authorize(addr).await?;
     let attempt = async {
-        let conn = endpoint
-            .connect(addr, "startfs")
-            .map_err(|e| e.to_string())?
-            .await
-            .map_err(|e| e.to_string())?;
-        let (mut hello, mut reply) = conn.open_bi().await.map_err(|e| e.to_string())?;
+        let conn = endpoint.connect(addr, "startfs")?.await?;
+        let (mut hello, mut reply) = conn.open_bi().await?;
         hello
             .write_all(&[MAGIC[0], MAGIC[1], MAGIC[2], shared.version])
-            .await
-            .map_err(|e| e.to_string())?;
-        hello.finish().map_err(|e| e.to_string())?;
+            .await?;
+        hello.finish()?;
         let answer = reply.read_to_end(1024).await.map_err(|_| {
             // The acceptor closed the connection; its reason says why.
             match conn.close_reason() {
                 Some(quinn::ConnectionError::ApplicationClosed(c)) => {
-                    String::from_utf8_lossy(&c.reason).into_owned()
+                    Error::Refused(String::from_utf8_lossy(&c.reason).into_owned())
                 }
-                other => format!("handshake failed: {other:?}"),
+                other => Error::HandshakeFailed(other),
             }
         })?;
         match answer.split_first() {
             Some((0, _)) => {}
-            Some((_, why)) => return Err(String::from_utf8_lossy(why).into_owned()),
-            None => return Err("empty handshake answer".into()),
+            Some((_, why)) => {
+                return Err(Error::Refused(String::from_utf8_lossy(why).into_owned()));
+            }
+            None => return Err(Error::EmptyHandshakeAnswer),
         }
-        let control = conn.open_uni().await.map_err(|e| e.to_string())?;
+        let control = conn.open_uni().await?;
         Ok(Link { conn, control })
     };
     tokio::time::timeout(CONNECT_TIMEOUT, attempt)
         .await
-        .map_err(|_| format!("timed out connecting to {addr}"))?
+        .map_err(|_| Error::ConnectTimeout(addr))?
 }
 
-async fn write_frame(stream: &mut quinn::SendStream, msg: &[u8]) -> Result<(), String> {
-    stream
-        .write_all(&(msg.len() as u32).to_be_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    stream.write_all(msg).await.map_err(|e| e.to_string())
+async fn write_frame(stream: &mut quinn::SendStream, msg: &[u8]) -> Result<(), Error> {
+    stream.write_all(&(msg.len() as u32).to_be_bytes()).await?;
+    Ok(stream.write_all(msg).await?)
 }
 
 /// Owns the connection to one peer and sends what the core queues for it.
@@ -395,10 +388,7 @@ async fn peer_sender(
     let mut failed_at: Option<Instant> = None;
     while let Some(msg) = queue.recv().await {
         if msg.len() > MAX_MESSAGE {
-            shared.fail(
-                peer,
-                format!("message of {} bytes exceeds the limit", msg.len()),
-            );
+            shared.fail(peer, Error::MessageTooLarge(msg.len()));
             continue;
         }
         if link
@@ -456,32 +446,28 @@ async fn peer_sender(
 
 // ---- TLS: throwaway certificates, identity comes from whois ----
 
-fn crypto() -> Result<(QuicServerConfig, QuicClientConfig), String> {
+fn crypto() -> Result<(QuicServerConfig, QuicClientConfig), Error> {
     let provider = Arc::new(ring::default_provider());
-    let key = rcgen::generate_simple_self_signed(vec!["startfs".to_string()])
-        .map_err(|e| e.to_string())?;
+    let key = rcgen::generate_simple_self_signed(vec!["startfs".to_string()])?;
     let cert = CertificateDer::from(key.cert.der().to_vec());
     let private = PrivateKeyDer::Pkcs8(key.signing_key.serialize_der().into());
 
     let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| e.to_string())?
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_no_client_auth()
-        .with_single_cert(vec![cert], private)
-        .map_err(|e| e.to_string())?;
+        .with_single_cert(vec![cert], private)?;
     server.alpn_protocols = vec![ALPN.to_vec()];
 
     let mut client = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| e.to_string())?
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
         .with_no_client_auth();
     client.alpn_protocols = vec![ALPN.to_vec()];
 
     Ok((
-        QuicServerConfig::try_from(server).map_err(|e| e.to_string())?,
-        QuicClientConfig::try_from(client).map_err(|e| e.to_string())?,
+        QuicServerConfig::try_from(server)?,
+        QuicClientConfig::try_from(client)?,
     ))
 }
 

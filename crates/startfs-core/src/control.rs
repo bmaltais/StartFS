@@ -3,7 +3,9 @@
 
 use crate::cache::CacheStats;
 use crate::daemon::Daemon;
+use crate::error::Error;
 use crate::fs::ConflictCopy;
+use crate::members::MemberId;
 use crate::ops::Nanos;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -35,7 +37,7 @@ pub enum Request {
     Leave,
     /// Remove a member that is gone for good; its data is re-replicated.
     Remove {
-        member: u32,
+        member: MemberId,
     },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
@@ -80,7 +82,7 @@ pub enum NodeState {
 /// One member of the filesystem, as `status` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberStatus {
-    pub id: u32,
+    pub id: MemberId,
     pub addr: String,
     pub state: NodeState,
     /// Space the member offers to the filesystem.
@@ -284,7 +286,7 @@ fn answer(daemon: &Daemon, stream: UnixStream) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let resp = match serde_json::from_str::<Request>(&line) {
-        Ok(req) => daemon.handle(req),
+        Ok(req) => daemon.handle_control_request(req),
         Err(e) => Response::Error(format!("bad request: {e}")),
     };
     let mut out = &stream;
@@ -322,6 +324,15 @@ impl Drop for Server {
     }
 }
 
+/// Why a reply was not the one the request expects: the daemon refused, or it
+/// answered with something else.
+fn unexpected(reply: Response) -> Error {
+    match reply {
+        Response::Error(e) => Error::Remote(e),
+        other => Error::UnexpectedResponse(Box::new(other)),
+    }
+}
+
 /// Client side of the control interface, used by the CLI and the harness.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -335,9 +346,11 @@ impl Client {
         }
     }
 
-    pub fn call(&self, req: &Request) -> Result<Response, String> {
-        let io =
-            |e: std::io::Error| format!("cannot reach daemon at {}: {e}", self.socket.display());
+    pub fn call(&self, req: &Request) -> Result<Response, Error> {
+        let io = |source: std::io::Error| Error::DaemonUnreachable {
+            socket: self.socket.clone(),
+            source,
+        };
         let mut stream = UnixStream::connect(&self.socket).map_err(io)?;
         writeln!(
             stream,
@@ -347,87 +360,79 @@ impl Client {
         .map_err(io)?;
         let mut line = String::new();
         BufReader::new(&stream).read_line(&mut line).map_err(io)?;
-        serde_json::from_str(&line).map_err(|e| format!("bad response: {e}"))
+        serde_json::from_str(&line).map_err(Error::BadResponse)
     }
 
     /// Create a filesystem; returns the join token.
-    pub fn create(&self, name: &str, copies: u32) -> Result<String, String> {
+    pub fn create(&self, name: &str, copies: u32) -> Result<String, Error> {
         match self.call(&Request::Create {
             name: name.into(),
             copies,
         })? {
             Response::Created { token } => Ok(token),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Join the filesystem a token names.
-    pub fn join(&self, token: &str, offer_bytes: Option<u64>) -> Result<(), String> {
+    pub fn join(&self, token: &str, offer_bytes: Option<u64>) -> Result<(), Error> {
         match self.call(&Request::Join {
             token: token.into(),
             offer_bytes,
         })? {
             Response::Joined => Ok(()),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Mint another join token.
-    pub fn new_token(&self) -> Result<String, String> {
+    pub fn new_token(&self) -> Result<String, Error> {
         match self.call(&Request::NewToken)? {
             Response::Created { token } => Ok(token),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Revoke a token this node issued.
-    pub fn revoke(&self, token: &str) -> Result<(), String> {
+    pub fn revoke(&self, token: &str) -> Result<(), Error> {
         match self.call(&Request::Revoke {
             token: token.into(),
         })? {
             Response::Done => Ok(()),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Change the space this node offers to the filesystem.
-    pub fn set_offer(&self, bytes: u64) -> Result<(), String> {
+    pub fn set_offer(&self, bytes: u64) -> Result<(), Error> {
         match self.call(&Request::Config {
             offer_bytes: Some(bytes),
         })? {
             Response::Done => Ok(()),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Leave the filesystem once this node's data is safe elsewhere.
-    pub fn leave(&self) -> Result<(), String> {
+    pub fn leave(&self) -> Result<(), Error> {
         match self.call(&Request::Leave)? {
             Response::Done => Ok(()),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Remove a dead member.
-    pub fn remove(&self, member: u32) -> Result<(), String> {
+    pub fn remove(&self, member: MemberId) -> Result<(), Error> {
         match self.call(&Request::Remove { member })? {
             Response::Done => Ok(()),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 
-    pub fn status(&self) -> Result<Status, String> {
+    pub fn status(&self) -> Result<Status, Error> {
         match self.call(&Request::Status)? {
             Response::Status(s) => Ok(*s),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
+            other => Err(unexpected(other)),
         }
     }
 }

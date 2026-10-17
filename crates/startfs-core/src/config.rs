@@ -1,5 +1,6 @@
 //! Daemon configuration. Every field has a default so no file is needed.
 
+use crate::error::Error;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +74,7 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn parse(text: &str) -> Result<Self, String> {
-        toml::from_str(text).map_err(|e| e.to_string())
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        Ok(toml::from_str(text)?)
     }
 }

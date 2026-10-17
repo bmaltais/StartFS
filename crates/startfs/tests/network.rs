@@ -7,7 +7,7 @@ use startfs_core::config::Config;
 use startfs_core::control::{Request, Response};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
-use startfs_core::net::NodeId;
+use startfs_core::members::MemberId;
 use startfs_core::ops::*;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ impl Node {
             dir.path(),
             config,
             NodeConfig {
-                node: NodeId(0),
+                node: MemberId(0),
                 uid: 1000,
                 gid: 1000,
             },
@@ -52,7 +52,7 @@ impl Node {
     }
 
     fn call(&self, req: Request) -> Response {
-        self.daemon.handle(req)
+        self.daemon.handle_control_request(req)
     }
 
     fn create(&self, copies: u32) -> String {

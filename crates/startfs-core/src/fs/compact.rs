@@ -23,21 +23,25 @@ impl LocalFs {
     /// bookkeeping that guards against late arrivals goes too.
     pub fn compact(&self, upto: &Frontier, settled: bool) -> FsResult<()> {
         self.run(true, |t| {
-            let mine: Vec<(u32, u64)> = t
+            let mine: Vec<(MemberId, u64)> = t
                 .frontier
                 .iter()
                 .map_err(db)?
-                .map(|r| r.map(|(k, v)| (k.value(), v.value())))
+                .map(|r| r.map(|(k, v)| (MemberId(k.value()), v.value())))
                 .collect::<Result<_, _>>()
                 .map_err(db)?;
             for (origin, next) in mine {
                 let target = upto.get(&origin).copied().unwrap_or(0).min(next);
-                let base = t.logbase.get(origin).map_err(db)?.map_or(0, |g| g.value());
+                let base = t
+                    .logbase
+                    .get(origin.0)
+                    .map_err(db)?
+                    .map_or(0, |g| g.value());
                 if target > base {
                     t.log
-                        .retain_in((origin, base)..(origin, target), |_, _| false)
+                        .retain_in((origin.0, base)..(origin.0, target), |_, _| false)
                         .map_err(db)?;
-                    t.logbase.insert(origin, target).map_err(db)?;
+                    t.logbase.insert(origin.0, target).map_err(db)?;
                 }
             }
             if settled {

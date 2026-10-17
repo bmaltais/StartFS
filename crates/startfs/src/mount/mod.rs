@@ -11,6 +11,7 @@ pub mod fuse;
 #[cfg(unix)]
 pub mod translate;
 
+use crate::error::Error;
 use startfs_core::ops::FsOps;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,12 +20,12 @@ use std::sync::Arc;
 pub trait Mounter {
     /// Mount `fs` at `mountpoint` and return at once; the mount lives until
     /// the returned handle is unmounted or dropped.
-    fn mount(&self, fs: Arc<dyn FsOps>, mountpoint: &Path) -> Result<Box<dyn Mount>, String>;
+    fn mount(&self, fs: Arc<dyn FsOps>, mountpoint: &Path) -> Result<Box<dyn Mount>, Error>;
 }
 
 /// A live mount.
 pub trait Mount: Send {
-    fn unmount(self: Box<Self>) -> Result<(), String>;
+    fn unmount(self: Box<Self>) -> Result<(), Error>;
 }
 
 /// The mounter for this platform, if there is one. Windows (WinFsp) would add

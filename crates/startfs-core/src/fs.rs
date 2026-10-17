@@ -7,7 +7,7 @@ use crate::cache::{CacheStats, ChunkCache};
 use crate::chunker;
 use crate::chunkstore::{ChunkId, ChunkStore};
 use crate::clock::Clock;
-use crate::net::NodeId;
+use crate::members::MemberId;
 use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
 use redb::{Database, Durability, ReadableTable, Table, TableDefinition};
@@ -52,7 +52,7 @@ pub use writebuf::DEFAULT_WRITE_BUFFER;
 pub struct NodeConfig {
     /// The member id that stamps this node's log entries and inode numbers,
     /// until `join` assigns a real one.
-    pub node: NodeId,
+    pub node: MemberId,
     /// The local user all files appear to belong to on this node.
     pub uid: u32,
     pub gid: u32,
@@ -153,7 +153,7 @@ impl Tables<'_> {
             .is_none())
     }
     /// Inode numbers are global: the allocating node's tag above a local counter.
-    fn alloc_ino(&mut self, node: NodeId) -> FsResult<Ino> {
+    fn alloc_ino(&mut self, node: MemberId) -> FsResult<Ino> {
         let next = self
             .counters
             .get("next_ino")
@@ -266,7 +266,7 @@ impl LocalFs {
             *fs.hlc.lock().unwrap() = Hlc {
                 wall,
                 counter: counter as u32,
-                node: fs.node().0,
+                node: fs.node(),
             };
             if t.inodes.get(ROOT_INO).map_err(db)?.is_none() {
                 let now = fs.clock.now();
@@ -288,15 +288,15 @@ impl LocalFs {
         Ok(fs)
     }
 
-    pub fn node(&self) -> NodeId {
-        NodeId(self.node.load(Ordering::SeqCst))
+    pub fn node(&self) -> MemberId {
+        MemberId(self.node.load(Ordering::SeqCst))
     }
 
     /// Take the member id assigned at join. Only valid before the node has
     /// written anything, since ids stamp log entries and inode numbers.
-    pub fn set_node(&self, node: NodeId) {
+    pub fn set_node(&self, node: MemberId) {
         self.node.store(node.0, Ordering::SeqCst);
-        self.hlc.lock().unwrap().node = node.0;
+        self.hlc.lock().unwrap().node = node;
     }
 
     /// Run `f` in one transaction; read-only runs are rolled back.

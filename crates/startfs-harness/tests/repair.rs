@@ -2,6 +2,7 @@
 //! interface on a simulated cluster with a manual clock.
 
 use startfs_core::control::NodeState;
+use startfs_core::members::MemberId;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_harness::Cluster;
@@ -342,12 +343,12 @@ fn another_member_can_remove_a_dead_node_and_its_data_is_re_replicated() {
     c.crash(3);
 
     // An online member cannot be removed, only asked to leave.
-    assert!(c.control(0).remove(1).is_err());
+    assert!(c.control(0).remove(MemberId(1)).is_err());
 
     // No need to wait out the grace period.
     c.advance(2 * MINUTE);
     c.sync();
-    c.control(0).remove(3).unwrap();
+    c.control(0).remove(MemberId(3)).unwrap();
     settle(&c);
 
     let after = replicas(&c);

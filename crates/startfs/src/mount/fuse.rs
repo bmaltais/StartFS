@@ -8,6 +8,7 @@
 
 use super::translate::{time_to_nanos, to_errno, to_fuse_attr};
 use super::{Mount, Mounter};
+use crate::error::Error;
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
     FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
@@ -568,17 +569,22 @@ pub struct FuseMounter;
 struct FuseMount(fuser::BackgroundSession);
 
 impl Mount for FuseMount {
-    fn unmount(self: Box<Self>) -> Result<(), String> {
-        self.0.umount_and_join().map_err(|e| e.to_string())
+    fn unmount(self: Box<Self>) -> Result<(), Error> {
+        self.0.umount_and_join().map_err(Error::Unmount)
     }
 }
 
 impl Mounter for FuseMounter {
-    fn mount(&self, fs: Arc<dyn FsOps>, mountpoint: &Path) -> Result<Box<dyn Mount>, String> {
+    fn mount(&self, fs: Arc<dyn FsOps>, mountpoint: &Path) -> Result<Box<dyn Mount>, Error> {
         let mut config = Config::default();
         config.mount_options = platform_options();
-        let session = fuser::spawn_mount(FuseAdapter::new(fs), mountpoint, &config)
-            .map_err(|e| format!("cannot mount at {}: {e}", mountpoint.display()))?;
+        let session =
+            fuser::spawn_mount(FuseAdapter::new(fs), mountpoint, &config).map_err(|source| {
+                Error::Mount {
+                    mountpoint: mountpoint.to_path_buf(),
+                    source,
+                }
+            })?;
         Ok(Box::new(FuseMount(session)))
     }
 }
@@ -587,13 +593,13 @@ impl Mounter for FuseMounter {
 mod tests {
     use super::*;
     use startfs_core::fs::{LocalFs, NodeConfig};
-    use startfs_core::net::NodeId;
+    use startfs_core::members::MemberId;
     use startfs_core::ops::ROOT_INO;
 
     fn adapter() -> (FuseAdapter, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let node = NodeConfig {
-            node: NodeId(0),
+            node: MemberId(0),
             uid: 1000,
             gid: 1000,
         };
