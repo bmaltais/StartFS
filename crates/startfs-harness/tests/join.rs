@@ -355,3 +355,49 @@ fn cache_eviction_never_touches_replica_storage() {
     let own = c.fs(0).lookup(ROOT_INO, "f0").unwrap().ino;
     assert_eq!(c.fs(0).read(own, 0, u32::MAX).unwrap(), files[0]);
 }
+
+#[test]
+fn a_corrupt_chunk_on_a_peer_is_never_returned_to_the_reader() {
+    let c = joined(3, 3);
+    let data = noise(100_000, 4);
+    write_file(&c.fs(0), "f", &data);
+    c.sync();
+    let on = |i: usize| c.fs(i).lookup(ROOT_INO, "f").unwrap().ino;
+
+    // The only copy is damaged: the reader gets an error, never bad bytes.
+    c.corrupt_chunks(0);
+    let err = c.fs(1).read(on(1), 0, u32::MAX).unwrap_err();
+    assert_eq!(err, FsError::Unavailable);
+    assert_eq!(c.fs(0).read(on(0), 0, u32::MAX).unwrap_err().errno(), 5);
+    assert_eq!(c.control(1).status().unwrap().cache.chunks, 0);
+}
+
+#[test]
+fn a_reader_skips_a_peer_with_a_corrupt_chunk_and_uses_a_good_copy() {
+    let c = joined(3, 3);
+    let data = noise(100_000, 5);
+    write_file(&c.fs(0), "f", &data);
+    c.sync();
+    let on = |i: usize| c.fs(i).lookup(ROOT_INO, "f").unwrap().ino;
+    // Node 1 caches a good copy before the author's disk goes bad.
+    assert_eq!(c.fs(1).read(on(1), 0, u32::MAX).unwrap(), data);
+    c.corrupt_chunks(0);
+
+    assert_eq!(c.fs(2).read(on(2), 0, u32::MAX).unwrap(), data);
+}
+
+#[test]
+fn a_damaged_cache_entry_is_refetched_not_returned() {
+    let c = joined(2, 2);
+    let data = noise(100_000, 6);
+    write_file(&c.fs(0), "f", &data);
+    c.sync();
+    let on_b = c.fs(1).lookup(ROOT_INO, "f").unwrap().ino;
+    assert_eq!(c.fs(1).read(on_b, 0, u32::MAX).unwrap(), data);
+
+    c.corrupt_cache(1);
+    assert_eq!(c.fs(1).read(on_b, 0, u32::MAX).unwrap(), data);
+    // Once the author is gone the repaired entry is all that is left.
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    assert_eq!(c.fs(1).read(on_b, 0, u32::MAX).unwrap(), data);
+}

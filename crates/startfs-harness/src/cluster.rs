@@ -191,29 +191,35 @@ impl Cluster {
         self.network.set_down(NodeId(i as u32), true);
     }
 
-    /// Fault injection: flip a payload byte in every chunk file on the node's disk.
+    /// Fault injection: flip a payload byte in every replica chunk file on the node's disk.
     pub fn corrupt_chunks(&self, i: usize) {
-        fn walk(dir: &std::path::Path) {
-            for e in std::fs::read_dir(dir).unwrap().flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p);
-                } else {
-                    let mut b = std::fs::read(&p).unwrap();
-                    if let Some(last) = b.last_mut() {
-                        *last ^= 0xFF;
-                    }
-                    std::fs::write(&p, b).unwrap();
-                }
-            }
-        }
-        walk(&self.nodes[i].dir.path().join("chunks"));
+        corrupt_files(&self.nodes[i].dir.path().join("chunks"));
+    }
+
+    /// Fault injection: the same for the node's cache of fetched chunks.
+    pub fn corrupt_cache(&self, i: usize) {
+        corrupt_files(&self.nodes[i].dir.path().join("cache"));
     }
 
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
         open(&self.nodes, i, &self.network, self.clock.clone());
         self.network.set_down(NodeId(i as u32), false);
+    }
+}
+
+fn corrupt_files(dir: &std::path::Path) {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            corrupt_files(&p);
+        } else {
+            let mut b = std::fs::read(&p).unwrap();
+            if let Some(last) = b.last_mut() {
+                *last ^= 0xFF;
+            }
+            std::fs::write(&p, b).unwrap();
+        }
     }
 }
 
