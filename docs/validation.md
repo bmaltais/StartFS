@@ -12,7 +12,7 @@ build the release binary and run real `startfs daemon` processes. Rerun them to 
 | 1 | Setup under 5 min, about 3 commands | **Met** on loopback | `scripts/validate-setup.sh` |
 | 2 | Permanent node loss returns data to N copies, no user action | **Met** (real processes and harness) | `scripts/validate-loss.sh`; `repair.rs::after_the_grace_period_every_chunk_is_back_to_n_copies_without_user_action` |
 | 3 | No data loss when any N-1 nodes fail, once replicated | **Met** (real processes and harness) | `scripts/validate-loss.sh`; `repair.rs::any_n_minus_one_nodes_can_fail_once_replication_completed` |
-| 4 | Idle daemon under about 100 MB and negligible CPU | **Met when idle and small; not met after data is written** | `scripts/validate-idle.sh`, see below |
+| 4 | Idle daemon under about 100 MB and negligible CPU | **Met**, idle CPU no longer grows with stored data | `scripts/validate-idle.sh`, see below |
 | 5 | Cached data at near-local-disk speed | **Partly**: large reads yes, writes **no** | `scripts/validate-bench.sh`, see below |
 | 6 | Install docs for Linux and macOS | Done; macOS untested | `README.md`, `dist/README.md` |
 
@@ -56,26 +56,33 @@ Limits: loopback, one machine, one file, 3 nodes. No partitions or flaky links.
 
 | State | Node | RSS | CPU (one core) |
 |---|---|---|---|
-| Idle, empty filesystem | A | 8.7 MiB | 0.8 % |
-| Idle, empty filesystem | B | 8.7 MiB | 0.8 % |
-| Idle after writing a 128 MiB file and 2000 small files through A's mount | A | 93.5 MiB (peak 222) | **9.9 %** |
-| Same | B | 40.3 MiB | 0.8 % |
-| After B read the 128 MiB file | A / B | 93.5 / 48.9 MiB | 9.8 % / 0.8 % |
+| Idle, empty filesystem | A | 10.6 MiB | 0.5 % |
+| Idle, empty filesystem | B | 10.8 MiB | 0.5 % |
+| Idle after writing a 128 MiB file and 2000 small files through A's mount | A | 97.7 MiB (peak 226) | **0.7 %** |
+| Same | B | 41.7 MiB | 0.7 % |
+| After B read the 128 MiB file | A / B | 97.7 / 50.3 MiB | 0.7% / 0.7% |
+
+Before the idle-tick fix the same run measured A at 9.9 % (idle after the writes) and 9.8 %
+(after B's read), B at 0.8 %, and 0.8 to 0.9 % for the empty filesystem. Numbers move a little
+between runs, and the machine was shared with other builds while measuring, so read them to
+within a few tenths of a percent.
 
 Findings, stated plainly:
 
 - **Memory:** idle with little or no data is far under 100 MB. After a large write, the writing
-  node stayed at 93.5 MiB (under the budget by a small margin) with a peak of 222 MiB while
-  writing, because each write holds the whole file in memory (see section 5). A file larger
-  than free RAM cannot be written at all.
-- **CPU:** an empty idle daemon uses about 0.8 % of a core because the tick loop wakes every
-  10 ms. That is arguably negligible but is not zero. **After data is written the idle CPU
-  grows with the amount of data** (3.5 to 4.5 % after one 32 MiB file, about 10 % after 128 MiB
-  and 2000 files, on the node that holds the data). That is not negligible. The tick thread is
-  the one burning it (per-thread `/proc` times). From reading `daemon.rs`/`replication.rs`
-  the likely cause is that every tick the replicator rebuilds and sorts its list of all tracked
-  chunks; this has **not** been profiled. Not fixed here: it needs a redesign of the replicator
-  poll to be event or timer driven.
+  node stayed at about 98 MiB (right at the budget) with a peak of 226 MiB while writing,
+  because each write holds the whole file in memory (see section 5). A file larger than free RAM
+  cannot be written at all.
+- **CPU, fixed:** the empty idle daemon uses about 0.5 to 1 % of a core because the tick loop
+  wakes every 10 ms; that is the floor. Before the fix idle CPU grew with stored data (about
+  10 % at 128 MiB and 2000 files). Timing the phases of the tick confirmed the cause: the
+  replicator took about 12 % of a core, nearly all of it listing the whole staging directory
+  tree from disk every tick (and the log exchange about 2 %). The replicator now rescans staging
+  only when a counter says a chunk was added or removed, and skips chunks that are settled, so a
+  tick with nothing to do no longer touches the disk. After the fix an idle node holding the
+  same data uses about the same CPU as an empty one. The remaining cost of the tick (log
+  exchange, 10 ms wakeups) does not measurably grow with this amount of data; a much larger
+  tree was not measured.
 
 ## 5. Cached-data speed through the FUSE mount
 
@@ -115,13 +122,13 @@ reading cached data and for small writes, and **not met for writing files beyond
 
 ## Defects found, not fixed
 
-Neither fix is small or clearly scoped, so both are left for their own tickets:
+Not small or clearly scoped, so left for its own ticket:
 
 1. **Quadratic write path** (section 5): needs write buffering or chunk-level patching in
    `LocalFs::write`, with a flush on close/fsync, or at least reusing unchanged leading chunks.
-2. **Idle CPU grows with stored data** (section 4): the tick-time replicator scan.
 
-Both are called out in `README.md` under known limits.
+It is called out in `README.md` under known limits. (The idle CPU growth found earlier is
+fixed, see section 4.)
 
 ## Reproducing
 
