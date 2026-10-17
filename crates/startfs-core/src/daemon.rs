@@ -110,6 +110,10 @@ impl Daemon {
                     },
                     nodes,
                     copies_possible,
+                    conflicts: match self.fs.conflicts() {
+                        Ok(c) => c,
+                        Err(e) => return Response::Error(e.to_string()),
+                    },
                 })
             }
         }

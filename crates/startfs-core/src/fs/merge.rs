@@ -61,6 +61,57 @@ pub struct ConflictCopy {
     pub path: String,
 }
 
+/// Bookkeeping for a conflict copy in the tree.
+#[derive(Serialize, Deserialize)]
+struct ConflictRec {
+    path: String,
+    /// For a copy of an older version: the version it was saved from.
+    seed: Option<Hlc>,
+}
+
+/// `report.txt` saved from node 3 at 2023-11-14T22:13:30Z becomes
+/// `report (conflict from node3 20231114-221330).txt`.
+fn conflict_name(name: &str, from: Hlc) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => name.split_at(i),
+        _ => (name, ""),
+    };
+    format!("{stem} (conflict from node{} {}){ext}", from.node, stamp(from.wall))
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC.
+fn stamp(wall: Nanos) -> String {
+    let secs = wall / 1_000_000_000;
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // Civil-from-days (proleptic Gregorian), after Howard Hinnant.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+/// Stable inode number of the conflict copy of `of`'s version stamped `from`.
+fn conflict_ino(of: Ino, from: Hlc) -> Ino {
+    let mut h = blake3::Hasher::new();
+    h.update(&of.to_le_bytes());
+    h.update(&from.wall.to_le_bytes());
+    h.update(&from.counter.to_le_bytes());
+    h.update(&from.node.to_le_bytes());
+    let raw: [u8; 8] = h.finalize().as_bytes()[..8].try_into().expect("8 bytes");
+    u64::from_le_bytes(raw) | (1 << 63)
+}
+
 fn enc<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_stdvec(v).expect("serialises")
 }
@@ -79,6 +130,12 @@ impl Tables<'_> {
     fn put_object(&mut self, ino: Ino, o: &Object) -> FsResult<()> {
         self.objects.insert(ino, enc(o).as_slice()).map_err(db)?;
         Ok(())
+    }
+    fn conflict(&self, ino: Ino) -> FsResult<Option<ConflictRec>> {
+        match self.conflicts.get(ino).map_err(db)? {
+            Some(g) => Ok(Some(dec(g.value())?)),
+            None => Ok(None),
+        }
     }
     fn next_seq(&self, origin: u32) -> FsResult<u64> {
         Ok(self
@@ -102,7 +159,10 @@ impl LocalFs {
 
     /// Record a new state of `ino` (already applied to the visible tree).
     pub(super) fn emit_set(&self, t: &mut Tables<'_>, ino: Ino, i: &Inode) -> FsResult<()> {
-        let base = t.object(ino)?.winner().map(|v| v.hlc);
+        let base = match t.object(ino)?.winner() {
+            Some(v) => Some(v.hlc),
+            None => t.conflict(ino)?.and_then(|c| c.seed),
+        };
         let snap = self.snapshot(i)?;
         self.emit(t, Op::Set { ino, base, snap })
     }
@@ -259,6 +319,19 @@ impl LocalFs {
         })
     }
 
+    /// Conflict copies currently in the tree.
+    pub fn conflicts(&self) -> FsResult<Vec<ConflictCopy>> {
+        self.run(false, |t| {
+            let mut out = Vec::new();
+            for row in t.conflicts.iter().map_err(db)? {
+                let rec: ConflictRec = dec(row.map_err(db)?.1.value())?;
+                out.push(ConflictCopy { path: rec.path });
+            }
+            out.sort_by(|a, b| a.path.cmp(&b.path));
+            Ok(out)
+        })
+    }
+
     /// Rebuild the visible tree from the registers.
     fn reconcile(&self, t: &mut Tables<'_>) -> FsResult<()> {
         let mut objects: BTreeMap<Ino, Object> = BTreeMap::new();
@@ -273,6 +346,9 @@ impl LocalFs {
             parent: Ino,
             name: String,
             version: Version,
+            /// Set for conflict copies of an older version.
+            seed: Option<Hlc>,
+            conflict: bool,
         }
         let mut placed: Vec<Placed> = Vec::new();
         for (ino, o) in &objects {
@@ -287,7 +363,34 @@ impl LocalFs {
                     parent: *parent,
                     name: name.clone(),
                     version: v.clone(),
+                    seed: None,
+                    conflict: false,
                 });
+                if kind == FileKind::Dir {
+                    continue;
+                }
+                // Versions written concurrently with the winner survive as copies.
+                for loser in o.heads.iter().filter(|h| h.hlc != v.hlc) {
+                    let cino = conflict_ino(*ino, loser.hlc);
+                    let s = objects.get(&cino);
+                    if s.is_some_and(|s| s.max_del.is_some()) {
+                        continue; // the user resolved it
+                    }
+                    let (parent, name) = s
+                        .and_then(|s| s.loc.as_ref())
+                        .map_or((*parent, conflict_name(name, loser.hlc)), |l| {
+                            (l.1, l.2.clone())
+                        });
+                    placed.push(Placed {
+                        ino: cino,
+                        kind,
+                        parent,
+                        name,
+                        version: s.and_then(Object::winner).unwrap_or(loser).clone(),
+                        seed: Some(loser.hlc),
+                        conflict: true,
+                    });
+                }
             }
         }
 
@@ -297,8 +400,10 @@ impl LocalFs {
         }
 
         t.dirents.retain(|_, _| false).map_err(db)?;
+        t.conflicts.retain(|_, _| false).map_err(db)?;
         t.inodes.retain(|k, _| k == ROOT_INO).map_err(db)?;
         let mut queue = VecDeque::from([ROOT_INO]);
+        let mut paths: HashMap<Ino, String> = HashMap::from([(ROOT_INO, String::new())]);
         while let Some(dir) = queue.pop_front() {
             for &idx in by_parent.get(&dir).into_iter().flatten() {
                 let p = &placed[idx];
@@ -316,7 +421,16 @@ impl LocalFs {
                 };
                 t.put(p.ino, &inode)?;
                 t.dirents.insert((dir, p.name.as_str()), p.ino).map_err(db)?;
+                let path = format!("{}/{}", paths[&dir], p.name);
+                if p.conflict {
+                    let rec = ConflictRec {
+                        path: path.clone(),
+                        seed: p.seed,
+                    };
+                    t.conflicts.insert(p.ino, enc(&rec).as_slice()).map_err(db)?;
+                }
                 if p.kind == FileKind::Dir {
+                    paths.insert(p.ino, path);
                     queue.push_back(p.ino);
                 }
             }

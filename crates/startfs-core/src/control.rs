@@ -2,6 +2,7 @@
 //! daemon over a local unix socket. One JSON request line, one JSON response line.
 
 use crate::daemon::Daemon;
+use crate::fs::ConflictCopy;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -48,6 +49,8 @@ pub struct Status {
     pub nodes: u32,
     /// Best-effort redundancy: min(N, nodes) copies are actually possible.
     pub copies_possible: u32,
+    /// Conflict copies awaiting the user's attention (delete one to resolve it).
+    pub conflicts: Vec<ConflictCopy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

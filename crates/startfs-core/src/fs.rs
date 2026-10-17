@@ -350,10 +350,12 @@ impl LocalFs {
         }
     }
 
+    /// Remove an entry and record its deletion in the log.
     fn remove_entry(&self, t: &mut Tables<'_>, parent: Ino, name: &str, ino: Ino) -> FsResult<()> {
         t.dirents.remove((parent, name)).map_err(db)?;
         t.inodes.remove(ino).map_err(db)?;
-        Ok(())
+        t.conflicts.remove(ino).map_err(db)?;
+        self.emit(t, Op::Delete { ino })
     }
 }
 
