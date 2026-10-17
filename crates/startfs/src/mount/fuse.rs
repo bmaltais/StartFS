@@ -10,9 +10,9 @@ use super::translate::{time_to_nanos, to_errno, to_fuse_attr};
 use super::{Mount, Mounter};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite,
-    ReplyXattr, RenameFlags, Request, TimeOrNow, WriteFlags,
+    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use startfs_core::clock::{Clock, SystemClock};
 use startfs_core::ops::{Attr, FsError, FsOps, Ino, SetAttr};
@@ -138,7 +138,9 @@ impl FuseAdapter {
         if !flags.is_empty() {
             return Err(Errno::EINVAL);
         }
-        ok(self.fs.rename(parent, name(n)?, new_parent, name(new_name)?))
+        ok(self
+            .fs
+            .rename(parent, name(n)?, new_parent, name(new_name)?))
     }
 
     /// Entries after `offset`, led by `.` and `..` (the core lists neither).
@@ -305,7 +307,10 @@ impl Filesystem for FuseAdapter {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        empty(self.op_rename(parent.0, n, newparent.0, newname, flags), reply);
+        empty(
+            self.op_rename(parent.0, n, newparent.0, newname, flags),
+            reply,
+        );
     }
 
     fn link(
@@ -452,7 +457,13 @@ impl Filesystem for FuseAdapter {
         match self.op_create(parent.0, n, mode, umask) {
             Ok(a) => {
                 let attr: FileAttr = to_fuse_attr(&a);
-                reply.created(&TTL, &attr, Generation(0), FileHandle(0), FopenFlags::empty());
+                reply.created(
+                    &TTL,
+                    &attr,
+                    Generation(0),
+                    FileHandle(0),
+                    FopenFlags::empty(),
+                );
             }
             Err(e) => reply.error(e),
         }
@@ -537,7 +548,10 @@ mod tests {
     #[test]
     fn failures_carry_the_right_errno() {
         let (a, _d) = adapter();
-        assert_eq!(a.op_lookup(ROOT_INO, os("nope")).unwrap_err(), Errno::ENOENT);
+        assert_eq!(
+            a.op_lookup(ROOT_INO, os("nope")).unwrap_err(),
+            Errno::ENOENT
+        );
         use std::os::unix::ffi::OsStrExt;
         let bad = OsStr::from_bytes(&[0xff, 0xfe]);
         assert_eq!(a.op_lookup(ROOT_INO, bad).unwrap_err(), Errno::EINVAL);
@@ -545,7 +559,10 @@ mod tests {
         a.op_create(ROOT_INO, os("f"), 0o644, 0).unwrap();
         assert_eq!(a.op_rmdir(ROOT_INO, os("f")).unwrap_err(), Errno::ENOTDIR);
         let f = a.op_lookup(ROOT_INO, os("f")).unwrap();
-        assert!(a.op_link(f.ino, ROOT_INO, os("g")).is_err(), "hardlinks are unsupported");
+        assert!(
+            a.op_link(f.ino, ROOT_INO, os("g")).is_err(),
+            "hardlinks are unsupported"
+        );
     }
 
     #[test]
@@ -554,8 +571,14 @@ mod tests {
         a.op_create(ROOT_INO, os("x"), 0o644, 0).unwrap();
         #[cfg(target_os = "linux")]
         assert_eq!(
-            a.op_rename(ROOT_INO, os("x"), ROOT_INO, os("y"), RenameFlags::RENAME_EXCHANGE)
-                .unwrap_err(),
+            a.op_rename(
+                ROOT_INO,
+                os("x"),
+                ROOT_INO,
+                os("y"),
+                RenameFlags::RENAME_EXCHANGE
+            )
+            .unwrap_err(),
             Errno::EINVAL
         );
         a.op_rename(ROOT_INO, os("x"), ROOT_INO, os("y"), RenameFlags::empty())
@@ -593,12 +616,20 @@ mod tests {
     #[test]
     fn symlinks_and_xattrs_round_trip() {
         let (a, _d) = adapter();
-        let l = a.op_symlink(ROOT_INO, os("ln"), Path::new("target/x")).unwrap();
+        let l = a
+            .op_symlink(ROOT_INO, os("ln"), Path::new("target/x"))
+            .unwrap();
         assert_eq!(a.op_readlink(l.ino).unwrap(), b"target/x");
         let f = a.op_create(ROOT_INO, os("f"), 0o644, 0).unwrap();
         a.op_setxattr(f.ino, os("user.k"), b"value").unwrap();
-        assert_eq!(a.op_getxattr(f.ino, os("user.k"), 0).unwrap(), XattrReply::Size(5));
-        assert_eq!(a.op_getxattr(f.ino, os("user.k"), 2).unwrap_err(), Errno::ERANGE);
+        assert_eq!(
+            a.op_getxattr(f.ino, os("user.k"), 0).unwrap(),
+            XattrReply::Size(5)
+        );
+        assert_eq!(
+            a.op_getxattr(f.ino, os("user.k"), 2).unwrap_err(),
+            Errno::ERANGE
+        );
         assert_eq!(
             a.op_getxattr(f.ino, os("user.k"), 16).unwrap(),
             XattrReply::Data(b"value".to_vec())
@@ -608,7 +639,10 @@ mod tests {
             XattrReply::Data(b"user.k\0".to_vec())
         );
         a.op_removexattr(f.ino, os("user.k")).unwrap();
-        assert_eq!(a.op_getxattr(f.ino, os("user.k"), 0).unwrap_err().code(), libc::ENODATA);
+        assert_eq!(
+            a.op_getxattr(f.ino, os("user.k"), 0).unwrap_err().code(),
+            libc::ENODATA
+        );
     }
 
     #[test]

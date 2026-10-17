@@ -1,5 +1,6 @@
 //! The `startfs` binary: the daemon (`startfs daemon`) and the CLI that talks to it.
 
+use startfs::mount;
 use startfs_core::clock::SystemClock;
 use startfs_core::config::Config;
 use startfs_core::control::{self, Client, NodeState, ScrubState, Status, Tier};
@@ -10,11 +11,12 @@ use startfs_core::power::SystemPower;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
 
 commands:
-  daemon                              run the daemon
+  daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
   create --name NAME --copies N       create a filesystem and print its join token
   status                              show the state of this node's filesystem
   join TOKEN [--offer SIZE]           join the filesystem a token names
@@ -71,7 +73,8 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "daemon" => {
             let config_file = config_file
                 .unwrap_or_else(|| home_dir("XDG_CONFIG_HOME", ".config").join("config.toml"));
-            daemon(data_dir, &config_file, &socket)
+            let mountpoint = flag_value(rest, "--mount").ok().map(PathBuf::from);
+            daemon(data_dir, &config_file, &socket, mountpoint)
         }
         "create" => {
             let name = flag_value(rest, "--name")?;
@@ -166,12 +169,14 @@ fn daemon(
     data_dir: PathBuf,
     config_file: &std::path::Path,
     socket: &std::path::Path,
+    mountpoint: Option<PathBuf>,
 ) -> Result<(), String> {
     // A missing config file is normal: every setting has a default.
     let config = match std::fs::read_to_string(config_file) {
         Ok(text) => Config::parse(&text).map_err(|e| format!("{}: {e}", config_file.display()))?,
         Err(_) => Config::default(),
     };
+    let config_mountpoint = config.mountpoint.clone();
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
     // SAFETY: getuid/getgid have no preconditions and cannot fail.
     let node = NodeConfig {
@@ -188,10 +193,42 @@ fn daemon(
     )
     .map_err(|e| e.to_string())?;
     d.set_power_source(Arc::new(SystemPower));
-    let server = control::serve(d, socket)
+    let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
+    let server = control::serve(d.clone(), socket)
         .map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
-    server.wait();
+    let mount = match mountpoint {
+        None => None,
+        Some(mp) => {
+            let mounter = mount::platform_mounter().ok_or("mounting is not supported here")?;
+            std::fs::create_dir_all(&mp).map_err(|e| format!("{}: {e}", mp.display()))?;
+            Some(mounter.mount(d.fs(), &mp)?)
+        }
+    };
+    // Run until asked to stop, then unmount so no dead mount is left behind.
+    wait_for_stop();
+    drop(server);
+    if let Some(m) = mount {
+        m.unmount()?;
+    }
     Ok(())
+}
+
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// Block until SIGTERM or SIGINT arrives.
+fn wait_for_stop() {
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+    }
+    while !STOP.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// This machine's tailnet address, or loopback when Tailscale is unavailable.

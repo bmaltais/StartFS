@@ -1,0 +1,26 @@
+# systemd user unit: runs the StartFS daemon and mounts the filesystem.
+#
+# Install:
+#   install -Dm755 target/release/startfs ~/.local/bin/startfs
+#   install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now startfs.service
+#   loginctl enable-linger "$USER"     # start at boot, before you log in
+#
+# Needs /dev/fuse and the setuid fusermount3 helper (package: fuse3).
+[Unit]
+Description=StartFS daemon and mount
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p %h/StartFS
+ExecStart=%h/.local/bin/startfs daemon --mount %h/StartFS
+# SIGTERM makes the daemon unmount cleanly; this clears a stale mount left by a crash.
+ExecStopPost=-/usr/bin/fusermount3 -uz %h/StartFS
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
