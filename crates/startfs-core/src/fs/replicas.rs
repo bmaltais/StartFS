@@ -142,6 +142,8 @@ impl LocalFs {
                     .push((name.to_string(), v.value()));
             }
             let mut out = Vec::new();
+            // A file with several names is listed once, under the first.
+            let mut seen = HashSet::new();
             let mut stack = vec![(ROOT_INO, String::new())];
             while let Some((dir, path)) = stack.pop() {
                 for (name, ino) in kids.remove(&dir).unwrap_or_default() {
@@ -149,13 +151,13 @@ impl LocalFs {
                     let inode = t.inode(ino)?;
                     match inode.content {
                         _ if inode.kind == FileKind::Dir => stack.push((ino, child)),
-                        Content::Chunks(refs) => {
+                        Content::Chunks(refs) if seen.insert(ino) => {
                             let ids: Vec<ChunkId> = refs.into_iter().map(|r| r.id).collect();
                             if ids.iter().any(|id| wanted.contains(id)) {
                                 out.push((child, ids));
                             }
                         }
-                        Content::Inline(_) => {}
+                        _ => {}
                     }
                 }
             }

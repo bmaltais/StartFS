@@ -15,6 +15,11 @@ const FILES: usize = 300;
 /// Three nodes where node 2 is cut off while the others create many files
 /// and compact their logs, so that node 2 can only be caught up with state.
 fn island_behind_a_compaction() -> Cluster {
+    island_behind_a_compaction_after(|_| {})
+}
+
+/// [`island_behind_a_compaction`], with `work` done on node 0 while node 2 is cut off.
+fn island_behind_a_compaction_after(work: impl FnOnce(&Cluster)) -> Cluster {
     let c = Cluster::start_with_config(3, &format!("state_chunk_bytes = {CHUNK_BYTES}"));
     let token = c.control(0).create("home", 2).unwrap();
     for i in 1..3 {
@@ -28,6 +33,7 @@ fn island_behind_a_compaction() -> Cluster {
             .create(ROOT_INO, &format!("file-{i:03}"), 0o644)
             .unwrap();
     }
+    work(&c);
     for _ in 0..6 {
         c.advance(HOUR / 2);
         c.sync();
@@ -157,4 +163,40 @@ fn hellos_keep_flowing_while_a_transfer_is_in_progress() {
             .any(|m| matches!(m, Message::Hello(_))),
         "no Hello between the first and last chunk"
     );
+}
+
+#[test]
+fn a_node_behind_a_compaction_receives_the_names_of_linked_files() {
+    let c = island_behind_a_compaction_after(|c| {
+        let fs = c.fs(0);
+        let orig = fs.create(ROOT_INO, "orig", 0o644).unwrap();
+        fs.write(orig.ino, 0, b"linked data").unwrap();
+        fs.link(orig.ino, ROOT_INO, "alias").unwrap();
+        fs.unlink(ROOT_INO, "orig").unwrap();
+        let x = fs.create(ROOT_INO, "x", 0o644).unwrap();
+        fs.link(x.ino, ROOT_INO, "y").unwrap();
+    });
+    c.network().heal();
+    settle(&c);
+
+    for i in 0..3 {
+        let fs = c.fs(i);
+        assert_eq!(
+            fs.lookup(ROOT_INO, "orig"),
+            Err(FsError::NotFound),
+            "node {i}"
+        );
+        let alias = fs.lookup(ROOT_INO, "alias").unwrap();
+        assert_eq!(alias.nlink, 1, "node {i}");
+        assert_eq!(
+            fs.read(alias.ino, 0, 100).unwrap(),
+            b"linked data",
+            "node {i}"
+        );
+        let (x, y) = (
+            fs.lookup(ROOT_INO, "x").unwrap(),
+            fs.lookup(ROOT_INO, "y").unwrap(),
+        );
+        assert_eq!((x.ino, x.nlink), (y.ino, 2), "node {i}");
+    }
 }

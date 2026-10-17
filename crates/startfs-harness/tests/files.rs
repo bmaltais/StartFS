@@ -234,13 +234,188 @@ fn ownership_is_mapped_to_the_local_user_of_each_node() {
 }
 
 #[test]
-fn hardlinks_fail_with_a_clear_posix_error() {
+fn a_link_is_a_second_name_for_the_same_file() {
     let c = Cluster::start(1);
     let fs = c.fs(0);
     let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
-    let err = fs.link(f.ino, ROOT_INO, "g").unwrap_err();
-    assert_eq!(err.errno(), libc_eperm());
-    assert!(fs.lookup(ROOT_INO, "g").is_err());
+    fs.write(f.ino, 0, b"shared").unwrap();
+    let l = fs.link(f.ino, ROOT_INO, "g").unwrap();
+    assert_eq!(l.ino, f.ino);
+    assert_eq!(l.nlink, 2);
+    assert_eq!(fs.lookup(ROOT_INO, "g").unwrap().ino, f.ino);
+    assert_eq!(fs.getattr(f.ino).unwrap().nlink, 2);
+    assert_eq!(
+        fs.read(fs.lookup(ROOT_INO, "g").unwrap().ino, 0, 10)
+            .unwrap(),
+        b"shared"
+    );
+    assert_eq!(names(&fs, ROOT_INO), ["f", "g"]);
+
+    // A write through one name is seen through the other.
+    fs.write(f.ino, 0, b"SHARED").unwrap();
+    assert_eq!(fs.read(l.ino, 0, 10).unwrap(), b"SHARED");
+}
+
+#[test]
+fn link_rejects_directories_existing_names_and_missing_sources() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let d = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+    fs.create(ROOT_INO, "taken", 0o644).unwrap();
+    assert_eq!(fs.link(d.ino, ROOT_INO, "d2"), Err(FsError::NotPermitted));
+    assert_eq!(fs.link(f.ino, ROOT_INO, "taken"), Err(FsError::Exists));
+    assert_eq!(fs.link(f.ino, ROOT_INO, "a/b"), Err(FsError::Invalid));
+    assert_eq!(fs.link(f.ino, f.ino, "x"), Err(FsError::NotDir));
+    assert_eq!(fs.link(f.ino + 1000, ROOT_INO, "x"), Err(FsError::NotFound));
+    assert_eq!(fs.getattr(f.ino).unwrap().nlink, 1);
+    assert_eq!(names(&fs, ROOT_INO), ["d", "f", "taken"]);
+}
+
+#[test]
+fn unlinking_one_name_keeps_the_file_until_the_last_goes() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+    fs.write(f.ino, 0, b"keep me").unwrap();
+    fs.link(f.ino, ROOT_INO, "g").unwrap();
+
+    fs.unlink(ROOT_INO, "f").unwrap();
+    assert_eq!(fs.lookup(ROOT_INO, "f"), Err(FsError::NotFound));
+    assert_eq!(fs.getattr(f.ino).unwrap().nlink, 1);
+    let g = fs.lookup(ROOT_INO, "g").unwrap();
+    assert_eq!(g.ino, f.ino);
+    assert_eq!(fs.read(g.ino, 0, 20).unwrap(), b"keep me");
+
+    fs.unlink(ROOT_INO, "g").unwrap();
+    assert_eq!(fs.getattr(f.ino), Err(FsError::NotFound));
+    assert!(names(&fs, ROOT_INO).is_empty());
+}
+
+#[test]
+fn every_name_reports_the_same_attributes() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let d = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+    fs.link(f.ino, d.ino, "g").unwrap();
+
+    fs.setxattr(f.ino, "user.k", b"v").unwrap();
+    fs.setattr(
+        f.ino,
+        SetAttr {
+            mode: Some(0o600),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let a = fs.lookup(ROOT_INO, "f").unwrap();
+    let b = fs.lookup(d.ino, "g").unwrap();
+    assert_eq!(
+        (a.ino, a.mode, a.size, a.mtime),
+        (b.ino, b.mode, b.size, b.mtime)
+    );
+    assert_eq!((a.nlink, b.nlink), (2, 2));
+    assert_eq!(b.mode, 0o600);
+    assert_eq!(fs.getxattr(b.ino, "user.k").unwrap(), b"v");
+    let in_d = fs.readdir(d.ino).unwrap();
+    assert_eq!(in_d.len(), 1);
+    assert_eq!(in_d[0].ino, f.ino);
+}
+
+#[test]
+fn a_symlink_can_be_linked_and_both_names_read_the_same_target() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let l = fs.symlink(ROOT_INO, "l", "../some/where").unwrap();
+    let l2 = fs.link(l.ino, ROOT_INO, "l2").unwrap();
+    assert_eq!((l2.ino, l2.nlink, l2.kind), (l.ino, 2, FileKind::Symlink));
+    assert_eq!(fs.readlink(l2.ino).unwrap(), "../some/where");
+    fs.unlink(ROOT_INO, "l").unwrap();
+    assert_eq!(
+        fs.readlink(fs.lookup(ROOT_INO, "l2").unwrap().ino).unwrap(),
+        "../some/where"
+    );
+}
+
+#[test]
+fn rename_onto_a_name_of_the_same_file_does_nothing() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+    fs.link(f.ino, ROOT_INO, "g").unwrap();
+    fs.rename(ROOT_INO, "f", ROOT_INO, "g").unwrap();
+    assert_eq!(names(&fs, ROOT_INO), ["f", "g"]);
+    assert_eq!(fs.getattr(f.ino).unwrap().nlink, 2);
+}
+
+#[test]
+fn rename_over_a_linked_file_removes_only_that_name() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let a = fs.create(ROOT_INO, "a", 0o644).unwrap();
+    let b = fs.create(ROOT_INO, "b", 0o644).unwrap();
+    fs.write(b.ino, 0, b"b-data").unwrap();
+    fs.link(b.ino, ROOT_INO, "b2").unwrap();
+
+    fs.rename(ROOT_INO, "a", ROOT_INO, "b").unwrap();
+    assert_eq!(fs.lookup(ROOT_INO, "b").unwrap().ino, a.ino);
+    let b2 = fs.lookup(ROOT_INO, "b2").unwrap();
+    assert_eq!((b2.ino, b2.nlink), (b.ino, 1));
+    assert_eq!(fs.read(b2.ino, 0, 10).unwrap(), b"b-data");
+}
+
+#[test]
+fn a_renamed_name_stays_linked() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let d = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+    fs.link(f.ino, ROOT_INO, "g").unwrap();
+    fs.rename(ROOT_INO, "f", d.ino, "moved").unwrap();
+    assert_eq!(names(&fs, ROOT_INO), ["d", "g"]);
+    assert_eq!(fs.lookup(d.ino, "moved").unwrap().ino, f.ino);
+    fs.unlink(d.ino, "moved").unwrap();
+    assert_eq!(fs.lookup(ROOT_INO, "g").unwrap().nlink, 1);
+}
+
+#[test]
+fn links_survive_a_node_crash_and_restart() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+    fs.write(f.ino, 0, b"durable").unwrap();
+    fs.link(f.ino, ROOT_INO, "g").unwrap();
+    fs.fsync(f.ino).unwrap();
+    assert!(!fs.has_unsynced());
+
+    c.crash(0);
+    c.restart(0);
+    let g = fs.lookup(ROOT_INO, "g").unwrap();
+    assert_eq!((g.ino, g.nlink), (f.ino, 2));
+    assert_eq!(fs.read(g.ino, 0, 10).unwrap(), b"durable");
+}
+
+#[test]
+fn only_dropping_the_last_name_of_a_chunk_backed_file_is_durable_at_once() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "f", 0o600).unwrap();
+    fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
+    fs.flush(f.ino).unwrap();
+    assert!(!fs.has_unsynced());
+
+    fs.link(f.ino, ROOT_INO, "g").unwrap();
+    assert!(fs.has_unsynced(), "a link does not wait for disk");
+    fs.fsync(f.ino).unwrap();
+    fs.unlink(ROOT_INO, "f").unwrap();
+    assert!(fs.has_unsynced(), "no chunk reference was dropped");
+    fs.fsync(f.ino).unwrap();
+    fs.unlink(ROOT_INO, "g").unwrap();
+    assert!(
+        !fs.has_unsynced(),
+        "the last name drops the chunk references"
+    );
 }
 
 #[test]
@@ -268,10 +443,6 @@ fn bad_names_are_rejected() {
     );
     let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
     assert_eq!(fs.create(f.ino, "child", 0o644), Err(FsError::NotDir));
-}
-
-fn libc_eperm() -> i32 {
-    1
 }
 
 #[test]

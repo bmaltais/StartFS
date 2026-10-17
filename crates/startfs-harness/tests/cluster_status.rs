@@ -65,6 +65,22 @@ fn a_file_unreplicated_on_one_node_shows_in_every_nodes_status() {
 }
 
 #[test]
+fn a_linked_file_unreplicated_on_one_node_shows_in_status_once() {
+    let c = one_storage_node();
+    write_on(&c, 2, "a");
+    let a = c.fs(2).lookup(ROOT_INO, "a").unwrap();
+    c.fs(2).link(a.ino, ROOT_INO, "b").unwrap();
+    c.sync();
+    gossip(&c);
+
+    for node in [0, 1, 3] {
+        let s = c.control(node).status().unwrap();
+        assert_eq!(s.unreplicated.len(), 1, "node {node}: {:?}", s.unreplicated);
+        assert_eq!(s.unreplicated[0].copies, 1);
+    }
+}
+
+#[test]
 fn a_partitioned_member_makes_the_view_partial_and_is_named() {
     let c = one_storage_node();
     write_on(&c, 2, "a");

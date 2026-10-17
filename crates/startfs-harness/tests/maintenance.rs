@@ -80,6 +80,44 @@ fn deleted_data_is_kept_for_the_retention_period_and_then_reclaimed() {
 }
 
 #[test]
+fn a_linked_files_data_is_kept_until_its_last_name_is_gone_and_then_reclaimed() {
+    let c = cluster(2, 3);
+    let ino = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    c.fs(0).link(ino, ROOT_INO, "b").unwrap();
+    c.sync();
+    let held = total_replicas(&c);
+    assert!(held >= 2, "{held}");
+
+    c.fs(0).unlink(ROOT_INO, "a").unwrap();
+    pass(&c, 10 * DAY, 12 * HOUR);
+    assert_eq!(total_replicas(&c), held, "reclaimed while a name remained");
+    let b = c.fs(1).lookup(ROOT_INO, "b").unwrap();
+    assert_eq!(
+        c.fs(1).read(b.ino, 0, u32::MAX).unwrap(),
+        noise(8 * 1024, 1)
+    );
+
+    c.fs(0).unlink(ROOT_INO, "b").unwrap();
+    pass(&c, 10 * DAY, 12 * HOUR);
+    assert_eq!(total_replicas(&c), 0);
+}
+
+#[test]
+fn a_linked_file_that_is_fully_unlinked_leaves_no_metadata_behind() {
+    let c = cluster(2, 3);
+    let ino = put(&c.fs(0), "a", b"x");
+    c.fs(0).link(ino, ROOT_INO, "b").unwrap();
+    c.sync();
+    c.fs(0).unlink(ROOT_INO, "a").unwrap();
+    c.fs(0).unlink(ROOT_INO, "b").unwrap();
+    pass(&c, 6 * HOUR, Duration::from_secs(1800));
+    for i in 0..3 {
+        assert!(names(&c.fs(i)).is_empty(), "node {i}");
+        assert!(c.control(i).status().unwrap().log.objects < 3, "node {i}");
+    }
+}
+
+#[test]
 fn overwritten_data_is_reclaimed_but_chunks_still_in_use_are_kept() {
     let c = cluster(2, 3);
     let shared = noise(8 * 1024, 2);

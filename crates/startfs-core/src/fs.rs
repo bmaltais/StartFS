@@ -21,10 +21,12 @@ use std::sync::{Arc, Mutex};
 /// Files up to this size live inside their metadata record, with no chunk.
 pub const INLINE_MAX: usize = 2048;
 const NAME_MAX: usize = 255;
-const RECORD_VERSION: u8 = 1;
+const RECORD_VERSION: u8 = 2;
 
 const INODES: TableDefinition<u64, &[u8]> = TableDefinition::new("inodes");
 const DIRENTS: TableDefinition<(u64, &str), u64> = TableDefinition::new("dirents");
+/// Which of an object's names each directory entry shows: (parent, name) -> slot.
+const NAMES: TableDefinition<(u64, &str), &[u8]> = TableDefinition::new("names");
 const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
 /// The operation log: (origin node, seq) -> encoded [`Entry`].
 const LOG: TableDefinition<(u32, u64), &[u8]> = TableDefinition::new("log");
@@ -110,6 +112,7 @@ fn db<E: std::fmt::Display>(e: E) -> FsError {
 pub(crate) struct Tables<'a> {
     inodes: Table<'a, u64, &'static [u8]>,
     dirents: Table<'a, (u64, &'static str), u64>,
+    names: Table<'a, (u64, &'static str), &'static [u8]>,
     counters: Table<'a, &'static str, u64>,
     log: Table<'a, (u32, u64), &'static [u8]>,
     frontier: Table<'a, u32, u64>,
@@ -321,6 +324,7 @@ impl LocalFs {
             let mut t = Tables {
                 inodes: txn.open_table(INODES).map_err(db)?,
                 dirents: txn.open_table(DIRENTS).map_err(db)?,
+                names: txn.open_table(NAMES).map_err(db)?,
                 counters: txn.open_table(COUNTERS).map_err(db)?,
                 log: txn.open_table(LOG).map_err(db)?,
                 frontier: txn.open_table(FRONTIER).map_err(db)?,
@@ -445,7 +449,7 @@ impl LocalFs {
         p.ctime = p.mtime;
         t.put(parent, &p)?;
         let snap = self.snapshot(&inode);
-        self.emit(
+        let slot = self.emit(
             t,
             Op::Create {
                 ino,
@@ -455,6 +459,7 @@ impl LocalFs {
                 snap,
             },
         )?;
+        t.set_slot(parent, name, slot)?;
         Ok(self.attr(ino, &inode))
     }
 
@@ -612,12 +617,21 @@ impl LocalFs {
         }
     }
 
-    /// Remove an entry and record its deletion in the log.
+    /// Remove one name and record it in the log. The object goes with its last name.
     fn remove_entry(&self, t: &mut Tables<'_>, parent: Ino, name: &str, ino: Ino) -> FsResult<()> {
+        let slot = t.slot(parent, name)?;
         t.dirents.remove((parent, name)).map_err(db)?;
-        t.inodes.remove(ino).map_err(db)?;
-        t.conflicts.remove(ino).map_err(db)?;
-        self.emit(t, Op::Delete { ino })
+        t.names.remove((parent, name)).map_err(db)?;
+        let mut i = t.inode(ino)?;
+        if i.kind != FileKind::Dir && i.nlink > 1 {
+            i.nlink -= 1;
+            i.ctime = self.clock.now();
+            t.put(ino, &i)?;
+        } else {
+            t.inodes.remove(ino).map_err(db)?;
+            t.conflicts.remove(ino).map_err(db)?;
+        }
+        self.emit(t, Op::Unlink { ino, slot }).map(|_| ())
     }
 }
 
@@ -707,9 +721,35 @@ impl FsOps for LocalFs {
         })
     }
 
-    fn link(&self, _ino: Ino, _new_parent: Ino, _new_name: &str) -> FsResult<Attr> {
-        // POSIX filesystems without hardlink support report EPERM.
-        Err(FsError::NotPermitted)
+    fn link(&self, ino: Ino, new_parent: Ino, new_name: &str) -> FsResult<Attr> {
+        // Lazy like create: a link drops no chunk references.
+        let attr = self.run_as(true, Durability::None, |t| {
+            check_name(new_name)?;
+            let mut i = t.inode(ino)?;
+            // Directories keep a single parent; a conflict copy is resolved by
+            // moving or removing it, not by naming it twice.
+            if i.kind == FileKind::Dir || t.conflicts.get(ino).map_err(db)?.is_some() {
+                return Err(FsError::NotPermitted);
+            }
+            t.dir(new_parent)?;
+            if t.entry(new_parent, new_name)?.is_some() {
+                return Err(FsError::Exists);
+            }
+            i.nlink += 1;
+            i.ctime = self.clock.now();
+            t.put(ino, &i)?;
+            t.dirents.insert((new_parent, new_name), ino).map_err(db)?;
+            self.touch_dir(t, new_parent)?;
+            let op = Op::Link {
+                ino,
+                parent: new_parent,
+                name: new_name.to_string(),
+            };
+            let slot = self.emit(t, op)?;
+            t.set_slot(new_parent, new_name, slot)?;
+            Ok(self.attr(ino, &i))
+        })?;
+        Ok(self.with_buffered(attr))
     }
 
     fn read(&self, ino: Ino, offset: u64, len: u32) -> FsResult<Vec<u8>> {
@@ -757,7 +797,8 @@ impl FsOps for LocalFs {
             if inode.kind == FileKind::Dir {
                 return Err(FsError::IsDir);
             }
-            chunked.set(matches!(inode.content, Content::Chunks(_)));
+            // Only the last name drops the chunk references.
+            chunked.set(matches!(inode.content, Content::Chunks(_)) && inode.nlink <= 1);
             self.remove_entry(t, parent, name, ino)?;
             self.touch_dir(t, parent)
         })?;
@@ -815,8 +856,11 @@ impl FsOps for LocalFs {
                 }
                 self.remove_entry(t, new_parent, new_name, dst)?;
             }
+            let slot = t.slot(parent, name)?;
             t.dirents.remove((parent, name)).map_err(db)?;
+            t.names.remove((parent, name)).map_err(db)?;
             t.dirents.insert((new_parent, new_name), src).map_err(db)?;
+            t.set_slot(new_parent, new_name, slot)?;
             src_inode.parent = new_parent;
             src_inode.ctime = self.clock.now();
             t.put(src, &src_inode)?;
@@ -824,6 +868,7 @@ impl FsOps for LocalFs {
                 t,
                 Op::Rename {
                     ino: src,
+                    slot,
                     parent: new_parent,
                     name: new_name.to_string(),
                 },
