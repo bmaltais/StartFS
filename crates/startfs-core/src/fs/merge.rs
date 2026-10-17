@@ -216,20 +216,36 @@ impl LocalFs {
 
     /// Record a new state of `ino` (already applied to the visible tree).
     pub(super) fn emit_set(&self, t: &mut Tables<'_>, ino: Ino, i: &Inode) -> FsResult<()> {
+        self.emit_set_at(t, ino, i, self.clock.now())
+    }
+
+    /// Like [`Self::emit_set`], stamped with the time the change was made
+    /// rather than now (a buffered write is committed later than it happened).
+    pub(super) fn emit_set_at(
+        &self,
+        t: &mut Tables<'_>,
+        ino: Ino,
+        i: &Inode,
+        wall: Nanos,
+    ) -> FsResult<()> {
         let base = match t.object(ino)?.winner() {
             Some(v) => Some(v.hlc),
             None => t.conflict(ino)?.and_then(|c| c.seed),
         };
         let snap = self.snapshot(i);
-        self.emit(t, Op::Set { ino, base, snap })
+        self.emit_at(t, Op::Set { ino, base, snap }, wall)
     }
 
     /// Append a local operation to this node's log.
     pub(super) fn emit(&self, t: &mut Tables<'_>, op: Op) -> FsResult<()> {
+        self.emit_at(t, op, self.clock.now())
+    }
+
+    fn emit_at(&self, t: &mut Tables<'_>, op: Op, wall: Nanos) -> FsResult<()> {
         let origin = self.node().0;
         let hlc = {
             let mut h = self.hlc.lock().unwrap();
-            *h = Hlc::tick(*h, self.clock.now(), origin);
+            *h = Hlc::tick(*h, wall, origin);
             *h
         };
         let seq = t.next_seq(origin)?;

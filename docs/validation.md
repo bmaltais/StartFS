@@ -13,7 +13,7 @@ build the release binary and run real `startfs daemon` processes. Rerun them to 
 | 2 | Permanent node loss returns data to N copies, no user action | **Met** (real processes and harness) | `scripts/validate-loss.sh`; `repair.rs::after_the_grace_period_every_chunk_is_back_to_n_copies_without_user_action` |
 | 3 | No data loss when any N-1 nodes fail, once replicated | **Met** (real processes and harness) | `scripts/validate-loss.sh`; `repair.rs::any_n_minus_one_nodes_can_fail_once_replication_completed` |
 | 4 | Idle daemon under about 100 MB and negligible CPU | **Met**, idle CPU no longer grows with stored data | `scripts/validate-idle.sh`, see below |
-| 5 | Cached data at near-local-disk speed | **Partly**: large reads yes, writes **no** | `scripts/validate-bench.sh`, see below |
+| 5 | Cached data at near-local-disk speed | **Partly**: reads and writes scale roughly linearly; writes still 12x to 47x slower than local disk | `scripts/validate-bench.sh`, see below |
 | 6 | Install docs for Linux and macOS | Done; macOS untested | `README.md`, `dist/README.md` |
 
 Not verifiable here: real multiple machines, a real tailnet (whois was faked; the real
@@ -71,8 +71,8 @@ Findings, stated plainly:
 
 - **Memory:** idle with little or no data is far under 100 MB. After a large write, the writing
   node stayed at about 98 MiB (right at the budget) with a peak of 226 MiB while writing,
-  because each write holds the whole file in memory (see section 5). A file larger than free RAM
-  cannot be written at all.
+  because each write held the whole file in memory (fixed since, see section 5; this row was not
+  re-measured).
 - **CPU, fixed:** the empty idle daemon uses about 0.5 to 1 % of a core because the tick loop
   wakes every 10 ms; that is the floor. Before the fix idle CPU grew with stored data (about
   10 % at 128 MiB and 2000 files). Timing the phases of the tick confirmed the cause: the
@@ -92,43 +92,45 @@ baseline but FUSE reads here always go through the daemon; `O_DIRECT` removes th
 
 | Size | Op | Local | FUSE | Ratio |
 |---|---|---|---|---|
-| 16 MiB | write | 0.006 s | 0.259 s | 43x slower |
-| 32 MiB | write | 0.010 s | 0.716 s | 72x |
-| 64 MiB | write | 0.017 s | 2.593 s | 153x |
-| 128 MiB | write | 0.037 s | 10.197 s | 276x |
-| 128 MiB | read, page cache | 0.009 s | 0.144 s | 16x |
-| 128 MiB | read, `O_DIRECT` | 0.108 s | 0.138 s | 1.3x |
-| 64 MiB | read, `O_DIRECT` | 0.086 s | 0.070 s | 0.8x |
-| 1000 x 8 B | create and write | 0.030 s | 2.46 s | 82x (2.5 ms per file) |
-| 1000 x 8 B | read | 0.011 s | 0.053 s | 4.8x |
+| 16 MiB | write | 0.006 s | 0.08 to 0.28 s | 12x to 47x slower |
+| 32 MiB | write | 0.010 s | 0.11 to 0.17 s | 11x to 17x |
+| 64 MiB | write | 0.018 s | 0.23 to 0.57 s | 13x to 31x |
+| 128 MiB | write | 0.038 s | 0.60 to 0.93 s | 16x to 25x |
+| 128 MiB | read, page cache | 0.011 s | 0.157 s | 14x |
+| 128 MiB | read, `O_DIRECT` | 0.159 s | 0.152 s | 1.0x |
+| 64 MiB | read, `O_DIRECT` | 0.082 s | 0.078 s | 1.0x |
+| 1000 x 8 B | create and write | 0.032 s | 2.5 to 3.7 s | about 100x (3 ms per file) |
+| 1000 x 8 B | read | 0.011 s | 0.061 s | 5.5x |
+
+FUSE write times are the range over four runs on a shared machine; the spread is large, the
+trend is not. Before write buffering the write rows were 0.259, 0.716, 2.593 and 10.197 s (43x to 276x
+slower than local disk) and daemon peak RSS was 206 to 222 MiB for a 128 MiB write.
 
 - **Reads of cached data are near disk speed** when both sides bypass the page cache (0.8x to
   1.9x, about 0.9 GB/s). Compared with a warm kernel page cache FUSE reads are 7x to 16x slower
   in wall time, still about 0.9 GB/s in absolute terms, which is fast in practice.
-- **Writes are a real defect.** Time quadruples when the size doubles (0.26, 0.72, 2.6, 10.2 s),
-  i.e. quadratic. The cause is confirmed in the code: `LocalFs::write` calls `read_all`, patches
-  the buffer and calls `store`, which re-chunks and re-hashes the whole file on every FUSE write.
-  At 128 MiB the rate is about 12 MiB/s and falling; a 1 GiB file would take on the order of
-  10 to 15 minutes by extrapolation (not measured). Consequences measured in the same runs:
-  - peak daemon RSS 206 to 222 MiB for a 128 MiB write (whole file in memory, more than once);
-  - storage amplification: each write leaves its superseded tail chunks behind until GC (7 days
-    by default). A 32 MiB file occupied 74 MiB, a 20 MiB file occupied about 120 MiB (and was
-    replicated at that size), a 128 MiB file plus small files occupied 297 MiB.
+- **Writes are now roughly linear.** FUSE writes are buffered per file and committed in batches
+  that re-chunk only the affected region (`crates/startfs-core/src/fs/writebuf.rs`). Across the
+  four runs, 128 MiB took 4x to 9x as long as 16 MiB (8x is linear), where before it took 39x.
+  Individual doublings vary between 1.3x and 2.6x with machine load, so a single
+  doubling can exceed 2x. The rate is about 150 to 200 MiB/s, still 12x to 47x slower than the
+  local disk's page cache, mostly hashing and compression in the daemon. Daemon peak RSS over the
+  whole run, 128 MiB write included, was 57 to 65 MiB, bounded by the buffer cap rather than the
+  file size. The harness tests `writes.rs::a_file_written_in_small_pieces_occupies_about_its_own_size`
+  and `background_ticks_do_not_commit_a_file_that_is_still_being_written` show a 20 MiB file
+  written in 128 KiB pieces storing about 20 MiB (it was 243 MB before), so superseded chunks are
+  no longer created or replicated; storage use through a real mount was not measured.
 - Small-file creation costs 2.5 ms each through FUSE; each op is a redb transaction plus an
   operation-log entry. Not investigated further.
 
-Criterion 5 ("normal operations on cached data at near-local-disk speed") is therefore met for
-reading cached data and for small writes, and **not met for writing files beyond a few MiB**.
+Criterion 5 ("normal operations on cached data at near-local-disk speed") is met for reading
+cached data. Writes no longer degrade with file size, but remain about 12x to 47x slower than
+the local disk, so the criterion is only partly met.
 
 ## Defects found, not fixed
 
-Not small or clearly scoped, so left for its own ticket:
-
-1. **Quadratic write path** (section 5): needs write buffering or chunk-level patching in
-   `LocalFs::write`, with a flush on close/fsync, or at least reusing unchanged leading chunks.
-
-It is called out in `README.md` under known limits. (The idle CPU growth found earlier is
-fixed, see section 4.)
+None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU
+growth (section 4). The idle-memory figures in section 4 were measured before write buffering.
 
 ## Reproducing
 

@@ -43,8 +43,10 @@ mod gc;
 mod merge;
 mod replicas;
 mod scrub;
+mod writebuf;
 pub use gc::GcReport;
 pub use merge::{CatchUp, ConflictCopy};
+pub use writebuf::DEFAULT_WRITE_BUFFER;
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -193,6 +195,11 @@ pub struct LocalFs {
     config: NodeConfig,
     /// This node's member id; changes once, when it joins a filesystem.
     node: AtomicU32,
+    /// Writes not yet committed, per file. Lock order: this, then `lock`.
+    dirty: Mutex<HashMap<Ino, writebuf::Dirty>>,
+    write_buffer_limit: AtomicU64,
+    /// The last commit failure logged by `flush_all_logged`.
+    flush_error: Mutex<Option<String>>,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -233,6 +240,9 @@ impl LocalFs {
             clock,
             node: AtomicU32::new(config.node.0),
             config,
+            dirty: Mutex::new(HashMap::new()),
+            write_buffer_limit: AtomicU64::new(DEFAULT_WRITE_BUFFER),
+            flush_error: Mutex::new(None),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
@@ -457,6 +467,41 @@ impl LocalFs {
         }
     }
 
+    /// Committed bytes of `[from, to)`; empty when the range is.
+    fn read_committed(
+        &self,
+        i: &Inode,
+        from: u64,
+        to: u64,
+        spill: &mut Spill,
+    ) -> FsResult<Vec<u8>> {
+        if from >= to {
+            return Ok(Vec::new());
+        }
+        match &i.content {
+            Content::Inline(b) => Ok(b[from as usize..to as usize].to_vec()),
+            Content::Chunks(refs) => {
+                let mut out = Vec::with_capacity((to - from) as usize);
+                let mut pos = 0u64;
+                for r in refs {
+                    let (start, stop) = (pos, pos + r.len as u64);
+                    pos = stop;
+                    if stop <= from {
+                        continue;
+                    }
+                    if start >= to {
+                        break;
+                    }
+                    let data = self.chunk(&r.id, spill)?;
+                    let lo = from.saturating_sub(start) as usize;
+                    let hi = (to.min(stop) - start) as usize;
+                    out.extend_from_slice(&data[lo..hi]);
+                }
+                Ok(out)
+            }
+        }
+    }
+
     /// Replace a file's content, chunking, deduplicating and compressing it.
     fn store(&self, i: &mut Inode, data: &[u8]) -> FsResult<()> {
         i.content = if data.len() <= INLINE_MAX {
@@ -497,7 +542,7 @@ impl LocalFs {
 
 impl FsOps for LocalFs {
     fn lookup(&self, parent: Ino, name: &str) -> FsResult<Attr> {
-        self.run(false, |t| {
+        let attr = self.run(false, |t| {
             let p = t.dir(parent)?;
             let ino = match name {
                 "." => parent,
@@ -505,14 +550,17 @@ impl FsOps for LocalFs {
                 _ => t.entry(parent, name)?.ok_or(FsError::NotFound)?,
             };
             Ok(self.attr(ino, &t.inode(ino)?))
-        })
+        })?;
+        Ok(self.with_buffered(attr))
     }
 
     fn getattr(&self, ino: Ino) -> FsResult<Attr> {
-        self.run(false, |t| Ok(self.attr(ino, &t.inode(ino)?)))
+        let attr = self.run(false, |t| Ok(self.attr(ino, &t.inode(ino)?)))?;
+        Ok(self.with_buffered(attr))
     }
 
     fn setattr(&self, ino: Ino, set: SetAttr) -> FsResult<Attr> {
+        self.flush_ino(ino)?;
         self.fetching(true, |t, spill| {
             let mut i = t.inode(ino)?;
             let now = self.clock.now();
@@ -583,53 +631,33 @@ impl FsOps for LocalFs {
     }
 
     fn read(&self, ino: Ino, offset: u64, len: u32) -> FsResult<Vec<u8>> {
+        let to = offset.saturating_add(len as u64);
+        // Taken first: a commit in between only makes the committed read newer.
+        let buffered = self.buffered_part(ino, offset, to);
         self.fetching(false, |t, spill| {
             let i = Self::file(t, ino)?;
-            let end = offset.saturating_add(len as u64).min(i.size);
+            let size = i.size.max(buffered.as_ref().map_or(0, |b| b.2));
+            let end = to.min(size);
             if offset >= end {
                 return Ok(Vec::new());
             }
-            match &i.content {
-                Content::Inline(b) => Ok(b[offset as usize..end as usize].to_vec()),
-                Content::Chunks(refs) => {
-                    let mut out = Vec::with_capacity((end - offset) as usize);
-                    let mut pos = 0u64;
-                    for r in refs {
-                        let (start, stop) = (pos, pos + r.len as u64);
-                        pos = stop;
-                        if stop <= offset {
-                            continue;
-                        }
-                        if start >= end {
-                            break;
-                        }
-                        let data = self.chunk(&r.id, spill)?;
-                        let from = offset.saturating_sub(start) as usize;
-                        let to = (end.min(stop) - start) as usize;
-                        out.extend_from_slice(&data[from..to]);
-                    }
-                    Ok(out)
-                }
+            let mut out = self.read_committed(&i, offset, end.min(i.size), spill)?;
+            out.resize((end - offset) as usize, 0);
+            if let Some((at, part, _)) = &buffered
+                && !part.is_empty()
+            {
+                out[(*at - offset) as usize..][..part.len()].copy_from_slice(part);
             }
+            Ok(out)
         })
     }
 
     fn write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
-        self.fetching(true, |t, spill| {
-            let mut i = Self::file(t, ino)?;
-            let mut buf = self.read_all(&i, spill)?;
-            let end = offset as usize + data.len();
-            if buf.len() < end {
-                buf.resize(end, 0);
-            }
-            buf[offset as usize..end].copy_from_slice(data);
-            self.store(&mut i, &buf)?;
-            i.mtime = self.clock.now();
-            i.ctime = i.mtime;
-            t.put(ino, &i)?;
-            self.emit_set(t, ino, &i)?;
-            Ok(data.len())
-        })
+        self.buffered_write(ino, offset, data)
+    }
+
+    fn flush(&self, ino: Ino) -> FsResult<()> {
+        self.flush_ino(ino)
     }
 
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()> {
@@ -773,6 +801,15 @@ impl FsOps for LocalFs {
     }
 
     fn stats(&self) -> FsResult<StoreStats> {
+        // Space used counts what has been written so far, buffered or not.
+        self.flush_all_logged(false, 0);
         self.chunks.stats()
+    }
+}
+
+impl Drop for LocalFs {
+    /// A clean shutdown commits what is still buffered.
+    fn drop(&mut self) {
+        self.flush_all_logged(true, 0);
     }
 }

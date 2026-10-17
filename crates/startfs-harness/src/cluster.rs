@@ -55,6 +55,9 @@ impl FsOps for NodeFs {
     fn write(&self, i: Ino, o: u64, d: &[u8]) -> FsResult<usize> {
         self.fs()?.write(i, o, d)
     }
+    fn flush(&self, i: Ino) -> FsResult<()> {
+        self.fs()?.flush(i)
+    }
     fn unlink(&self, p: Ino, n: &str) -> FsResult<()> {
         self.fs()?.unlink(p, n)
     }
@@ -113,7 +116,12 @@ impl Cluster {
 
     /// Like [`Cluster::start`], with every node's `config.toml` content given.
     pub fn start_with_config(n: usize, config_toml: &str) -> Self {
-        let config_for_nodes = Config::parse(config_toml).expect("valid config");
+        let mut config_for_nodes = Config::parse(config_toml).expect("valid config");
+        // Tests that write and then let the cluster settle expect the write to
+        // be committed by the next tick, unless they ask for a delay.
+        if !config_toml.contains("write_commit_delay_ms") {
+            config_for_nodes.write_commit_delay_ms = 0;
+        }
         let clock = Arc::new(ManualClock::new(START));
         let network = SimNetwork::new(clock.clone());
         let nodes: Vec<Node> = (0..n)
@@ -204,13 +212,22 @@ impl Cluster {
         self.network.set_down(NodeId(i as u32), true);
     }
 
+    /// Faults hit what is on disk, so commit the node's buffered writes first.
+    fn commit_writes(&self, i: usize) {
+        if let Ok(fs) = self.nodes[i].fs.fs() {
+            fs.flush_all(true).expect("commit buffered writes");
+        }
+    }
+
     /// Fault injection: flip a payload byte in every replica chunk file on the node's disk.
     pub fn corrupt_chunks(&self, i: usize) {
+        self.commit_writes(i);
         corrupt_files(&self.nodes[i].dir.path().join("chunks"));
     }
 
     /// Fault injection: the same for the node's cache of fetched chunks.
     pub fn corrupt_cache(&self, i: usize) {
+        self.commit_writes(i);
         corrupt_files(&self.nodes[i].dir.path().join("cache"));
     }
 

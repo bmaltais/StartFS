@@ -118,6 +118,11 @@ impl FuseAdapter {
         ok(self.fs.write(ino, offset, data)).map(|n| n as u32)
     }
 
+    /// Commit the file's buffered writes (flush, fsync and release).
+    pub fn op_flush(&self, ino: u64) -> Result<(), Errno> {
+        ok(self.fs.flush(ino))
+    }
+
     pub fn op_unlink(&self, parent: u64, n: &OsStr) -> Result<(), Errno> {
         ok(self.fs.unlink(parent, name(n)?))
     }
@@ -366,24 +371,50 @@ impl Filesystem for FuseAdapter {
     fn flush(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         _fh: FileHandle,
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
-        // Writes are durable in the node's staging store when they return.
+        match self.op_flush(ino.0) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e),
+        }
+    }
+
+    fn release(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        // The kernel flushes on close and reports that error; this covers handles
+        // released without one, which have nobody to tell.
+        if let Err(e) = self.op_flush(ino.0) {
+            eprintln!(
+                "startfs: release of inode {} could not commit writes: {e:?}",
+                ino.0
+            );
+        }
         reply.ok();
     }
 
     fn fsync(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         _fh: FileHandle,
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        reply.ok();
+        match self.op_flush(ino.0) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e),
+        }
     }
 
     fn readdir(
@@ -577,6 +608,20 @@ mod tests {
         assert_eq!(a.op_write(f.ino, 0, b"hello").unwrap(), 5);
         assert_eq!(a.op_read(f.ino, 1, 100).unwrap(), b"ello");
         assert_eq!(a.op_lookup(ROOT_INO, os("a.txt")).unwrap().size, 5);
+    }
+
+    #[test]
+    fn flush_commits_buffered_writes_and_is_a_no_op_with_nothing_buffered() {
+        let (a, _d) = adapter();
+        let f = a.op_create(ROOT_INO, os("b.txt"), 0o644, 0).unwrap();
+        a.op_write(f.ino, 0, b"data").unwrap();
+        assert_eq!(a.op_flush(f.ino), Ok(()));
+        assert_eq!(a.op_read(f.ino, 0, 10).unwrap(), b"data");
+        assert_eq!(
+            a.op_flush(999_999),
+            Ok(()),
+            "nothing buffered, nothing to do"
+        );
     }
 
     #[test]

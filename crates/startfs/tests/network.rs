@@ -26,6 +26,8 @@ impl Node {
         let mut config = Config {
             port: 0,
             offer_bytes,
+            // These tests write without closing the file and expect the next tick to commit it.
+            write_commit_delay_ms: 0,
             ..Config::default()
         };
         let transport = node::bind(&mut config, host, whois).unwrap();

@@ -135,6 +135,7 @@ impl Daemon {
             &config,
             membership.my_offer(config.offer_bytes),
         ));
+        fs.set_write_buffer_limit(config.write_buffer_bytes);
         if let Some(me) = membership.me() {
             fs.set_node(NodeId(me));
             fs.set_replicating();
@@ -209,6 +210,10 @@ impl Daemon {
             return false;
         };
         let mut busy = false;
+        // Peers and replication only see committed writes; a file still being
+        // written keeps batching until it has been quiet for the commit delay.
+        self.fs
+            .flush_all_logged(false, self.config.write_commit_delay_ms * 1_000_000);
         self.sync_peers();
         let offer = self
             .membership
@@ -584,6 +589,7 @@ impl Daemon {
     }
 
     pub fn handle(&self, req: Request) -> Response {
+        self.fs.flush_all_logged(true, 0);
         match req {
             Request::Create { name, copies } => {
                 let mut membership = self.membership.lock().unwrap();

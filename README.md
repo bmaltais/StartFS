@@ -73,6 +73,8 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `offer_bytes` | 10 GiB | space this node offers (0 = pure client) |
 | `cache_bytes` | 1 GiB | LRU cache of chunks fetched from peers |
 | `staging_bytes` | 4 GiB | unreplicated writes held before writes are refused |
+| `write_commit_delay_ms` | 1000 | how long a file must go unwritten before the background tick commits its buffered writes |
+| `write_buffer_bytes` | 8 MiB | most of one file's writes held in memory before a batch is committed (never below 8 MiB) |
 | `token_ttl_secs` | 86400 | join token lifetime |
 | `repair_grace_secs` | 1800 | on `create`: how long a member may be unseen before re-replication |
 | `gc_retention_secs` | 604800 | on `create`: how long deleted chunks are kept |
@@ -86,10 +88,13 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 
 Limits found while validating v1 (details and numbers in `docs/validation.md`):
 
-- **Large files are slow and memory hungry.** Every write re-reads and re-chunks the
-  whole file, so writing a file takes time quadratic in its size (about 10 s for
-  128 MiB, and memory use about equal to the file size or more). Avoid files above
-  a few tens of MiB until this is fixed.
+- **Writes are buffered.** A write is held in memory (up to `write_buffer_bytes` per file) and
+  committed on `flush`, `fsync` and close, when the buffer fills, and once the file has been
+  quiet for `write_commit_delay_ms`. Other nodes see a new file's content after that point.
+  Reads see buffered data at once, but if the daemon is killed before a commit, the
+  buffered writes are lost, as with any POSIX filesystem that has not been synced. A clean
+  shutdown commits them. A write can also fail at `flush`/`close` (for example with no space left),
+  so check the result of `close()`.
 - Many small files are slow to create (about 2.5 ms each over FUSE).
 - **Advisory locks are local only.** `fcntl`/`flock` locks work between processes on the same
   machine but are not coordinated between nodes: two machines can both "hold" a lock on the

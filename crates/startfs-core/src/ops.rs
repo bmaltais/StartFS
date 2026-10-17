@@ -124,7 +124,11 @@ pub trait FsOps: Send + Sync {
     /// Hardlinks are unsupported and always fail with a clear error.
     fn link(&self, ino: Ino, new_parent: Ino, new_name: &str) -> FsResult<Attr>;
     fn read(&self, ino: Ino, offset: u64, len: u32) -> FsResult<Vec<u8>>;
+    /// Writes are buffered and committed in batches; the data is visible to
+    /// reads at once but is only durable after `flush` (or a later commit).
     fn write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize>;
+    /// Commit this file's buffered writes (flush, fsync and release all map here).
+    fn flush(&self, ino: Ino) -> FsResult<()>;
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()>;
     fn rmdir(&self, parent: Ino, name: &str) -> FsResult<()>;
     fn rename(&self, parent: Ino, name: &str, new_parent: Ino, new_name: &str) -> FsResult<()>;
@@ -166,6 +170,9 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     }
     fn write(&self, i: Ino, o: u64, d: &[u8]) -> FsResult<usize> {
         (**self).write(i, o, d)
+    }
+    fn flush(&self, i: Ino) -> FsResult<()> {
+        (**self).flush(i)
     }
     fn unlink(&self, p: Ino, n: &str) -> FsResult<()> {
         (**self).unlink(p, n)

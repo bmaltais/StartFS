@@ -14,6 +14,13 @@ pub struct Config {
     /// Most bytes of not-yet-replicated writes this node holds; writes are
     /// refused beyond it.
     pub staging_bytes: u64,
+    /// Most bytes of one file's writes held in memory before a batch is
+    /// committed (at least 8 MiB is used). Buffered writes are lost if the
+    /// daemon dies before the file is flushed, fsynced or closed.
+    pub write_buffer_bytes: u64,
+    /// How long a file must go unwritten before the background tick commits
+    /// its buffered writes (closing or syncing the file commits at once).
+    pub write_commit_delay_ms: u64,
     /// How long a join token stays valid, in seconds.
     pub token_ttl_secs: u64,
     /// When this node creates a filesystem: how long a member may be unseen
@@ -46,6 +53,8 @@ impl Default for Config {
             offer_bytes: 10 << 30,
             cache_bytes: 1 << 30,
             staging_bytes: 4 << 30,
+            write_buffer_bytes: crate::fs::DEFAULT_WRITE_BUFFER,
+            write_commit_delay_ms: 1000,
             token_ttl_secs: 24 * 3600,
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
