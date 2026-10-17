@@ -15,10 +15,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# A crash leaves a dead mount (stat fails with "Transport endpoint is not connected"):
+# clear it before starting. A live mount stats fine and is left alone, so a start that
+# fails because an old daemon still runs cannot unmount that daemon's filesystem.
+ExecStartPre=-/bin/sh -c 'stat "$1" >/dev/null 2>&1 || fusermount3 -uz "$1"' sh %h/StartFS
 ExecStartPre=/usr/bin/mkdir -p %h/StartFS
 ExecStart=%h/.local/bin/startfs daemon --mount %h/StartFS
-# SIGTERM makes the daemon unmount cleanly; this clears a stale mount left by a crash.
-ExecStopPost=-/usr/bin/fusermount3 -uz %h/StartFS
 Restart=on-failure
 RestartSec=5
 
