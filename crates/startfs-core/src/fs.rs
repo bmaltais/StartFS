@@ -39,6 +39,7 @@ const ORPHANS: TableDefinition<&[u8], u64> = TableDefinition::new("orphans");
 mod gc;
 mod merge;
 mod replicas;
+mod scrub;
 pub use gc::GcReport;
 pub use merge::ConflictCopy;
 

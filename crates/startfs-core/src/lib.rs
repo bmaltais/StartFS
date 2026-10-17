@@ -13,4 +13,5 @@ pub mod ops;
 pub mod placement;
 pub mod protocol;
 pub mod replication;
+pub mod scrub;
 pub mod sync;

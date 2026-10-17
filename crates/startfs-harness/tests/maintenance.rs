@@ -2,6 +2,7 @@
 //! driven through FsOps and the control interface on a simulated cluster
 //! with a manual clock.
 
+use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_harness::Cluster;
 use std::time::Duration;
@@ -144,4 +145,20 @@ fn a_stale_node_returning_after_the_reclaim_cannot_resurrect_deleted_data() {
     for i in 0..3 {
         assert!(c.control(i).status().unwrap().unreplicated.is_empty());
     }
+}
+
+#[test]
+fn scrub_finds_a_corrupt_replica_and_heals_it_from_another_copy() {
+    let c = cluster(3, 3);
+    let data = noise(20 * 1024, 9);
+    let ino = put(&c.fs(0), "precious", &data);
+    c.sync();
+
+    c.corrupt_chunks(0);
+    pass(&c, 31 * DAY, DAY);
+
+    // Cut node 0 off: only a healed local replica can still serve the file.
+    c.network()
+        .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
+    assert_eq!(c.fs(0).read(ino, 0, u32::MAX).unwrap(), data);
 }

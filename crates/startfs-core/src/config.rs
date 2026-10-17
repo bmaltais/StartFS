@@ -26,6 +26,8 @@ pub struct Config {
     /// Most bytes per second this node sends when re-replicating chunks it
     /// already holds (repair and rebalancing; new writes are not limited).
     pub repair_bytes_per_sec: u64,
+    /// How often the scrub reads back every replica this node holds, in seconds.
+    pub scrub_period_secs: u64,
 }
 
 impl Default for Config {
@@ -39,6 +41,7 @@ impl Default for Config {
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
             repair_bytes_per_sec: 8 << 20,
+            scrub_period_secs: 30 * 24 * 3600,
         }
     }
 }

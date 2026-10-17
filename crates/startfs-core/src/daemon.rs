@@ -17,6 +17,7 @@ use crate::ops::Nanos;
 use crate::ops::{FsOps, FsResult};
 use crate::protocol::{Message, Replica};
 use crate::replication::{Replicator, View};
+use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -61,6 +62,7 @@ pub struct Daemon {
     chunk_replies: Mutex<HashMap<(NodeId, ChunkId), ChunkAnswer>>,
     /// Pushes new chunks to the nodes placement chose and tracks their copies.
     replicator: Replicator,
+    scrubber: Scrubber,
 }
 
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
@@ -95,6 +97,7 @@ impl Daemon {
             fs.set_chunk_source(Arc::new(PeerChunks(me.clone())));
             Self {
                 replicator: Replicator::new(fs.clone()),
+                scrubber: Scrubber::new(fs.clone()),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -179,7 +182,23 @@ impl Daemon {
             .unwrap_or(false);
         busy |= self.finish_leaving(&*transport);
         busy |= self.collect_garbage();
+        if !busy {
+            // The scrub only gets the disk when nothing else wants it.
+            busy |= self.scrub();
+        }
         busy
+    }
+
+    /// Check some replicas if the scrub is due; corrupt ones are deleted and
+    /// fetched afresh from another replica holder.
+    fn scrub(&self) -> bool {
+        let period = Duration::from_secs(self.config.scrub_period_secs);
+        let step = self.scrubber.step(self.clock.now(), period);
+        for id in step.corrupt {
+            self.fs.drop_replica(&id);
+            self.replicator.heal(id);
+        }
+        step.worked
     }
 
     /// Reclaim chunks that have been orphaned for the retention period.
@@ -329,7 +348,12 @@ impl Daemon {
             }
             Message::ChunkReply(id, data) => {
                 if self.membership.lock().unwrap().is_member_endpoint(from) {
-                    self.chunk_replies.lock().unwrap().insert((from, id), data);
+                    let healed = self
+                        .with_view(|v| self.replicator.on_heal_reply(v, &id, data.as_deref()))
+                        .unwrap_or(false);
+                    if !healed {
+                        self.chunk_replies.lock().unwrap().insert((from, id), data);
+                    }
                 }
             }
             Message::ChunkPush(id, data) => {

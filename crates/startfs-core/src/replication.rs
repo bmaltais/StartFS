@@ -85,9 +85,18 @@ struct State {
     allowance_at: Option<Nanos>,
 }
 
+/// A replica this node lost to corruption and is fetching afresh.
+#[derive(Default)]
+struct Heal {
+    asked: Option<Nanos>,
+    /// Peers asked so far; the next one is asked after a retry delay.
+    tried: usize,
+}
+
 pub struct Replicator {
     fs: Arc<LocalFs>,
     state: Mutex<State>,
+    heal: Mutex<BTreeMap<ChunkId, Heal>>,
 }
 
 pub fn tier(copies: u32) -> Tier {
@@ -103,7 +112,67 @@ impl Replicator {
         Self {
             fs,
             state: Mutex::new(State::default()),
+            heal: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// This node's replica of `id` is gone (found corrupt and deleted): get a
+    /// fresh copy from another replica holder.
+    pub fn heal(&self, id: ChunkId) {
+        self.heal.lock().unwrap().entry(id).or_default();
+    }
+
+    /// Chunks this node is still re-fetching.
+    pub fn healing(&self) -> u32 {
+        self.heal.lock().unwrap().len() as u32
+    }
+
+    /// A peer answered a request for a chunk being healed; returns whether
+    /// the answer was for that (and so is consumed here).
+    pub fn on_heal_reply(&self, view: &View<'_>, id: &ChunkId, data: Option<&[u8]>) -> bool {
+        let mut heal = self.heal.lock().unwrap();
+        let Some(h) = heal.get_mut(id) else {
+            return false;
+        };
+        match data {
+            Some(bytes)
+                if blake3::hash(bytes).as_bytes() == id
+                    && self.fs.store_replica(bytes, view.offer).ok() == Some(Replica::Stored) =>
+            {
+                heal.remove(id);
+            }
+            // Not held there, or not genuine: try the next peer at once.
+            _ => h.asked = None,
+        }
+        true
+    }
+
+    fn poll_heal(&self, view: &View<'_>, transport: &dyn Transport) -> bool {
+        let mut busy = false;
+        let peers: Vec<NodeId> = view
+            .members
+            .iter()
+            .filter(|m| m.id != view.me && !view.lost.contains(&m.id))
+            .map(|m| m.endpoint)
+            .collect();
+        if peers.is_empty() {
+            return false;
+        }
+        for (id, h) in self.heal.lock().unwrap().iter_mut() {
+            let due = h
+                .asked
+                .is_none_or(|at| view.now.saturating_sub(at) >= RETRY.as_nanos() as u64);
+            if due {
+                transport.send(
+                    peers[h.tried % peers.len()],
+                    Message::ChunkRequest(*id).encode(),
+                );
+                h.tried += 1;
+                h.asked = Some(view.now);
+                busy = true;
+            }
+        }
+        busy
     }
 
     /// Start working on every chunk written here that is not yet tracked.
@@ -158,7 +227,8 @@ impl Replicator {
         for id in ids {
             busy |= self.work(&mut st, view, transport, &id);
         }
-        busy
+        drop(st);
+        busy | self.poll_heal(view, transport)
     }
 
     fn work(

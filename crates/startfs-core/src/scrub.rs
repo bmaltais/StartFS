@@ -1,0 +1,79 @@
+//! The scrub: a slow background pass that reads every replica this node holds
+//! and checks it against its hash, so silent corruption is found before the
+//! data is needed.
+
+use crate::chunkstore::ChunkId;
+use crate::fs::LocalFs;
+use crate::ops::Nanos;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Replicas checked per daemon tick: a pass is spread thin so it never
+/// competes with real work for the disk.
+const CHUNKS_PER_STEP: usize = 8;
+
+#[derive(Default)]
+struct State {
+    /// Replicas still to check in the pass under way.
+    queue: Option<VecDeque<ChunkId>>,
+}
+
+pub struct Scrubber {
+    fs: Arc<LocalFs>,
+    state: Mutex<State>,
+}
+
+/// What one step of the scrub did.
+#[derive(Default)]
+pub struct Step {
+    /// Whether any checking was done.
+    pub worked: bool,
+    /// Replicas found corrupt in this step.
+    pub corrupt: Vec<ChunkId>,
+}
+
+impl Scrubber {
+    pub fn new(fs: Arc<LocalFs>) -> Self {
+        Self {
+            fs,
+            state: Mutex::new(State::default()),
+        }
+    }
+
+    /// Check a few more replicas if a pass is due or under way.
+    pub fn step(&self, now: Nanos, period: Duration) -> Step {
+        let mut st = self.state.lock().unwrap();
+        if st.queue.is_none() {
+            match self.fs.scrub_last_done() {
+                // The first pass is one period after the node first ran.
+                None => {
+                    self.fs.set_scrub_done(now);
+                    return Step::default();
+                }
+                Some(last) if now.saturating_sub(last) < period.as_nanos() as u64 => {
+                    return Step::default();
+                }
+                Some(_) => st.queue = Some(self.fs.held().unwrap_or_default().into()),
+            }
+        }
+        let queue = st.queue.as_mut().expect("pass under way");
+        let mut step = Step {
+            worked: true,
+            corrupt: Vec::new(),
+        };
+        for _ in 0..CHUNKS_PER_STEP {
+            let Some(id) = queue.pop_front() else {
+                break;
+            };
+            if self.fs.has_replica(&id) && !self.fs.replica_is_sound(&id) {
+                step.corrupt.push(id);
+            }
+        }
+        if queue.is_empty() {
+            st.queue = None;
+            self.fs.set_scrub_done(now);
+        }
+        step
+    }
+}
