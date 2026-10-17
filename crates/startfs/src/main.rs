@@ -18,6 +18,8 @@ commands:
   status                              show the state of this node's filesystem
   join TOKEN [--offer SIZE]           join the filesystem a token names
   token                               print a new join token
+  leave                               hand this node's data to the others and leave
+  remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
   config [--offer SIZE]               change this node's settings (sizes like 500M, 2T)";
 
@@ -87,6 +89,19 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         }
         "token" => {
             println!("{}", Client::new(socket).new_token()?);
+            Ok(())
+        }
+        "leave" => {
+            Client::new(socket).leave()?;
+            println!("leaving: this node's data is being handed to the others");
+            Ok(())
+        }
+        "remove" => {
+            let member = rest
+                .first()
+                .and_then(|m| m.parse::<u32>().ok())
+                .ok_or("remove needs a member number (see `startfs status`)")?;
+            Client::new(socket).remove(member)?;
             Ok(())
         }
         "revoke" => {
@@ -197,6 +212,7 @@ fn render(s: &Status) -> String {
         NodeState::Online => "online",
         NodeState::Down => "down",
         NodeState::Lost => "lost",
+        NodeState::Leaving => "leaving",
     };
     let mut out = format!(
         "filesystem: {} ({} copies)\nnode: {state}\nusage: {} stored in {} chunks, {} offered\n",
@@ -232,9 +248,10 @@ fn render(s: &Status) -> String {
             NodeState::Online => "up",
             NodeState::Down => "down",
             NodeState::Lost => "lost",
+            NodeState::Leaving => "leaving",
         };
         out.push_str(&format!(
-            "  {:<3} {:<22} {:<5} {} offered{}\n",
+            "  {:<3} {:<22} {:<7} {} offered{}\n",
             m.id,
             m.addr,
             state,

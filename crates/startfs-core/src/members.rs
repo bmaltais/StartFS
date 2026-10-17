@@ -24,6 +24,12 @@ pub struct Member {
     pub offer_bytes: u64,
     /// Bumped by the member each time it changes its own record; the highest wins.
     pub rev: u64,
+    /// The member is handing its data to the others and about to go.
+    #[serde(default)]
+    pub leaving: bool,
+    /// The member has gone (left, or was removed): kept so stale gossip cannot revive it.
+    #[serde(default)]
+    pub removed: bool,
 }
 
 /// What an admitting member tells a new member.
@@ -110,8 +116,23 @@ impl Membership {
         self.fs.as_ref().map(|_| self.me)
     }
 
+    /// The current members.
     pub fn members(&self) -> Vec<Member> {
+        self.members
+            .values()
+            .filter(|m| !m.removed)
+            .cloned()
+            .collect()
+    }
+
+    /// Every record, including those of members that have gone: what gossip carries.
+    pub fn records(&self) -> Vec<Member> {
         self.members.values().cloned().collect()
+    }
+
+    /// Whether this node is handing its data over before leaving.
+    pub fn is_leaving(&self) -> bool {
+        self.members.get(&self.me).is_some_and(|m| m.leaving)
     }
 
     pub fn my_offer(&self, default: u64) -> u64 {
@@ -122,7 +143,7 @@ impl Membership {
     pub fn peers(&self) -> Vec<NodeId> {
         self.members
             .values()
-            .filter(|m| m.id != self.me)
+            .filter(|m| m.id != self.me && !m.removed)
             .map(|m| m.endpoint)
             .collect()
     }
@@ -132,7 +153,7 @@ impl Membership {
             && self
                 .members
                 .values()
-                .any(|m| m.id != self.me && m.endpoint == endpoint)
+                .any(|m| m.id != self.me && !m.removed && m.endpoint == endpoint)
     }
 
     /// Start a filesystem with this node as its first member.
@@ -154,6 +175,8 @@ impl Membership {
                 addr,
                 offer_bytes,
                 rev: 1,
+                leaving: false,
+                removed: false,
             },
         );
         self.save()
@@ -212,6 +235,13 @@ impl Membership {
         if now >= rec.expires {
             return Err("token has expired".into());
         }
+        // The same machine joining again (rebuilt) replaces its old record.
+        for old in self.members.values_mut() {
+            if old.endpoint == endpoint && !old.removed {
+                old.removed = true;
+                old.rev += 1;
+            }
+        }
         let id = self.members.keys().next_back().map_or(0, |m| m + 1);
         self.members.insert(
             id,
@@ -221,13 +251,15 @@ impl Membership {
                 addr,
                 offer_bytes,
                 rev: 1,
+                leaving: false,
+                removed: false,
             },
         );
         self.save()?;
         Ok(Admission {
             fs,
             id,
-            members: self.members(),
+            members: self.records(),
         })
     }
 
@@ -246,9 +278,18 @@ impl Membership {
         let mut changed = false;
         for m in theirs {
             if m.id == self.me {
+                if m.removed {
+                    // The others removed us: we no longer belong to the filesystem.
+                    self.reset();
+                    return true;
+                }
                 continue; // nobody else speaks for us
             }
-            if self.members.get(&m.id).is_none_or(|mine| mine.rev < m.rev) {
+            if self
+                .members
+                .get(&m.id)
+                .is_none_or(|mine| (mine.rev, mine.removed) < (m.rev, m.removed))
+            {
                 self.members.insert(m.id, m);
                 changed = true;
             }
@@ -271,6 +312,53 @@ impl Membership {
             m.rev += 1;
             let _ = self.save();
         }
+    }
+
+    /// Start handing this node's data to the others.
+    pub fn begin_leave(&mut self) -> Result<(), String> {
+        let me = self.me;
+        let Some(m) = self.members.get_mut(&me) else {
+            return Err("this node does not belong to a filesystem".into());
+        };
+        if !m.leaving {
+            m.leaving = true;
+            m.rev += 1;
+        }
+        self.save()
+    }
+
+    /// Take a member that is gone for good out of the filesystem.
+    pub fn remove(&mut self, id: u32) -> Result<(), String> {
+        if id == self.me {
+            return Err("this node cannot remove itself; use `leave`".into());
+        }
+        let m = self
+            .members
+            .get_mut(&id)
+            .filter(|m| !m.removed)
+            .ok_or_else(|| format!("no member {id}"))?;
+        m.removed = true;
+        m.rev += 1;
+        self.save()
+    }
+
+    /// Our record, marked gone, for the others; then this node belongs to nothing.
+    pub fn finish_leave(&mut self) -> Option<Vec<Member>> {
+        let me = self.me;
+        let mine = self.members.get_mut(&me)?;
+        mine.removed = true;
+        mine.rev += 1;
+        let records = self.records();
+        self.reset();
+        Some(records)
+    }
+
+    fn reset(&mut self) {
+        *self = Membership {
+            path: std::mem::take(&mut self.path),
+            ..Default::default()
+        };
+        let _ = self.save();
     }
 
     pub fn set_offer(&mut self, bytes: u64) -> Result<(), String> {

@@ -153,7 +153,7 @@ impl Daemon {
         }
         let (peers, members) = {
             let m = self.membership.lock().unwrap();
-            (m.peers(), m.members())
+            (m.peers(), m.records())
         };
         let now = self.clock.now();
         let mut last = self.last_gossip.lock().unwrap();
@@ -172,7 +172,48 @@ impl Daemon {
         busy |= self
             .with_view(|v| self.replicator.poll(v, &*transport))
             .unwrap_or(false);
+        busy |= self.finish_leaving(&*transport);
         busy
+    }
+
+    /// A leaving node goes once its data is on the others and they have its log.
+    fn finish_leaving(&self, transport: &dyn Transport) -> bool {
+        let (leaving, peers) = {
+            let m = self.membership.lock().unwrap();
+            (m.is_leaving(), m.peers())
+        };
+        if !leaving
+            || !self.fs.held().unwrap_or_default().is_empty()
+            || !self.fs.staged().unwrap_or_default().is_empty()
+        {
+            return false;
+        }
+        let gone: Vec<NodeId> = self
+            .with_view(|v| {
+                v.members
+                    .iter()
+                    .filter(|m| v.lost.contains(&m.id))
+                    .map(|m| m.endpoint)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let synced = self
+            .syncer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|s| s.peers_have_our_log(&gone));
+        if !synced {
+            return false;
+        }
+        let Some(records) = self.membership.lock().unwrap().finish_leave() else {
+            return false;
+        };
+        let msg = Message::Members(records).encode();
+        for p in peers {
+            transport.send(p, msg.clone());
+        }
+        true
     }
 
     /// Run `f` with the replicator's view of the filesystem, if we belong to one.
@@ -354,6 +395,21 @@ impl Daemon {
         Ok(())
     }
 
+    /// Tell every member about a change to the member list right away.
+    fn announce_members(&self) {
+        let Some(transport) = self.transport() else {
+            return;
+        };
+        let (peers, records) = {
+            let m = self.membership.lock().unwrap();
+            (m.peers(), m.records())
+        };
+        let msg = Message::Members(records).encode();
+        for p in peers {
+            transport.send(p, msg.clone());
+        }
+    }
+
     fn mint(&self, membership: &mut Membership) -> Result<String, String> {
         let ttl = std::time::Duration::from_secs(self.config.token_ttl_secs);
         membership.mint_token(self.clock.now() + ttl.as_nanos() as u64)
@@ -413,6 +469,50 @@ impl Daemon {
                     Err(e) => Response::Error(e),
                 }
             }
+            Request::Leave => {
+                let begun = self.membership.lock().unwrap().begin_leave();
+                match begun {
+                    Ok(()) => {
+                        self.announce_members();
+                        Response::Done
+                    }
+                    Err(e) => Response::Error(e),
+                }
+            }
+            Request::Remove { member } => {
+                let removed = {
+                    let mut m = self.membership.lock().unwrap();
+                    let up = m
+                        .members()
+                        .into_iter()
+                        .find(|x| x.id == member)
+                        .is_some_and(|x| {
+                            self.heard
+                                .lock()
+                                .unwrap()
+                                .get(&x.endpoint)
+                                .is_some_and(|t| {
+                                    self.clock.now().saturating_sub(*t)
+                                        < DOWN_AFTER.as_nanos() as u64
+                                })
+                        });
+                    if up {
+                        Err(format!(
+                            "member {member} is still online; it can leave with `startfs leave`"
+                        ))
+                    } else {
+                        m.remove(member)
+                    }
+                };
+                match removed {
+                    Ok(()) => {
+                        self.sync_peers();
+                        self.announce_members();
+                        Response::Done
+                    }
+                    Err(e) => Response::Error(e),
+                }
+            }
             Request::Join { token, offer_bytes } => match self.join(&token, offer_bytes) {
                 Ok(()) => Response::Joined,
                 Err(e) => Response::Error(e),
@@ -445,7 +545,9 @@ impl Daemon {
                         MemberStatus {
                             id: m.id,
                             addr: m.addr,
-                            state: if up {
+                            state: if m.leaving {
+                                NodeState::Leaving
+                            } else if up {
                                 NodeState::Online
                             } else if lost.contains(&m.id) {
                                 NodeState::Lost
@@ -463,7 +565,7 @@ impl Daemon {
                 let storage_nodes = membership
                     .members()
                     .iter()
-                    .filter(|m| m.offer_bytes > 0 && !full.contains(&m.id))
+                    .filter(|m| m.offer_bytes > 0 && !m.leaving && !full.contains(&m.id))
                     .count() as u32;
                 let copies_possible = filesystem
                     .as_ref()

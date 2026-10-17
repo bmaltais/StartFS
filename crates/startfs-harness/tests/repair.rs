@@ -263,4 +263,45 @@ fn any_n_minus_one_nodes_can_fail_once_replication_completed() {
         c.restart(down_b);
     }
 }
+
+/// Let a few seconds of background work pass.
+fn settle(c: &Cluster) {
+    for _ in 0..3 {
+        c.advance(Duration::from_secs(10));
+        c.sync();
+    }
+}
+
+#[test]
+fn a_node_that_leaves_is_removed_and_its_data_is_re_replicated_first() {
+    let c = cluster(2, 4);
+    write_files(&c, 24);
+    let before = replicas(&c);
+    assert!(before[3] > 0, "{before:?}");
+
+    c.control(3).leave().unwrap();
+    settle(&c);
+
+    let after = replicas(&c);
+    assert_eq!(
+        after[..3].iter().sum::<u64>(),
+        before.iter().sum::<u64>(),
+        "{after:?}"
+    );
+    assert_eq!(after[3], 0, "the leaver still holds data");
+    for i in 0..3 {
+        let s = c.control(i).status().unwrap();
+        assert_eq!(s.members.len(), 3);
+        assert_eq!(s.nodes, 3);
+        assert!(s.unreplicated.is_empty());
+    }
+    assert_eq!(c.control(3).status().unwrap().filesystem, None);
+    for i in 0..24 {
+        let ino = c.fs(0).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+        assert_eq!(
+            c.fs(0).read(ino, 0, u32::MAX).unwrap(),
+            noise(8 * 1024, i + 1)
+        );
+    }
+}
 // NEXT

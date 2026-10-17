@@ -30,6 +30,12 @@ pub enum Request {
     Revoke {
         token: String,
     },
+    /// Hand this node's data to the others, then leave the filesystem.
+    Leave,
+    /// Remove a member that is gone for good; its data is re-replicated.
+    Remove {
+        member: u32,
+    },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
         token: String,
@@ -59,6 +65,8 @@ pub enum NodeState {
     Down,
     /// Unseen past the repair grace period: its copies no longer count.
     Lost,
+    /// Handing its data to the others before it goes.
+    Leaving,
 }
 
 /// One member of the filesystem, as `status` shows it.
@@ -297,6 +305,24 @@ impl Client {
         match self.call(&Request::Config {
             offer_bytes: Some(bytes),
         })? {
+            Response::Done => Ok(()),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Leave the filesystem once this node's data is safe elsewhere.
+    pub fn leave(&self) -> Result<(), String> {
+        match self.call(&Request::Leave)? {
+            Response::Done => Ok(()),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Remove a dead member.
+    pub fn remove(&self, member: u32) -> Result<(), String> {
+        match self.call(&Request::Remove { member })? {
             Response::Done => Ok(()),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),

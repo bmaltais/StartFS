@@ -79,6 +79,22 @@ impl Syncer {
         }
     }
 
+    /// Whether every peer not in `except` is known to hold all of our log.
+    pub fn peers_have_our_log(&self, except: &[NodeId]) -> bool {
+        let Ok(ours) = self.fs.frontier() else {
+            return false;
+        };
+        self.peers
+            .iter()
+            .filter(|(id, _)| !except.contains(id))
+            .all(|(_, p)| {
+                p.known.as_ref().is_some_and(|k| {
+                    ours.iter()
+                        .all(|(o, seq)| k.get(o).is_some_and(|s| s >= seq))
+                })
+            })
+    }
+
     /// Send what is due. Returns whether anything happened.
     pub fn poll(&mut self) -> bool {
         let mut busy = false;

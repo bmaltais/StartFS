@@ -23,7 +23,7 @@ fn unit(chunk: &ChunkId, member: u32) -> f64 {
 pub fn place(chunk: &ChunkId, members: &[Member], copies: u32, skip: &HashSet<u32>) -> Vec<u32> {
     let mut scored: Vec<(f64, u32)> = members
         .iter()
-        .filter(|m| m.offer_bytes > 0 && !skip.contains(&m.id))
+        .filter(|m| m.offer_bytes > 0 && !m.leaving && !skip.contains(&m.id))
         .map(|m| (-unit(chunk, m.id).ln() / m.offer_bytes as f64, m.id))
         .collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
