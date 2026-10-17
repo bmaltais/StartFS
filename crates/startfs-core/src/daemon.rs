@@ -78,6 +78,7 @@ impl Daemon {
     ) -> FsResult<Arc<Self>> {
         let membership = Membership::load(&dir.join("membership.json"));
         let fs = Arc::new(LocalFs::open(dir, node, config.cache_bytes, clock.clone())?);
+        fs.set_staging_limit(config.staging_bytes);
         if let Some(me) = membership.me() {
             fs.set_node(NodeId(me));
             fs.set_replicating();

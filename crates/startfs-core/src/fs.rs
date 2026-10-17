@@ -14,7 +14,7 @@ use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Files up to this size live inside their metadata record, with no chunk.
@@ -175,6 +175,7 @@ pub struct LocalFs {
     staging: ChunkStore,
     /// Whether new chunks go to staging (the node belongs to a filesystem).
     replicating: AtomicBool,
+    staging_limit: AtomicU64,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
     source: Mutex<Option<Arc<dyn ChunkSource>>>,
@@ -216,6 +217,7 @@ impl LocalFs {
             chunks: ChunkStore::open(&dir.join("chunks"))?,
             staging: ChunkStore::open(&dir.join("staging"))?,
             replicating: AtomicBool::new(false),
+            staging_limit: AtomicU64::new(u64::MAX),
             cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
             source: Mutex::new(None),
             clock,
@@ -448,16 +450,12 @@ impl LocalFs {
         i.content = if data.len() <= INLINE_MAX {
             Content::Inline(data.to_vec())
         } else {
+            let pieces: Vec<&[u8]> = chunker::split(data);
+            self.make_room(&pieces)?;
             let mut refs = Vec::new();
-            for c in chunker::split(data) {
-                let id = *blake3::hash(c).as_bytes();
-                if !self.replicating.load(Ordering::SeqCst) {
-                    self.chunks.put(c)?;
-                } else if self.chunks.size_of(&id).is_none() {
-                    self.staging.put(c)?;
-                }
+            for c in pieces {
                 refs.push(ChunkRef {
-                    id,
+                    id: self.keep(c)?,
                     len: c.len() as u32,
                 });
             }

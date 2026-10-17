@@ -180,6 +180,44 @@ fn full_nodes_are_skipped_in_placement_and_status_warns() {
     assert!(!s.unreplicated.is_empty());
 }
 
+#[test]
+fn a_write_is_refused_only_when_the_local_node_has_no_space() {
+    // The only node offers nothing, so no copy can be placed anywhere, and
+    // its staging area holds just over one 100 KB file.
+    let c = Cluster::start_with_config(1, "staging_bytes = 150000");
+    c.control(0).create("home", 3).unwrap();
+    c.control(0).set_offer(0).unwrap();
+    let fs = c.fs(0);
+
+    let kept = noise(100_000, 1);
+    let ino = put(&fs, "kept", &kept);
+    c.sync();
+    let f = fs.create(ROOT_INO, "refused", 0o644).unwrap();
+    assert_eq!(
+        fs.write(f.ino, 0, &noise(100_000, 2)),
+        Err(FsError::NoSpace)
+    );
+    assert_eq!(FsError::NoSpace.errno(), 28);
+    // The refusal changed nothing: the first file is intact.
+    assert_eq!(fs.read(ino, 0, u32::MAX).unwrap(), kept);
+}
+
+#[test]
+fn a_write_survives_a_crash_before_replication_and_replicates_after_restart() {
+    let c = cluster(2, &[BIG, BIG, 0]);
+    let data = noise(60 * 1024, 1);
+    let ino = put(&c.fs(2), "a", &data);
+
+    c.crash(2);
+    c.restart(2);
+    assert_eq!(c.fs(2).read(ino, 0, u32::MAX).unwrap(), data);
+    c.advance(RETRY);
+    c.sync();
+
+    assert_eq!(replicas(&c), [1, 1, 0]);
+    assert_eq!(c.control(2).status().unwrap().staging.chunks, 0);
+}
+
 fn replicas(c: &Cluster) -> Vec<u64> {
     (0..c.node_count())
         .map(|i| c.control(i).status().unwrap().usage.chunks)

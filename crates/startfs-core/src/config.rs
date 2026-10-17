@@ -11,6 +11,9 @@ pub struct Config {
     pub offer_bytes: u64,
     /// Most bytes of fetched chunks kept on this node (the LRU cache).
     pub cache_bytes: u64,
+    /// Most bytes of not-yet-replicated writes this node holds; writes are
+    /// refused beyond it.
+    pub staging_bytes: u64,
     /// How long a join token stays valid, in seconds.
     pub token_ttl_secs: u64,
 }
@@ -21,6 +24,7 @@ impl Default for Config {
             port: 7600,
             offer_bytes: 10 << 30,
             cache_bytes: 1 << 30,
+            staging_bytes: 4 << 30,
             token_ttl_secs: 24 * 3600,
         }
     }

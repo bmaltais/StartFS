@@ -19,6 +19,45 @@ impl LocalFs {
         Ok(self.staging.list()?.into_iter().map(|c| c.0).collect())
     }
 
+    /// Most bytes the staging area may hold before writes are refused.
+    pub fn set_staging_limit(&self, bytes: u64) {
+        self.staging_limit.store(bytes, Ordering::SeqCst);
+    }
+
+    /// Refuse a write whose new chunks would overflow the staging area. This
+    /// is the only reason a write fails for lack of space: copies that cannot
+    /// be placed elsewhere never stop a write.
+    pub(super) fn make_room(&self, pieces: &[&[u8]]) -> FsResult<()> {
+        if !self.replicating.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut seen = HashSet::new();
+        let needed: u64 = pieces
+            .iter()
+            .filter(|c| {
+                let id = *blake3::hash(c).as_bytes();
+                !self.has_replica(&id) && !self.has_staged(&id) && seen.insert(id)
+            })
+            .map(|c| c.len() as u64)
+            .sum();
+        if self.staging.stats()?.stored_bytes + needed > self.staging_limit.load(Ordering::SeqCst) {
+            return Err(FsError::NoSpace);
+        }
+        Ok(())
+    }
+
+    /// Keep a chunk written here: in staging while the node belongs to a
+    /// filesystem (replication places it), else straight in the replica store.
+    pub(super) fn keep(&self, data: &[u8]) -> FsResult<ChunkId> {
+        let id = *blake3::hash(data).as_bytes();
+        if !self.replicating.load(Ordering::SeqCst) {
+            self.chunks.put(data)?;
+        } else if !self.has_replica(&id) {
+            self.staging.put(data)?;
+        }
+        Ok(id)
+    }
+
     /// Chunks this node holds as replicas.
     pub fn held(&self) -> FsResult<Vec<ChunkId>> {
         Ok(self.chunks.list()?.into_iter().map(|c| c.0).collect())
