@@ -60,6 +60,76 @@ fn every_node_gets_its_own_identity_so_inode_numbers_never_clash() {
 }
 
 #[test]
+fn nodes_admitted_by_different_members_at_once_get_distinct_ids() {
+    let c = Cluster::start(4);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    c.sync();
+
+    // Node 0 and node 1 cannot see each other while each admits a new node.
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(2)], &[NodeId(1), NodeId(3)]]);
+    let via_1 = c.control(1).new_token().unwrap();
+    c.control(2).join(&token, None).unwrap();
+    c.control(3).join(&via_1, None).unwrap();
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+
+    for i in 0..4 {
+        let mut ids: Vec<_> = c
+            .control(i)
+            .status()
+            .unwrap()
+            .members
+            .iter()
+            .map(|m| m.id.0)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            4,
+            "seen from node {i}: duplicate member ids {ids:?}"
+        );
+    }
+    let mut inos: Vec<_> = (0..4)
+        .map(|i| {
+            c.fs(i)
+                .create(ROOT_INO, &format!("from-{i}"), 0o644)
+                .unwrap()
+                .ino
+        })
+        .collect();
+    inos.sort();
+    inos.dedup();
+    assert_eq!(inos.len(), 4, "inode numbers clash");
+}
+
+#[test]
+fn an_admitting_member_that_restarts_never_reuses_an_id() {
+    let c = Cluster::start(3);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    c.crash(0);
+    c.restart(0);
+    c.control(2).join(&token, None).unwrap();
+    c.sync();
+
+    let mut ids: Vec<_> = c
+        .control(0)
+        .status()
+        .unwrap()
+        .members
+        .iter()
+        .map(|m| m.id.0)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "{ids:?}");
+}
+
+#[test]
 fn a_second_node_joins_with_a_token_and_sees_the_whole_tree() {
     let c = Cluster::start(2);
     let a = c.fs(0);

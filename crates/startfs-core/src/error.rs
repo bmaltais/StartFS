@@ -18,6 +18,8 @@ pub enum Error {
     NotAMember,
     #[error("this node is not in a filesystem")]
     NotAdmitting,
+    #[error("this node has no member ids left to give a new node")]
+    OutOfMemberIds,
     #[error("this node already belongs to a filesystem")]
     AlreadyInFilesystem,
     #[error("need a name and at least 1 copy")]

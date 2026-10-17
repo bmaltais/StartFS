@@ -6,6 +6,11 @@
 //! member list, so any member can admit with any token and a revocation made
 //! anywhere holds everywhere. Member ids are assigned at admission and never
 //! reused.
+//!
+//! Ids are unique without any coordination: each member owns a range of the id
+//! space and, to admit a node, takes the node's id from its own range and hands
+//! it a slice of that range for the nodes it admits in turn. Ranges never
+//! overlap, so two members admitting at the same moment cannot assign the same id.
 
 use crate::control::FilesystemInfo;
 use crate::error::Error;
@@ -22,6 +27,39 @@ use std::path::{Path, PathBuf};
 )]
 #[serde(transparent)]
 pub struct MemberId(pub u32);
+
+/// Ids stay below this so that `(id + 1) << 40` always fits an inode number.
+const ID_LIMIT: u32 = (1 << 24) - 1;
+
+/// A share of the id space that one member may hand out: `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IdRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl IdRange {
+    /// A new member's id and the range it may hand out in turn. The id comes
+    /// off the bottom, so a lone admitter hands out 1, 2, 3 and so on; the new
+    /// member's range is a slice off the top. `None` when the range is used up.
+    fn carve(&mut self) -> Option<(MemberId, IdRange)> {
+        let free = self.end.saturating_sub(self.start);
+        if free == 0 {
+            return None;
+        }
+        let id = MemberId(self.start);
+        self.start += 1;
+        let give = (free - 1) / 16;
+        self.end -= give;
+        Some((
+            id,
+            IdRange {
+                start: self.end,
+                end: self.end + give,
+            },
+        ))
+    }
+}
 
 impl std::fmt::Display for MemberId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,6 +92,8 @@ pub struct Member {
 pub struct Admission {
     pub fs: FilesystemInfo,
     pub id: MemberId,
+    /// The ids the new member may hand out to others.
+    pub ids: IdRange,
     pub members: Vec<Member>,
 }
 
@@ -104,6 +144,9 @@ impl Token {
 pub struct Membership {
     fs: Option<FilesystemInfo>,
     me: MemberId,
+    /// Ids this member may still hand out; never overlaps another member's.
+    #[serde(default)]
+    ids: IdRange,
     members: BTreeMap<MemberId, Member>,
     tokens: Vec<TokenRec>,
     /// Set by `join` or `config`; otherwise the config file's offer applies.
@@ -203,6 +246,10 @@ impl Membership {
     ) -> Result<(), Error> {
         self.fs = Some(fs);
         self.me = MemberId(0);
+        self.ids = IdRange {
+            start: 1,
+            end: ID_LIMIT,
+        };
         let offer_bytes = self.my_offer(default_offer);
         self.members.insert(
             MemberId(0),
@@ -304,11 +351,8 @@ impl Membership {
                 old.rev += 1;
             }
         }
-        let id = self
-            .members
-            .keys()
-            .next_back()
-            .map_or(MemberId(0), |m| MemberId(m.0 + 1));
+        let mut ids = self.ids;
+        let (id, handed) = ids.carve().ok_or(Error::OutOfMemberIds)?;
         self.members.insert(
             id,
             Member {
@@ -321,10 +365,12 @@ impl Membership {
                 removed: false,
             },
         );
+        self.ids = ids;
         self.save()?;
         Ok(Admission {
             fs,
             id,
+            ids: handed,
             members: self.records(),
         })
     }
@@ -333,6 +379,7 @@ impl Membership {
     pub fn install(&mut self, adm: Admission, offer: u64) -> Result<(), Error> {
         self.fs = Some(adm.fs);
         self.me = adm.id;
+        self.ids = adm.ids;
         self.members = adm.members.into_iter().map(|m| (m.id, m)).collect();
         self.offer = Some(offer);
         self.save()
