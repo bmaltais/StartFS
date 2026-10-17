@@ -83,6 +83,8 @@ struct State {
     /// Bytes of re-replication allowed right now; goes negative after a send.
     allowance: i64,
     allowance_at: Option<Nanos>,
+    /// The staging generation last scanned for new chunks to track.
+    scanned: Option<u64>,
 }
 
 /// A replica this node lost to corruption and is fetching afresh.
@@ -177,6 +179,12 @@ impl Replicator {
 
     /// Start working on every chunk written here that is not yet tracked.
     fn track_staged(&self, st: &mut State) {
+        // Listing the staging area costs disk reads: only look again when it changed.
+        let generation = self.fs.staging_generation();
+        if st.scanned == Some(generation) {
+            return;
+        }
+        st.scanned = Some(generation);
         for id in self.fs.staged().unwrap_or_default() {
             st.tracks.entry(id).or_default();
         }
@@ -205,6 +213,7 @@ impl Replicator {
             st.epoch = Some(epoch);
             st.full.clear();
             st.tracks.clear();
+            st.scanned = None;
             for id in self.fs.held().unwrap_or_default() {
                 st.tracks.entry(id).or_default();
             }
@@ -219,7 +228,13 @@ impl Replicator {
         st.allowance = st.allowance.saturating_add(earned).min(cap);
         st.allowance_at = Some(view.now);
         // The least replicated chunks first, so the most at risk are made safe first.
-        let mut ids: Vec<ChunkId> = st.tracks.keys().copied().collect();
+        // Chunks that are settled have nothing left to do until placement changes.
+        let mut ids: Vec<ChunkId> = st
+            .tracks
+            .iter()
+            .filter(|(_, t)| !t.settled)
+            .map(|(id, _)| *id)
+            .collect();
         ids.sort_by_key(|id| {
             let t = &st.tracks[id];
             t.holders.len() + usize::from(self.fs.has_replica(id))

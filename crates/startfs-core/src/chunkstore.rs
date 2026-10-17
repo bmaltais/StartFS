@@ -19,6 +19,7 @@ use crate::ops::{FsError, FsResult, StoreStats};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type ChunkId = [u8; 32];
 
@@ -39,6 +40,9 @@ fn io(e: std::io::Error) -> FsError {
 
 pub struct ChunkStore {
     root: PathBuf,
+    /// Counts additions and removals, so a caller can tell cheaply whether
+    /// the contents may have changed since it last looked.
+    generation: AtomicU64,
 }
 
 impl ChunkStore {
@@ -46,7 +50,13 @@ impl ChunkStore {
         fs::create_dir_all(root).map_err(io)?;
         Ok(Self {
             root: root.to_path_buf(),
+            generation: AtomicU64::new(0),
         })
+    }
+
+    /// Changes whenever a chunk is added or removed through this store.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     fn path(&self, id: &ChunkId) -> PathBuf {
@@ -78,6 +88,7 @@ impl ChunkStore {
         f.write_all(&envelope).map_err(io)?;
         f.sync_all().map_err(io)?;
         fs::rename(&tmp, &path).map_err(io)?;
+        self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(id)
     }
 
@@ -103,6 +114,7 @@ impl ChunkStore {
     /// Delete a chunk; absent chunks are fine.
     pub fn remove(&self, id: &ChunkId) {
         let _ = fs::remove_file(self.path(id));
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Bytes the chunk occupies on disk, if stored.

@@ -120,6 +120,11 @@ impl LocalFs {
         self.chunks.remove(id);
     }
 
+    /// Changes whenever the staging area gains or loses a chunk.
+    pub fn staging_generation(&self) -> u64 {
+        self.staging.generation()
+    }
+
     /// What the staging area holds.
     pub fn staging_stats(&self) -> FsResult<StoreStats> {
         self.staging.stats()
