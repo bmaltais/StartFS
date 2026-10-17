@@ -19,6 +19,10 @@ pub struct Config {
     /// When this node creates a filesystem: how long a member may be unseen
     /// before its copies are re-made elsewhere. Fixed for the filesystem.
     pub repair_grace_secs: u64,
+    /// When this node creates a filesystem: how long chunks that no file
+    /// references are kept (so deletes stay recoverable) before GC removes
+    /// them. Fixed for the filesystem.
+    pub gc_retention_secs: u64,
     /// Most bytes per second this node sends when re-replicating chunks it
     /// already holds (repair and rebalancing; new writes are not limited).
     pub repair_bytes_per_sec: u64,
@@ -33,6 +37,7 @@ impl Default for Config {
             staging_bytes: 4 << 30,
             token_ttl_secs: 24 * 3600,
             repair_grace_secs: 30 * 60,
+            gc_retention_secs: 7 * 24 * 3600,
             repair_bytes_per_sec: 8 << 20,
         }
     }

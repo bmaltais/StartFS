@@ -33,9 +33,13 @@ const FRONTIER: TableDefinition<u32, u64> = TableDefinition::new("frontier");
 const OBJECTS: TableDefinition<u64, &[u8]> = TableDefinition::new("objects");
 /// Unresolved conflict copies currently visible in the tree.
 const CONFLICTS: TableDefinition<u64, &[u8]> = TableDefinition::new("conflicts");
+/// Chunks held here that no file references, and when GC first saw them so.
+const ORPHANS: TableDefinition<&[u8], u64> = TableDefinition::new("orphans");
 
+mod gc;
 mod merge;
 mod replicas;
+pub use gc::GcReport;
 pub use merge::ConflictCopy;
 
 #[derive(Debug, Clone)]
@@ -104,6 +108,7 @@ pub(crate) struct Tables<'a> {
     frontier: Table<'a, u32, u64>,
     objects: Table<'a, u64, &'static [u8]>,
     conflicts: Table<'a, u64, &'static [u8]>,
+    orphans: Table<'a, &'static [u8], u64>,
 }
 
 impl Tables<'_> {
@@ -286,6 +291,7 @@ impl LocalFs {
                 frontier: txn.open_table(FRONTIER).map_err(db)?,
                 objects: txn.open_table(OBJECTS).map_err(db)?,
                 conflicts: txn.open_table(CONFLICTS).map_err(db)?,
+                orphans: txn.open_table(ORPHANS).map_err(db)?,
             };
             f(&mut t)
         };

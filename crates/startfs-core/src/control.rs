@@ -52,10 +52,17 @@ pub struct FilesystemInfo {
     /// How long a member may be unseen before repair treats it as lost.
     #[serde(default = "default_grace")]
     pub repair_grace_secs: u64,
+    /// How long a chunk nothing references is kept before GC removes it.
+    #[serde(default = "default_retention")]
+    pub gc_retention_secs: u64,
 }
 
 fn default_grace() -> u64 {
     30 * 60
+}
+
+fn default_retention() -> u64 {
+    7 * 24 * 3600
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

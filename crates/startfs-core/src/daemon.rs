@@ -32,6 +32,9 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 const WAIT_ROUNDS: usize = 300;
 
 /// A member not heard from for this long is shown as down.
+/// How often the garbage collector looks for orphaned chunks.
+const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
 const DOWN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
 
@@ -51,6 +54,7 @@ pub struct Daemon {
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
+    last_gc: Mutex<Option<Nanos>>,
     /// When this daemon started: how long a never-heard member has been unseen.
     started: Nanos,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
@@ -99,6 +103,7 @@ impl Daemon {
                 join_reply: Mutex::new(None),
                 heard: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
+                last_gc: Mutex::new(None),
                 started,
                 wait: Mutex::new(Arc::new(|| {
                     std::thread::sleep(std::time::Duration::from_millis(10))
@@ -173,7 +178,30 @@ impl Daemon {
             .with_view(|v| self.replicator.poll(v, &*transport))
             .unwrap_or(false);
         busy |= self.finish_leaving(&*transport);
+        busy |= self.collect_garbage();
         busy
+    }
+
+    /// Reclaim chunks that have been orphaned for the retention period.
+    fn collect_garbage(&self) -> bool {
+        let Some(retention) = self
+            .membership
+            .lock()
+            .unwrap()
+            .filesystem()
+            .map(|f| Duration::from_secs(f.gc_retention_secs))
+        else {
+            return false;
+        };
+        let now = self.clock.now();
+        let mut last = self.last_gc.lock().unwrap();
+        if last.is_some_and(|t| now.saturating_sub(t) < GC_INTERVAL.as_nanos() as u64) {
+            return false;
+        }
+        *last = Some(now);
+        self.fs
+            .collect_garbage(retention)
+            .is_ok_and(|r| r.reclaimed_chunks > 0)
     }
 
     /// A leaving node goes once its data is on the others and they have its log.
@@ -436,6 +464,7 @@ impl Daemon {
                             name,
                             copies,
                             repair_grace_secs: self.config.repair_grace_secs,
+                            gc_retention_secs: self.config.gc_retention_secs,
                         },
                         endpoint,
                         self.addr(),
