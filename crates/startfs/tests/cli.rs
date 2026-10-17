@@ -161,6 +161,11 @@ fn cli_issues_and_revokes_tokens_sets_the_offer_and_lists_members() {
     ));
     let token = stdout(&startfs(data, &["token"])).trim().to_string();
     assert!(token.starts_with("startfs1-"), "{token}");
+    let example = stdout(&startfs(data, &["token", "--example"]));
+    assert!(
+        example.trim().starts_with("startfs join startfs1-"),
+        "{example}"
+    );
     stdout(&startfs(data, &["revoke", &token]));
 
     stdout(&startfs(data, &["config", "--offer", "50G"]));

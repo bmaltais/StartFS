@@ -92,23 +92,36 @@ install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
 
 ## Quickstart
 
-On the first machine:
+The daemon is already running after the Linux install (on macOS or a manual install, run
+`startfs daemon --mount ~/StartFS &` first).
 
-The daemon is already running (the Linux installer starts it; on macOS or a manual
-install, run `startfs daemon --mount ~/StartFS &` first).
-
-```sh
-startfs create --name home --copies 2    # prints a join token
-```
-
-On each further machine, with the token from above:
+**First machine:** create the filesystem. `--example` prints the whole command to paste
+on the others:
 
 ```sh
-startfs join <token> --offer 100G        # --offer: space this machine contributes
+$ startfs create --name home --copies 2 --example
+startfs join startfs1-AbC...
 ```
 
-Use `~/StartFS` like any directory. `startfs token` prints a fresh token,
-`startfs revoke <token>` cancels one (tokens also expire after 24h).
+**Each further machine:** paste that line (add `--offer 100G` for the space this machine
+contributes):
+
+```sh
+startfs join startfs1-AbC... --offer 100G
+```
+
+That is all: `~/StartFS` is now the same filesystem on both. Use it like any directory.
+
+- `startfs token --example` prints a fresh join command later; tokens expire after 24h
+  and `startfs revoke <token>` cancels one.
+- Without `--example`, `create` and `token` print just the token, for scripts:
+  `TOKEN=$(startfs token)`.
+
+## Use it with an AI assistant
+
+`skills/startfs/SKILL.md` teaches a coding assistant how to install, set up and check
+StartFS. For Claude Code, copy it into place:
+`mkdir -p ~/.claude/skills && cp -r skills/startfs ~/.claude/skills/`.
 
 ## Status
 

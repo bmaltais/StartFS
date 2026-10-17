@@ -20,10 +20,12 @@ const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
 
 commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
-  create --name NAME --copies N       create a filesystem and print its join token
+  create --name NAME --copies N [--example]
+                                      create a filesystem and print its join token
   status                              show the state of this node's filesystem
   join TOKEN [--offer SIZE]           join the filesystem a token names
-  token                               print a new join token
+  token [--example]                   print a new join token (--example: the full join
+                                      command to paste on the other machine)
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
@@ -129,7 +131,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             let copies = flag_value(rest, "--copies")?
                 .parse::<u32>()
                 .map_err(|_| CliError::CopiesNotANumber)?;
-            println!("{}", Client::new(socket).create(&name, copies)?);
+            print_token(&Client::new(socket).create(&name, copies)?, rest);
             Ok(())
         }
         "join" => {
@@ -140,7 +142,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Ok(())
         }
         "token" => {
-            println!("{}", Client::new(socket).new_token()?);
+            print_token(&Client::new(socket).new_token()?, rest);
             Ok(())
         }
         "leave" => {
@@ -171,6 +173,16 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Ok(())
         }
         _ => Err(CliError::Usage),
+    }
+}
+
+/// Prints the token alone, so scripts can capture it, or with `--example` the command to
+/// paste on the other machine.
+fn print_token(token: &str, rest: &[String]) {
+    if rest.iter().any(|a| a == "--example") {
+        println!("startfs join {token}");
+    } else {
+        println!("{token}");
     }
 }
 
