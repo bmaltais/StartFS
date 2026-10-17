@@ -428,8 +428,36 @@ impl LocalFs {
         t.inodes.retain(|k, _| k == ROOT_INO).map_err(db)?;
         let mut queue = VecDeque::from([ROOT_INO]);
         let mut paths: HashMap<Ino, String> = HashMap::from([(ROOT_INO, String::new())]);
+        // Directories that lost a name collision to another directory: their
+        // children appear in the winner.
+        let mut merged: HashMap<Ino, Vec<Ino>> = HashMap::new();
         while let Some(dir) = queue.pop_front() {
-            for &idx in by_parent.get(&dir).into_iter().flatten() {
+            let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+            let sources = std::iter::once(dir).chain(merged.get(&dir).cloned().unwrap_or_default());
+            for source in sources {
+                for &idx in by_parent.get(&source).into_iter().flatten() {
+                    groups.entry(placed[idx].name.as_str()).or_default().push(idx);
+                }
+            }
+            // (index, name to show, whether it is shown as a conflict)
+            let mut shown: Vec<(usize, String, bool)> = Vec::new();
+            for (name, mut group) in groups {
+                group.sort_by_key(|&i| std::cmp::Reverse(placed[i].version.hlc));
+                let winner = group[0];
+                shown.push((winner, name.to_string(), placed[winner].conflict));
+                for &loser in &group[1..] {
+                    if placed[winner].kind == FileKind::Dir && placed[loser].kind == FileKind::Dir {
+                        merged.entry(placed[winner].ino).or_default().push(placed[loser].ino);
+                        continue;
+                    }
+                    let mut copy = conflict_name(name, placed[loser].version.hlc);
+                    while shown.iter().any(|(_, n, _)| *n == copy) {
+                        copy.push_str(" 2");
+                    }
+                    shown.push((loser, copy, true));
+                }
+            }
+            for (idx, name, conflict) in shown {
                 let p = &placed[idx];
                 let v = &p.version;
                 let inode = Inode {
@@ -444,9 +472,9 @@ impl LocalFs {
                     xattrs: v.xattrs.clone(),
                 };
                 t.put(p.ino, &inode)?;
-                t.dirents.insert((dir, p.name.as_str()), p.ino).map_err(db)?;
-                let path = format!("{}/{}", paths[&dir], p.name);
-                if p.conflict {
+                t.dirents.insert((dir, name.as_str()), p.ino).map_err(db)?;
+                let path = format!("{}/{name}", paths[&dir]);
+                if conflict {
                     let rec = ConflictRec {
                         path: path.clone(),
                         seed: p.seed,

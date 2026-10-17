@@ -278,3 +278,51 @@ fn recreation_restores_every_deleted_ancestor() {
         assert_eq!(names(&fs, y.ino), ["deep"], "node {i}");
     }
 }
+
+/// Both nodes create the same names while partitioned: A first (22:13:30), B 10s later.
+fn same_name_created_on_both() -> Cluster {
+    let c = pair();
+    c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
+    c.advance(Duration::from_secs(10));
+    let (a, b) = (c.fs(0), c.fs(1));
+    let f = a.create(ROOT_INO, "notes.txt", 0o644).unwrap();
+    a.write(f.ino, 0, b"a's notes").unwrap();
+    let d = a.mkdir(ROOT_INO, "docs", 0o755).unwrap();
+    a.create(d.ino, "from-a", 0o644).unwrap();
+    c.advance(Duration::from_secs(10));
+    let f = b.create(ROOT_INO, "notes.txt", 0o644).unwrap();
+    b.write(f.ino, 0, b"b's notes").unwrap();
+    let d = b.mkdir(ROOT_INO, "docs", 0o755).unwrap();
+    b.create(d.ino, "from-b", 0o644).unwrap();
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    c
+}
+
+#[test]
+fn files_created_with_the_same_name_keep_the_newest_and_a_conflict_copy() {
+    let c = same_name_created_on_both();
+    for i in 0..2 {
+        let fs = c.fs(i);
+        let copy = "notes (conflict from node0 20231114-221330).txt";
+        assert_eq!(names(&fs, ROOT_INO), ["docs", copy, "notes.txt"], "node {i}");
+        let win = fs.lookup(ROOT_INO, "notes.txt").unwrap();
+        assert_eq!(read_all(&fs, win.ino), b"b's notes");
+        let lose = fs.lookup(ROOT_INO, copy).unwrap();
+        assert_eq!(read_all(&fs, lose.ino), b"a's notes");
+        let paths: Vec<_> = c.control(i).status().unwrap().conflicts;
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path, format!("/{copy}"));
+    }
+}
+
+#[test]
+fn directories_created_with_the_same_name_are_merged() {
+    let c = same_name_created_on_both();
+    for i in 0..2 {
+        let fs = c.fs(i);
+        let d = fs.lookup(ROOT_INO, "docs").unwrap();
+        assert_eq!(names(&fs, d.ino), ["from-a", "from-b"], "node {i}");
+    }
+}
