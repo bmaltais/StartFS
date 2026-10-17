@@ -2,8 +2,10 @@
 //!
 //! A token reads `startfs1-<filesystem id>.<token id>@<host>:<port>`: the
 //! address is the minting member's, which is the member that admits the
-//! joiner. Tokens expire and can be revoked; both are checked by the admitting
-//! member. Member ids are assigned at admission and never reused.
+//! joiner. Tokens expire and can be revoked. Token state is gossiped like the
+//! member list, so any member can admit with any token and a revocation made
+//! anywhere holds everywhere. Member ids are assigned at admission and never
+//! reused.
 
 use crate::control::FilesystemInfo;
 use crate::net::NodeId;
@@ -40,11 +42,13 @@ pub struct Admission {
     pub members: Vec<Member>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TokenRec {
-    id: String,
-    expires: Nanos,
-    revoked: bool,
+/// A join token as every member knows it. `expires` never changes and `revoked`
+/// only ever turns on, so merging two copies is order-independent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenRec {
+    pub id: String,
+    pub expires: Nanos,
+    pub revoked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,9 +216,37 @@ impl Membership {
             .tokens
             .iter_mut()
             .find(|t| t.id == token.token_id)
-            .ok_or("this node did not issue that token")?;
+            .ok_or("no such token")?;
         rec.revoked = true;
         self.save()
+    }
+
+    /// Every token, for gossip.
+    pub fn token_records(&self) -> Vec<TokenRec> {
+        self.tokens.clone()
+    }
+
+    /// Fold in a peer's tokens: unknown ones are added, a revocation sticks.
+    /// Returns whether anything changed.
+    pub fn merge_tokens(&mut self, theirs: Vec<TokenRec>) -> bool {
+        let mut changed = false;
+        for t in theirs {
+            match self.tokens.iter_mut().find(|m| m.id == t.id) {
+                Some(mine) if t.revoked && !mine.revoked => {
+                    mine.revoked = true;
+                    changed = true;
+                }
+                Some(_) => {}
+                None => {
+                    self.tokens.push(t);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_or_report();
+        }
+        changed
     }
 
     /// Admit a new member presenting a token.

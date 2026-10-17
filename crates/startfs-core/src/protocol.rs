@@ -1,7 +1,7 @@
 //! The wire protocol peers speak over a [`Transport`](crate::net::Transport).
 
 use crate::chunkstore::ChunkId;
-use crate::members::{Admission, Member};
+use crate::members::{Admission, Member, TokenRec};
 use crate::oplog::{Entry, Frontier, StateTransfer};
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +33,8 @@ pub enum Message {
     ChunkPush(ChunkId, Option<Vec<u8>>),
     /// The receiver's answer to a [`Message::ChunkPush`].
     ChunkAck(ChunkId, Replica),
+    /// A member's view of the join tokens: any member can admit with any of them.
+    Tokens(Vec<TokenRec>),
 }
 
 /// A node's standing towards holding a replica of one chunk.
@@ -47,7 +49,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Why a received message could not be understood.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -130,6 +132,7 @@ mod tests {
             Message::Hello(Frontier::default()),
             Message::Entries(vec![]),
             Message::Members(vec![]),
+            Message::Tokens(vec![]),
             Message::ChunkRequest(id),
             Message::ChunkAck(id, Replica::Stored),
         ];
