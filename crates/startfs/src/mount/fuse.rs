@@ -11,8 +11,8 @@ use super::{Mount, Mounter};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
     FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use startfs_core::clock::{Clock, SystemClock};
 use startfs_core::ops::{Attr, FsError, FsOps, Ino, SetAttr};
@@ -442,6 +442,40 @@ impl Filesystem for FuseAdapter {
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
         // Permission bits are enforced by the kernel (`default_permissions`).
         reply.ok();
+    }
+
+    // Advisory locks (fcntl, flock) are local to each machine and are not
+    // coordinated between nodes. Answering ENOSYS tells the kernel to handle
+    // them itself, locally, without a warning per call.
+    fn getlk(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _lock_owner: LockOwner,
+        _start: u64,
+        _end: u64,
+        _typ: i32,
+        _pid: u32,
+        reply: ReplyLock,
+    ) {
+        reply.error(Errno::ENOSYS);
+    }
+
+    fn setlk(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _lock_owner: LockOwner,
+        _start: u64,
+        _end: u64,
+        _typ: i32,
+        _pid: u32,
+        _sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        reply.error(Errno::ENOSYS);
     }
 
     fn create(

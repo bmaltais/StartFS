@@ -91,6 +91,9 @@ Limits found while validating v1 (details and numbers in `docs/validation.md`):
   128 MiB, and memory use about equal to the file size or more). Avoid files above
   a few tens of MiB until this is fixed.
 - Many small files are slow to create (about 2.5 ms each over FUSE).
+- **Advisory locks are local only.** `fcntl`/`flock` locks work between processes on the same
+  machine but are not coordinated between nodes: two machines can both "hold" a lock on the
+  same file. Do not rely on them to guard shared files across nodes.
 - Not verified: real multi-machine use, a real tailnet, macOS.
 
 Non-goals for v1: Windows, erasure coding, encryption at rest or per-user access

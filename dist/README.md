@@ -22,6 +22,12 @@ only under `target_os = "macos"`.
 
 Then follow the comments in `com.startfs.daemon.plist`.
 
+## Locks
+
+Advisory locks (`fcntl`, `flock`) are local to each machine. They work between processes
+on one node but are not coordinated across nodes; the mount answers lock requests with
+`ENOSYS`, so the kernel handles them locally.
+
 ## Windows
 
 Out of scope for v1. A WinFsp adapter would implement `mount::Mounter`.
