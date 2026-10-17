@@ -20,6 +20,15 @@ pub fn tailscale_whois(config: &Config) -> Arc<dyn Whois> {
     Arc::new(TailscaleWhois::new(Path::new(socket)))
 }
 
+/// The MagicDNS name in `tailscale status --json` output, without its
+/// trailing dot; `None` when MagicDNS is off or the output is unusable.
+pub fn dns_name(status_json: &str) -> Option<String> {
+    let status: serde_json::Value = serde_json::from_str(status_json).ok()?;
+    let name = status.get("Self")?.get("DNSName")?.as_str()?;
+    let name = name.trim_end_matches('.');
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// Listen on `host` at the configured port (0 picks a free one), and record
 /// the port actually bound in `config`, since join tokens carry it.
 pub fn bind(

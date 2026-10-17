@@ -654,3 +654,48 @@ fn a_token_revoked_on_its_issuer_is_rejected_by_the_others() {
         .unwrap_err();
     assert!(err.to_string().contains("revoked"), "{err}");
 }
+
+#[test]
+fn a_token_names_the_hostname_the_node_advertises_and_joining_through_it_works() {
+    let c = Cluster::start(2);
+    c.crash(0);
+    c.advertise_as(0, "laptop.tail1234.ts.net");
+    c.restart(0);
+    let token = c.control(0).create("home", 2).unwrap();
+    assert!(token.ends_with("@laptop.tail1234.ts.net:7600"), "{token}");
+    c.control(1).join(&token, None).unwrap();
+    c.sync();
+    assert_eq!(c.control(1).status().unwrap().nodes, 2);
+}
+
+#[test]
+fn a_token_minted_with_an_ip_address_still_joins() {
+    let c = Cluster::start(2);
+    let token = c.control(0).create("home", 2).unwrap();
+    assert!(token.ends_with("@100.64.0.1:7600"), "{token}");
+    c.control(1).join(&token, None).unwrap();
+    c.sync();
+    assert_eq!(c.control(1).status().unwrap().nodes, 2);
+}
+
+#[test]
+fn a_node_restarted_under_a_new_advertised_name_is_known_by_it_to_every_member() {
+    let c = joined(2, 2);
+    c.crash(0);
+    c.advertise_as(0, "laptop.tail1234.ts.net");
+    c.restart(0);
+    c.sync();
+    for viewer in 0..2 {
+        let members = c.control(viewer).status().unwrap().members;
+        assert!(
+            members
+                .iter()
+                .any(|m| m.addr == "laptop.tail1234.ts.net:7600"),
+            "node {viewer} sees {members:?}"
+        );
+        assert!(
+            members.iter().all(|m| m.addr != "100.64.0.1:7600"),
+            "node {viewer} still sees the old address: {members:?}"
+        );
+    }
+}

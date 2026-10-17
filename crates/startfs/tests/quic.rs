@@ -291,3 +291,11 @@ mod local_api {
         assert!(err.to_string().contains("tailscaled"), "{err}");
     }
 }
+
+#[test]
+fn a_name_with_both_ipv4_and_ipv6_addresses_resolves_to_the_ipv4_one() {
+    // Nodes listen on their tailnet IPv4 only, and MagicDNS names carry both families.
+    let addr = startfs::quic::resolve_addr("localhost:7600").unwrap();
+    assert!(addr.is_ipv4(), "{addr}");
+    assert_eq!(addr.port(), 7600);
+}

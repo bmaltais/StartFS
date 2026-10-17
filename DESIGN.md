@@ -47,7 +47,7 @@ same code with a different membership scope.
    its copies count again and surplus copies are trimmed lazily.
 
 9. **Create and join:** explicit join token. `startfs create --name home --copies 3` on the first
-   machine prints a token (filesystem ID plus a bootstrap peer's tailnet address).
+   machine prints a token (filesystem ID plus a bootstrap peer's tailnet address: its MagicDNS name when it has one, else its IP).
    `startfs join <token>` on another machine contacts the bootstrap peer, and existing members admit
    the new node. No auto-discovery in v1. Member ids need no coordination: each member owns an
    id range and an admission takes the new id from it and gives the node a slice for its own

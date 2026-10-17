@@ -105,6 +105,8 @@ struct Node {
     daemon: Mutex<Option<Arc<Daemon>>>,
     daemon_config: Config,
     power: Arc<ManualPower>,
+    /// The host this node advertises from its next start; `None` is its tailnet IP.
+    host: Mutex<Option<String>>,
 }
 
 /// N real nodes sharing one injectable clock and one simulated network.
@@ -152,6 +154,7 @@ impl Cluster {
                 daemon: Mutex::new(None),
                 daemon_config: config_for_nodes.clone(),
                 power: Arc::new(ManualPower::default()),
+                host: Mutex::new(None),
             })
             .collect();
         let nodes = Arc::new(nodes);
@@ -261,6 +264,15 @@ impl Cluster {
         self.restart(i);
     }
 
+    /// Make node `i` advertise `host` (a name, as MagicDNS gives) from its next
+    /// start, and reachable at it.
+    pub fn advertise_as(&self, i: usize, host: &str) {
+        let port = self.nodes[i].daemon_config.port;
+        self.network
+            .register(&format!("{host}:{port}"), NodeId(i as u32));
+        *self.nodes[i].host.lock().unwrap() = Some(host.to_string());
+    }
+
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
         open(&self.nodes, i, &self.network, self.clock.clone());
@@ -306,7 +318,12 @@ fn pump(nodes: &[Node]) -> bool {
 /// Start node `index` from its on-disk state and connect it to the network.
 fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<ManualClock>) {
     let node = &nodes[index];
-    let host = format!("100.64.0.{}", index + 1);
+    let host = node
+        .host
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| format!("100.64.0.{}", index + 1));
     let daemon = Daemon::open(
         node.dir.path(),
         node.daemon_config.clone(),

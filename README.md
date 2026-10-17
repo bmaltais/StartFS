@@ -173,7 +173,8 @@ startfs join startfs1-AbC... --offer 100G
 That is all: `~/StartFS` is now the same filesystem on both. Use it like any directory.
 
 - `startfs token --example` prints a fresh join command later; tokens expire after 24h
-  and `startfs revoke <token>` cancels one.
+  and `startfs revoke <token>` cancels one. A token names the machine by its MagicDNS name
+  when the tailnet has one, otherwise by its tailnet IP.
 - Without `--example`, `create` and `token` print just the token, for scripts:
   `TOKEN=$(startfs token)`.
 

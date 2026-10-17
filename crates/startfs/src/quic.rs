@@ -39,6 +39,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_AFTER: Duration = Duration::from_secs(2);
 const CLOSE_REFUSED: u32 = 1;
 
+/// Resolve a `host:port` string, preferring IPv4: nodes listen on their tailnet
+/// IPv4 only, while a MagicDNS name also carries an IPv6 address.
+pub fn resolve_addr(addr: &str) -> Option<SocketAddr> {
+    let all: Vec<SocketAddr> = addr.to_socket_addrs().ok()?.collect();
+    all.iter().find(|a| a.is_ipv4()).or(all.first()).copied()
+}
+
 /// The transport endpoint for an address: every node derives the same id from
 /// the address a peer listens on (FNV-1a, which is stable across releases).
 pub fn node_id_for(addr: SocketAddr) -> NodeId {
@@ -211,7 +218,7 @@ impl Transport for QuicTransport {
     }
 
     fn resolve(&self, addr: &str) -> Option<NodeId> {
-        let addr = addr.to_socket_addrs().ok()?.next()?;
+        let addr = resolve_addr(addr)?;
         let id = node_id_for(addr);
         self.shared.addrs.lock().unwrap().insert(id, addr);
         Some(id)
@@ -221,7 +228,7 @@ impl Transport for QuicTransport {
         if node == self.shared.local {
             return;
         }
-        if let Some(addr) = addr.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        if let Some(addr) = resolve_addr(addr) {
             self.shared.addrs.lock().unwrap().insert(node, addr);
         }
     }

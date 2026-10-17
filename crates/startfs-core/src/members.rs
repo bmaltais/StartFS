@@ -413,13 +413,14 @@ impl Membership {
         changed
     }
 
-    /// Keep our own record's endpoint and offer current.
-    pub fn refresh_self(&mut self, endpoint: NodeId, default_offer: u64) {
+    /// Keep our own record's address, endpoint and offer current.
+    pub fn refresh_self(&mut self, addr: &str, endpoint: NodeId, default_offer: u64) {
         let offer = self.my_offer(default_offer);
         let me = self.me;
         if let Some(m) = self.members.get_mut(&me)
-            && (m.endpoint != endpoint || m.offer_bytes != offer)
+            && (m.addr != addr || m.endpoint != endpoint || m.offer_bytes != offer)
         {
+            m.addr = addr.to_string();
             m.endpoint = endpoint;
             m.offer_bytes = offer;
             m.rev += 1;

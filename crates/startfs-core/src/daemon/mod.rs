@@ -196,10 +196,11 @@ impl Daemon {
         let mut syncer = Syncer::new(self.fs.clone(), transport.clone(), self.clock.clone());
         syncer.set_chunk_bytes(self.config.state_chunk_bytes);
         *self.syncer.lock().unwrap() = Some(syncer);
-        self.membership
-            .lock()
-            .unwrap()
-            .refresh_self(transport.local(), self.config.offer_bytes);
+        self.membership.lock().unwrap().refresh_self(
+            &self.addr(),
+            transport.local(),
+            self.config.offer_bytes,
+        );
         *self.transport.lock().unwrap() = Some(transport);
     }
 

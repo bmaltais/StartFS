@@ -265,7 +265,7 @@ fn daemon(
         config,
         node,
         Arc::new(SystemClock),
-        host.to_string(),
+        advertised_host(host),
     )?;
     let ticker = Ticker::start(d.clone(), transport);
     d.set_power_source(Arc::new(SystemPower));
@@ -311,6 +311,19 @@ fn wait_for_stop() {
     while !STOP.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+/// What this node tells others to dial: its MagicDNS name, which survives a
+/// change of tailnet IP, or the IP itself when there is no name.
+fn advertised_host(ip: IpAddr) -> String {
+    Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|json| node::dns_name(&json))
+        .unwrap_or_else(|| ip.to_string())
 }
 
 /// This machine's tailnet address, or loopback when Tailscale is unavailable.
