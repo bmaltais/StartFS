@@ -183,6 +183,17 @@ That is all: `~/StartFS` is now the same filesystem on both. Use it like any dir
 StartFS. For Claude Code, copy it into place:
 `mkdir -p ~/.claude/skills && cp -r skills/startfs ~/.claude/skills/`.
 
+## Space savings
+
+Identical data is stored once (deduplication) and chunks are compressed, so your files
+take less of the space the machines offer than their sizes add up to. The saving depends
+on your data: copies, backups and text shrink a lot, already-compressed media barely at all.
+
+Two numbers can therefore differ. A file manager or `du --apparent-size` shows the logical
+size of the files; `df` on the mount shows what is actually stored. For example, a 2.5 MiB
+folder showed 1.7 MiB used. Per-file sizes never show the saving, only the filesystem-wide
+used figure does.
+
 ## Status
 
 `startfs status` answers "is my data safe right now?": copies possible versus
