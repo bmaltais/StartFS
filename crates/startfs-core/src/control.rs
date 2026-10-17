@@ -18,6 +18,8 @@ pub enum Request {
     Status,
     /// Mint another join token (valid for the configured time).
     NewToken,
+    /// Change settings of this node; unset fields stay as they are.
+    Config { offer_bytes: Option<u64> },
     /// Make a token we issued stop working.
     Revoke { token: String },
     /// Join the filesystem named by a token, optionally setting our space offer.
@@ -215,6 +217,17 @@ impl Client {
     pub fn revoke(&self, token: &str) -> Result<(), String> {
         match self.call(&Request::Revoke {
             token: token.into(),
+        })? {
+            Response::Done => Ok(()),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Change the space this node offers to the filesystem.
+    pub fn set_offer(&self, bytes: u64) -> Result<(), String> {
+        match self.call(&Request::Config {
+            offer_bytes: Some(bytes),
         })? {
             Response::Done => Ok(()),
             Response::Error(e) => Err(e),

@@ -175,3 +175,41 @@ fn a_member_that_goes_quiet_is_shown_down_and_comes_back_up() {
     }
     assert_eq!(states(&c, 0), [up, down, up]);
 }
+
+fn offers(c: &Cluster, viewer: usize) -> Vec<u64> {
+    let s = c.control(viewer).status().unwrap();
+    s.members.iter().map(|m| m.offer_bytes).collect()
+}
+
+#[test]
+fn a_member_changes_its_offer_with_config_and_everyone_learns_of_it() {
+    let c = joined(2, 2);
+    c.control(1).set_offer(500).unwrap();
+    assert_eq!(c.control(1).status().unwrap().usage.offer_bytes, 500);
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    assert_eq!(offers(&c, 0), [10 << 30, 500]);
+
+    // The offer sticks across a restart, over the config file's default.
+    c.crash(1);
+    c.restart(1);
+    assert_eq!(c.control(1).status().unwrap().usage.offer_bytes, 500);
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    assert_eq!(offers(&c, 0), [10 << 30, 500]);
+}
+
+#[test]
+fn an_offer_of_zero_makes_a_pure_client_that_adds_no_storage() {
+    let c = Cluster::start(2);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, Some(0)).unwrap();
+    c.sync();
+    // Two members, but only one can hold replicas.
+    let s = c.control(0).status().unwrap();
+    assert_eq!((s.nodes, s.copies_possible), (2, 1));
+    c.control(1).set_offer(1 << 30).unwrap();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    assert_eq!(c.control(0).status().unwrap().copies_possible, 2);
+}

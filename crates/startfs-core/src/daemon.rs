@@ -44,6 +44,7 @@ pub struct Daemon {
     wait: Mutex<WaitHook>,
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
+    last_gossip: Mutex<Option<Nanos>>,
 }
 
 impl Daemon {
@@ -66,6 +67,7 @@ impl Daemon {
             syncer: Mutex::new(None),
             join_reply: Mutex::new(None),
             heard: Mutex::new(HashMap::new()),
+            last_gossip: Mutex::new(None),
             wait: Mutex::new(Arc::new(|| {
                 std::thread::sleep(std::time::Duration::from_millis(10))
             })),
@@ -115,7 +117,21 @@ impl Daemon {
                 self.dispatch(&*transport, from, msg);
             }
         }
-        let peers = self.membership.lock().unwrap().peers();
+        let (peers, members) = {
+            let m = self.membership.lock().unwrap();
+            (m.peers(), m.members())
+        };
+        let now = self.clock.now();
+        let mut last = self.last_gossip.lock().unwrap();
+        if last.is_none_or(|t| now.saturating_sub(t) >= HELLO_INTERVAL.as_nanos() as u64) {
+            *last = Some(now);
+            let msg = Message::Members(members).encode();
+            for p in &peers {
+                transport.send(*p, msg.clone());
+            }
+            busy |= !peers.is_empty();
+        }
+        drop(last);
         let mut syncer = self.syncer.lock().unwrap();
         if let Some(s) = syncer.as_mut() {
             s.set_peers(&peers);
@@ -241,6 +257,15 @@ impl Daemon {
                 Ok(token) => Response::Created { token },
                 Err(e) => Response::Error(e),
             },
+            Request::Config { offer_bytes } => {
+                let mut membership = self.membership.lock().unwrap();
+                if let Some(bytes) = offer_bytes
+                    && let Err(e) = membership.set_offer(bytes)
+                {
+                    return Response::Error(e);
+                }
+                Response::Done
+            }
             Request::Revoke { token } => {
                 match self.membership.lock().unwrap().revoke_token(&token) {
                     Ok(()) => Response::Done,
@@ -279,7 +304,11 @@ impl Daemon {
                     })
                     .collect();
                 let nodes = members.len() as u32;
-                let copies_possible = filesystem.as_ref().map_or(0, |f| f.copies.min(nodes));
+                // Only members offering space can hold a copy.
+                let storage_nodes = members.iter().filter(|m| m.offer_bytes > 0).count() as u32;
+                let copies_possible = filesystem
+                    .as_ref()
+                    .map_or(0, |f| f.copies.min(storage_nodes));
                 Response::Status(Status {
                     filesystem,
                     node_state: NodeState::Online,
