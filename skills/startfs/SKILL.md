@@ -1,71 +1,80 @@
 ---
 name: startfs
-description: Install, set up, join machines to, and check StartFS, the replicated filesystem for a Tailscale tailnet. Use when the user mentions StartFS or ~/StartFS, wants a shared folder replicated across their machines, or asks whether their StartFS data is safe.
+description: StartFS, a filesystem replicated across a user's Tailscale machines at ~/StartFS. Use to install it, create a filesystem, add another machine, check whether data is safe, or remove or retire a machine.
 ---
 
 # StartFS
 
-A decentralised filesystem for a Tailscale tailnet. Every machine runs one daemon and
-mounts the same filesystem at `~/StartFS`. Data is deduplicated, compressed and kept in N
-copies across the machines. One binary, `startfs`, is both daemon and CLI.
+Every machine runs one daemon and mounts the same filesystem at `~/StartFS`; data is kept
+in N copies across the machines. One binary, `startfs`, is daemon and CLI.
 
-## Install (Linux, macOS)
+## Install
 
-Needs Tailscale running and `fuse3` (Linux) or FUSE-T (macOS). Then:
+Needs Tailscale running, plus `fuse3` (Linux) or FUSE-T (macOS).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
-startfs --version
 ```
 
-On Linux this also enables and starts the `startfs` systemd user service, which mounts
-`~/StartFS`. Check it with `systemctl --user status startfs`; logs are in
-`journalctl --user -u startfs`. On macOS the adapter is untested and the daemon is
-started by hand: `startfs daemon --mount ~/StartFS &`.
+Done when `startfs --version` prints a version and `startfs status` answers (on Linux the
+installer started the `startfs` systemd user service; read failures with
+`journalctl --user -u startfs`). On macOS start the daemon by hand:
+`startfs daemon --mount ~/StartFS &`.
 
-## Set up a filesystem
-
-On the first machine (the daemon must be running):
+## Create a filesystem (first machine)
 
 ```sh
 startfs create --name NAME --copies N --example
 ```
 
-`--copies` is how many machines hold each piece of data (2 or 3 is typical). The output is
-a ready-to-run command, `startfs join startfs1-...`. Give it to the user, or run it on
-each other machine over ssh, adding `--offer SIZE` (for example `100G`) for the space that
-machine contributes. Tokens expire after 24h. `startfs token --example` makes a new one and
-`startfs revoke TOKEN` cancels one.
+`--copies` is how many machines hold each piece of data; 2 or 3 is typical. The output is
+a ready-to-run line, `startfs join startfs1-...`.
 
-Without `--example`, `create` and `token` print only the bare token, which is what to use
-in scripts.
+## Add a machine
 
-## Check it
+Run the line from `create` on the new machine, adding `--offer SIZE` (for example `100G`)
+for the space it contributes. Tokens expire after 24h: `startfs token --example` prints a
+fresh line, `startfs revoke TOKEN` cancels one. Ssh into the new machine to run it when the
+user cannot.
+
+Done when `startfs status` on either machine lists both under `members:` as `up`.
+
+## Check safety
 
 ```sh
 startfs status
 ```
 
-Answers "is my data safe right now?": copies possible versus wanted, members and their
-state, files not yet fully replicated, repair progress, warnings and conflicts. Safe means
-no under-replicated files and no members offline longer than expected. Report the
-warnings, not just the summary.
+Read the `data:` line first:
 
-## Other commands
+| `data:` | Means |
+|---|---|
+| `SAFE` | every file has as many copies as the machines allow, and the wanted number is possible |
+| `BEST-EFFORT` | fewer machines than wanted copies, so the full count is impossible; normal until more machines join |
+| `DEGRADED` | a file is short of copies, a repair is running, or a member is `down` or `lost` |
+| `AT RISK` | some data is down to its last copies; act now |
 
-- `startfs config --offer SIZE`: change how much space this machine contributes.
-- `startfs leave`: hand this machine's data to the others and leave (do this before
-  decommissioning a machine).
-- `startfs remove MEMBER`: drop a dead machine for good; its data is re-replicated. Member
-  numbers are in `startfs status`. Never run this for a machine that is only offline.
-- Global flags go before the command: `--data-dir DIR`, `--config FILE`.
+For anything but `SAFE`, quote the `redundancy:` line, the `members:` states and any
+`repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
+call for a new machine to join, or `remove` once the machine is gone for good.
 
-## Things to tell the user
+## Retire or remove a machine
 
-- Writes reach disk about a second late. A power cut can lose the last second of creates
-  unless the file was fsynced, so check the result of `close()` in programs.
-- `fcntl`/`flock` locks are local to one machine and do not coordinate across machines.
-- The tailnet is fully trusted: every member can read everything. There is no per-user
-  access control or encryption at rest.
-- Not verified on a real multi-machine tailnet or on macOS. Full list: README "Known
-  limits"; design and numbers: `DESIGN.md`, `docs/validation.md`.
+- Planned exit: `startfs leave` on that machine hands its data to the others first.
+- Machine gone for good: `startfs remove MEMBER` from a survivor (the number is in
+  `startfs status`); its data is re-replicated to N copies.
+- Machine merely offline: wait. Its copies count again when it returns; after 30 minutes
+  unseen the others start re-replicating its data, and `remove` is final.
+
+## Tell the user
+
+- Creates and small writes reach disk about a second late; a power cut can lose the last
+  second unless the file was fsynced. Programs should check the result of `close()`.
+- `fcntl`/`flock` locks work within one machine only, so two machines can both hold the
+  same lock.
+- Every tailnet member can read everything; there is no per-user access control or
+  encryption at rest.
+- Real multi-machine use and macOS are unverified (see "Known limits" in the README).
+
+`startfs config --offer SIZE` changes a machine's contribution later. Global flags
+`--data-dir DIR` and `--config FILE` go before the command.
