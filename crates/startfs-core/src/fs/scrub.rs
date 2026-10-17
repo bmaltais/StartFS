@@ -19,9 +19,11 @@ impl LocalFs {
     }
 
     pub fn set_scrub_done(&self, when: Nanos) {
-        let _ = self.run(true, |t| {
+        if let Err(e) = self.run(true, |t| {
             t.counters.insert("scrub_done", when).map_err(db)?;
             Ok(())
-        });
+        }) {
+            eprintln!("startfs: cannot record scrub completion: {e:?}");
+        }
     }
 }

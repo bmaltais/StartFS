@@ -38,8 +38,16 @@ fn fake_tailscaled(socket: &Path, known: bool) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
+            // Read the whole request head before answering: closing with
+            // unread bytes makes the kernel reset the connection under load.
+            let mut head = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
             let (status, body) = if known {
                 (
                     "200 OK",
