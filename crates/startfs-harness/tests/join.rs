@@ -669,11 +669,15 @@ fn a_token_names_the_hostname_the_node_advertises_and_joining_through_it_works()
 }
 
 #[test]
-fn a_token_minted_with_an_ip_address_still_joins() {
+fn a_token_written_with_the_ip_address_still_joins_a_node_that_now_advertises_a_name() {
     let c = Cluster::start(2);
+    c.crash(0);
+    c.advertise_as(0, "laptop.tail1234.ts.net");
+    c.restart(0);
     let token = c.control(0).create("home", 2).unwrap();
-    assert!(token.ends_with("@100.64.0.1:7600"), "{token}");
-    c.control(1).join(&token, None).unwrap();
+    let (ids, _) = token.split_once('@').unwrap();
+    let old_token = format!("{ids}@100.64.0.1:7600");
+    c.control(1).join(&old_token, None).unwrap();
     c.sync();
     assert_eq!(c.control(1).status().unwrap().nodes, 2);
 }

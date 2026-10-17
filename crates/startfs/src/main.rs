@@ -313,27 +313,31 @@ fn wait_for_stop() {
     }
 }
 
+/// Run `tailscale` with `args`; its stdout when it succeeds.
+fn tailscale(args: &[&str]) -> Option<String> {
+    let out = Command::new("tailscale").args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).ok())?
+}
+
 /// What this node tells others to dial: its MagicDNS name, which survives a
-/// change of tailnet IP, or the IP itself when there is no name.
+/// change of tailnet IP, or the IP itself when there is no name (or no
+/// tailnet at all, where a name would not be where we listen).
 fn advertised_host(ip: IpAddr) -> String {
-    Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|json| node::dns_name(&json))
-        .unwrap_or_else(|| ip.to_string())
+    if ip.is_loopback() {
+        return ip.to_string();
+    }
+    let name = tailscale(&["status", "--json"]).and_then(|json| node::dns_name(&json));
+    name.unwrap_or_else(|| {
+        eprintln!("startfs: no MagicDNS name from tailscale; advertising {ip}");
+        ip.to_string()
+    })
 }
 
 /// This machine's tailnet address, or loopback when Tailscale is unavailable.
 fn tailnet_address() -> IpAddr {
-    Command::new("tailscale")
-        .args(["ip", "-4"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+    tailscale(&["ip", "-4"])
         .and_then(|s| s.lines().next().and_then(|l| l.trim().parse().ok()))
         .unwrap_or(IpAddr::from([127, 0, 0, 1]))
 }
