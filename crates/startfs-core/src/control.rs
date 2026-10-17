@@ -242,6 +242,10 @@ pub struct Server {
 }
 
 pub fn serve(daemon: Arc<Daemon>, path: &Path) -> std::io::Result<Server> {
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "a stale socket file may not exist"
+    )]
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     listener.set_nonblocking(true)?;
@@ -251,9 +255,17 @@ pub fn serve(daemon: Arc<Daemon>, path: &Path) -> std::io::Result<Server> {
         while !flag.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    #[allow(
+                        clippy::let_underscore_must_use,
+                        reason = "a failure here surfaces as a read error in answer"
+                    )]
                     let _ = stream.set_nonblocking(false);
                     let d = daemon.clone();
                     std::thread::spawn(move || {
+                        #[allow(
+                            clippy::let_underscore_must_use,
+                            reason = "a client that hung up cannot be told"
+                        )]
                         let _ = answer(&d, stream);
                     });
                 }
@@ -283,6 +295,10 @@ impl Server {
     /// Block the calling thread for as long as the server runs.
     pub fn wait(mut self) {
         if let Some(t) = self.thread.take() {
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "teardown: a panicked server thread has nothing left to report"
+            )]
             let _ = t.join();
         }
     }
@@ -292,8 +308,16 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "teardown: a panicked server thread has nothing left to report"
+            )]
             let _ = t.join();
         }
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "teardown: the socket file may already be gone"
+        )]
         let _ = std::fs::remove_file(&self.path);
     }
 }

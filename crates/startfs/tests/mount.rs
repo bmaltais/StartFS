@@ -2,6 +2,10 @@
 //! ordinary tools work on it. Skipped, not failed, where FUSE is unavailable
 //! (no /dev/fuse, no fusermount, or mounting is not permitted).
 #![cfg(target_os = "linux")]
+#![allow(
+    clippy::let_underscore_must_use,
+    reason = "test teardown and best-effort replies"
+)]
 
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};

@@ -113,6 +113,10 @@ impl ChunkStore {
 
     /// Delete a chunk; absent chunks are fine.
     pub fn remove(&self, id: &ChunkId) {
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "an absent chunk is already removed"
+        )]
         let _ = fs::remove_file(self.path(id));
         self.generation.fetch_add(1, Ordering::SeqCst);
     }

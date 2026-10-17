@@ -70,6 +70,10 @@ impl Drop for Ticker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "teardown: a panicked thread has nothing left to report"
+            )]
             let _ = t.join();
         }
     }

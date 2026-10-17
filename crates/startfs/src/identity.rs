@@ -60,7 +60,15 @@ impl TailscaleWhois {
         let mut stream =
             std::os::unix::net::UnixStream::connect(&self.socket).map_err(unreachable)?;
         let timeout = Some(std::time::Duration::from_secs(5));
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "best-effort: timeouts are a safeguard, the read reports real failures"
+        )]
         let _ = stream.set_read_timeout(timeout);
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "best-effort: timeouts are a safeguard, the read reports real failures"
+        )]
         let _ = stream.set_write_timeout(timeout);
         write!(
             stream,

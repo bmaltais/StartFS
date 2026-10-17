@@ -1,5 +1,10 @@
 //! Smoke test of the real binary: one process as daemon, others as CLI.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    reason = "test teardown and best-effort replies"
+)]
+
 use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};

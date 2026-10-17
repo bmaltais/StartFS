@@ -1,5 +1,10 @@
 //! Smoke tests of the QUIC transport over loopback, with a faked `tailscaled` whois.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    reason = "test teardown and best-effort replies"
+)]
+
 use startfs::identity::{PeerIdentity, StaticWhois};
 use startfs::quic::QuicTransport;
 use startfs_core::net::{NodeId, Transport};

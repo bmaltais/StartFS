@@ -195,6 +195,10 @@ impl Transport for QuicTransport {
             ));
             senders.insert(to, tx);
         }
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "best-effort send to a peer that may be gone"
+        )]
         let _ = senders[&to].send(msg);
     }
 
@@ -292,6 +296,10 @@ async fn handshake_accept(
     reply.finish().map_err(|e| e.to_string())?;
     // Let the verdict reach the dialer before the connection is torn down.
     if verdict.is_err() {
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "best-effort: the peer may be gone"
+        )]
         let _ = tokio::time::timeout(Duration::from_secs(1), reply.stopped()).await;
     }
     verdict
@@ -312,6 +320,10 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
         if stream.read_exact(&mut body).await.is_err() {
             return;
         }
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "best-effort: the daemon may have stopped receiving"
+        )]
         let _ = shared.inbox.lock().unwrap().send((from, body));
     }
 }
@@ -417,9 +429,21 @@ async fn peer_sender(
             let conn = l.conn.clone();
             tokio::spawn(async move {
                 if let Ok(mut stream) = conn.open_uni().await {
+                    #[allow(
+                        clippy::let_underscore_must_use,
+                        reason = "best-effort: priority is only a hint"
+                    )]
                     let _ = stream.set_priority(-1);
                     if write_frame(&mut stream, &msg).await.is_ok() {
+                        #[allow(
+                            clippy::let_underscore_must_use,
+                            reason = "best-effort: the peer may be gone"
+                        )]
                         let _ = stream.finish();
+                        #[allow(
+                            clippy::let_underscore_must_use,
+                            reason = "best-effort: the peer may be gone"
+                        )]
                         let _ = stream.stopped().await;
                     }
                 }
