@@ -107,3 +107,24 @@ fn cli_issues_and_revokes_tokens_sets_the_offer_and_lists_members() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not a StartFS join token"));
 }
+
+#[test]
+fn cli_leaves_and_removes_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    assert!(!startfs(data, &["leave"]).status.success());
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "2"],
+    ));
+
+    // Members are named by their number in `status`; this node cannot remove itself.
+    assert!(!startfs(data, &["remove", "0"]).status.success());
+    assert!(!startfs(data, &["remove", "9"]).status.success());
+    assert!(!startfs(data, &["remove", "bob"]).status.success());
+
+    stdout(&startfs(data, &["leave"]));
+    let text = stdout(&startfs(data, &["status"]));
+    assert!(text.contains("leaving"), "{text}");
+}

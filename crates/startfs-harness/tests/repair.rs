@@ -2,6 +2,7 @@
 //! interface on a simulated cluster with a manual clock.
 
 use startfs_core::control::NodeState;
+use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_harness::Cluster;
 use std::time::Duration;
@@ -302,6 +303,98 @@ fn a_node_that_leaves_is_removed_and_its_data_is_re_replicated_first() {
             c.fs(0).read(ino, 0, u32::MAX).unwrap(),
             noise(8 * 1024, i + 1)
         );
+    }
+}
+
+#[test]
+fn a_leaving_node_stays_until_its_data_is_safe_elsewhere() {
+    let c = cluster(2, 3);
+    write_files(&c, 12);
+    let ids = |ns: &[u32]| ns.iter().map(|n| NodeId(*n)).collect::<Vec<_>>();
+    let before = replicas(&c);
+
+    // Cut off from the others, the leaver cannot hand anything over.
+    c.network().partition(&[&ids(&[2]), &ids(&[0, 1])]);
+    c.control(2).leave().unwrap();
+    settle(&c);
+    let s = c.control(2).status().unwrap();
+    assert!(s.filesystem.is_some());
+    assert_eq!(
+        s.members.iter().find(|m| m.is_self).unwrap().state,
+        NodeState::Leaving
+    );
+    assert_eq!(replicas(&c)[2], before[2], "gave up its data too early");
+
+    c.network().heal();
+    settle(&c);
+    assert_eq!(c.control(2).status().unwrap().filesystem, None);
+    assert_eq!(
+        replicas(&c)[..2].iter().sum::<u64>(),
+        before.iter().sum::<u64>()
+    );
+}
+
+#[test]
+fn another_member_can_remove_a_dead_node_and_its_data_is_re_replicated() {
+    let c = cluster(2, 4);
+    write_files(&c, 24);
+    let before = replicas(&c);
+    c.crash(3);
+
+    // An online member cannot be removed, only asked to leave.
+    assert!(c.control(0).remove(1).is_err());
+
+    // No need to wait out the grace period.
+    c.advance(2 * MINUTE);
+    c.sync();
+    c.control(0).remove(3).unwrap();
+    settle(&c);
+
+    let after = replicas(&c);
+    assert_eq!(
+        after[..3].iter().sum::<u64>(),
+        before.iter().sum::<u64>(),
+        "{after:?}"
+    );
+    for i in 0..3 {
+        let s = c.control(i).status().unwrap();
+        assert_eq!(s.members.len(), 3, "node {i}");
+        assert!(s.unreplicated.is_empty());
+    }
+}
+
+#[test]
+fn a_rebuilt_machine_rejoins_with_a_new_token_and_pulls_metadata_and_chunks() {
+    let c = cluster(2, 4);
+    write_files(&c, 24);
+    let before = replicas(&c);
+
+    c.rebuild(3);
+    // Its old identity is gone; the blank machine needs a fresh token.
+    assert_eq!(c.control(3).status().unwrap().filesystem, None);
+    let token = c.control(0).new_token().unwrap();
+    c.control(3).join(&token, Some(BIG)).unwrap();
+    settle(&c);
+
+    for i in 0..24 {
+        let ino = c.fs(3).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+        assert_eq!(
+            c.fs(3).read(ino, 0, u32::MAX).unwrap(),
+            noise(8 * 1024, i + 1)
+        );
+    }
+    let after = replicas(&c);
+    assert!(after[3] > 0, "{after:?}");
+    assert_eq!(
+        after.iter().sum::<u64>(),
+        before.iter().sum::<u64>(),
+        "{after:?}"
+    );
+    // The old record of the machine is replaced by the new one.
+    for i in 0..4 {
+        let s = c.control(i).status().unwrap();
+        assert_eq!(s.members.len(), 4, "node {i}");
+        assert!(s.unreplicated.is_empty());
     }
 }
 // NEXT

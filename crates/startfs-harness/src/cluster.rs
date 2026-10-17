@@ -201,6 +201,23 @@ impl Cluster {
         corrupt_files(&self.nodes[i].dir.path().join("cache"));
     }
 
+    /// The machine dies and is replaced by a blank one at the same address.
+    pub fn rebuild(&self, i: usize) {
+        self.crash(i);
+        for e in std::fs::read_dir(self.nodes[i].dir.path())
+            .unwrap()
+            .flatten()
+        {
+            let p = e.path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p).unwrap();
+            } else {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+        self.restart(i);
+    }
+
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
         open(&self.nodes, i, &self.network, self.clock.clone());
