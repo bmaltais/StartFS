@@ -117,6 +117,6 @@ Limits found while validating v1 (details and numbers in `docs/validation.md`):
 - Not verified: real multi-machine use, a real tailnet, macOS.
 
 Non-goals for v1: Windows, erasure coding, encryption at rest or per-user access
-control, hardlinks, ACLs, cross-node locks, pinning, snapshots, a web UI, filesystem
+control, ACLs, directory hardlinks, cross-node locks, pinning, snapshots, a web UI, filesystem
 auto-discovery, and more than about 20 nodes. The tailnet is fully trusted: every
 member can read everything.

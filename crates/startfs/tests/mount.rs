@@ -137,6 +137,21 @@ fn standard_tools_work_on_a_real_mount() {
         Path::new("hello.txt")
     );
 
+    // Hardlinks: a second name for the same file, with its link count.
+    run(&mp, "ln", &["hello.txt", "a/b/hard.txt"]);
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (first, second) = (
+            std::fs::metadata(mp.join("hello.txt")).unwrap(),
+            std::fs::metadata(mp.join("a/b/hard.txt")).unwrap(),
+        );
+        assert_eq!((first.ino(), first.nlink()), (second.ino(), 2));
+    }
+    assert_eq!(
+        std::fs::read(mp.join("a/b/hard.txt")).unwrap(),
+        b"hello world"
+    );
+
     // The editor pattern: write a temp file, fsync, rename over the original.
     std::fs::write(mp.join(".hello.txt.swp"), b"edited").unwrap();
     std::fs::rename(mp.join(".hello.txt.swp"), mp.join("hello.txt")).unwrap();

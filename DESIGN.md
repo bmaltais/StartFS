@@ -89,11 +89,12 @@ same code with a different membership scope.
     API, not from certificates. The protocol is a few message types (metadata log exchange, chunk
     fetch, chunk push, heartbeat), and the transport layer stays replaceable.
 
-16. **POSIX scope:** core subset. Supported: files, directories, rename, symlinks, permission bits,
-    mtime, basic xattrs. Ownership is mapped to the local user (uid/gid differ across machines).
-    Unsupported: hardlinks, ACLs, cross-node locks (advisory locks are local only). Conflict rules:
-    concurrent rename/delete resolved by clock order; a write into a deleted directory recreates
-    the directory path.
+16. **POSIX scope:** core subset. Supported: files, directories, rename, symlinks, hardlinks (files and
+    symlinks, not directories), permission bits, mtime, basic xattrs. Ownership is mapped to the
+    local user (uid/gid differ across machines). Unsupported: ACLs, cross-node locks (advisory
+    locks are local only). Conflict rules: concurrent rename/delete resolved by clock order; a
+    write into a deleted directory recreates the directory path; an unlink of a file's last name
+    racing a link of a new one keeps the file (link wins, see `docs/adr/0001-hardlink-names.md`).
 
 17. **Integrity:** BLAKE3 verification on every chunk read, plus a low-priority background scrub
     (default full pass every 30 days, configurable; pauses on battery power). A corrupt chunk is deleted and re-fetched from another replica via the normal repair path.
@@ -177,7 +178,7 @@ encryption-ready.
 - Windows support
 - Erasure coding
 - Encryption at rest and per-user access control
-- Hardlinks, ACLs, cross-node locks
+- ACLs, cross-node locks, directory hardlinks
 - Pinning, snapshots and versioned history
 - Web UI or tray app
 - Auto-discovery of filesystems

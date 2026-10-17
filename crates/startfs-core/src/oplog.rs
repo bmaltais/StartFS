@@ -91,15 +91,24 @@ pub enum Op {
         ino: Ino,
         base: Option<Hlc>,
         snap: Snapshot,
+        /// The names (as stamped by their `Create` or `Link`) the writer saw
+        /// live. A write newer than the removal of one of them, made without
+        /// having seen that removal, keeps that name.
+        names: Vec<Hlc>,
     },
+    /// An additional name for a file or symlink. The name is identified by
+    /// the stamp of this entry.
+    Link { ino: Ino, parent: Ino, name: String },
+    /// Move one name of an object. `slot` is the stamp of the `Create` or
+    /// `Link` that made the name (`Hlc::ZERO` for a conflict copy's own).
     Rename {
         ino: Ino,
+        slot: Hlc,
         parent: Ino,
         name: String,
     },
-    Delete {
-        ino: Ino,
-    },
+    /// Remove one name of an object; the object ends with its last name.
+    Unlink { ino: Ino, slot: Hlc },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

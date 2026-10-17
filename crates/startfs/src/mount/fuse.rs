@@ -649,9 +649,14 @@ mod tests {
         a.op_create(ROOT_INO, os("f"), 0o644, 0).unwrap();
         assert_eq!(a.op_rmdir(ROOT_INO, os("f")).unwrap_err(), Errno::ENOTDIR);
         let f = a.op_lookup(ROOT_INO, os("f")).unwrap();
-        assert!(
-            a.op_link(f.ino, ROOT_INO, os("g")).is_err(),
-            "hardlinks are unsupported"
+        let d = a.op_lookup(ROOT_INO, os("d")).unwrap();
+        assert_eq!(
+            a.op_link(d.ino, ROOT_INO, os("d2")).unwrap_err(),
+            Errno::EPERM
+        );
+        assert_eq!(
+            a.op_link(f.ino, ROOT_INO, os("d")).unwrap_err(),
+            Errno::EEXIST
         );
     }
 

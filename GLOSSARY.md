@@ -21,3 +21,11 @@ _Avoid_: Orphan directory, trash
 
 **Id range**:
 The share of the member id space that one member may hand out. Admitting a node takes its id from the admitter's range and gives it a slice of that range, so members admitting at the same time never assign the same id.
+
+**Name**:
+One directory entry of an object: a parent directory and a name. A file or symlink has one or more; a directory has exactly one. Each name has its own identity and location, so renaming or removing one leaves the others alone.
+_Avoid_: Path, alias
+
+**Link**:
+An additional name for an existing file or symlink (hardlink). The object lives on until its last name is removed. Directories cannot be linked.
+_Avoid_: Reference, alias
