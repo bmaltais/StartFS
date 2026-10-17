@@ -6,6 +6,8 @@
 use crate::chunker;
 use crate::chunkstore::{ChunkId, ChunkStore};
 use crate::clock::Clock;
+use crate::net::NodeId;
+use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
 use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -21,29 +23,42 @@ const RECORD_VERSION: u8 = 1;
 const INODES: TableDefinition<u64, &[u8]> = TableDefinition::new("inodes");
 const DIRENTS: TableDefinition<(u64, &str), u64> = TableDefinition::new("dirents");
 const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
+/// The operation log: (origin node, seq) -> encoded [`Entry`].
+const LOG: TableDefinition<(u32, u64), &[u8]> = TableDefinition::new("log");
+/// Next expected log seq per origin node.
+const FRONTIER: TableDefinition<u32, u64> = TableDefinition::new("frontier");
+/// Merge registers per object, derived from the log.
+const OBJECTS: TableDefinition<u64, &[u8]> = TableDefinition::new("objects");
+/// Unresolved conflict copies currently visible in the tree.
+const CONFLICTS: TableDefinition<u64, &[u8]> = TableDefinition::new("conflicts");
+
+mod merge;
+pub use merge::ConflictCopy;
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
+    /// This node's identity in the filesystem; stamps its log entries and inode numbers.
+    pub node: NodeId,
     /// The local user all files appear to belong to on this node.
     pub uid: u32,
     pub gid: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct ChunkRef {
+pub(crate) struct ChunkRef {
     id: ChunkId,
     len: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-enum Content {
+pub(crate) enum Content {
     /// File bytes, or the target of a symlink.
     Inline(Vec<u8>),
     Chunks(Vec<ChunkRef>),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct Inode {
+pub(crate) struct Inode {
     kind: FileKind,
     mode: u32,
     nlink: u32,
@@ -75,10 +90,14 @@ fn db<E: std::fmt::Display>(e: E) -> FsError {
     FsError::Io(e.to_string())
 }
 
-struct Tables<'a> {
+pub(crate) struct Tables<'a> {
     inodes: Table<'a, u64, &'static [u8]>,
     dirents: Table<'a, (u64, &'static str), u64>,
     counters: Table<'a, &'static str, u64>,
+    log: Table<'a, (u32, u64), &'static [u8]>,
+    frontier: Table<'a, u32, u64>,
+    objects: Table<'a, u64, &'static [u8]>,
+    conflicts: Table<'a, u64, &'static [u8]>,
 }
 
 impl Tables<'_> {
@@ -115,15 +134,16 @@ impl Tables<'_> {
             .next()
             .is_none())
     }
-    fn alloc_ino(&mut self) -> FsResult<Ino> {
+    /// Inode numbers are global: the allocating node's tag above a local counter.
+    fn alloc_ino(&mut self, node: NodeId) -> FsResult<Ino> {
         let next = self
             .counters
             .get("next_ino")
             .map_err(db)?
             .map(|g| g.value())
-            .unwrap_or(2);
+            .unwrap_or(1);
         self.counters.insert("next_ino", next + 1).map_err(db)?;
-        Ok(next)
+        Ok((u64::from(node.0 + 1) << 40) | next)
     }
 }
 
@@ -134,6 +154,8 @@ pub struct LocalFs {
     config: NodeConfig,
     /// Serialises operations on this node.
     lock: Mutex<()>,
+    /// Latest hybrid logical clock value issued or seen by this node.
+    hlc: Mutex<Hlc>,
 }
 
 fn check_name(name: &str) -> FsResult<()> {
@@ -160,8 +182,16 @@ impl LocalFs {
             clock,
             config,
             lock: Mutex::new(()),
+            hlc: Mutex::new(Hlc::ZERO),
         };
         fs.run(true, |t| {
+            let wall = t.counters.get("hlc_wall").map_err(db)?.map_or(0, |g| g.value());
+            let counter = t.counters.get("hlc_counter").map_err(db)?.map_or(0, |g| g.value());
+            *fs.hlc.lock().unwrap() = Hlc {
+                wall,
+                counter: counter as u32,
+                node: fs.config.node.0,
+            };
             if t.inodes.get(ROOT_INO).map_err(db)?.is_none() {
                 let now = fs.clock.now();
                 let root = Inode {
@@ -191,6 +221,10 @@ impl LocalFs {
                 inodes: txn.open_table(INODES).map_err(db)?,
                 dirents: txn.open_table(DIRENTS).map_err(db)?,
                 counters: txn.open_table(COUNTERS).map_err(db)?,
+                log: txn.open_table(LOG).map_err(db)?,
+                frontier: txn.open_table(FRONTIER).map_err(db)?,
+                objects: txn.open_table(OBJECTS).map_err(db)?,
+                conflicts: txn.open_table(CONFLICTS).map_err(db)?,
             };
             f(&mut t)
         };
@@ -249,12 +283,23 @@ impl LocalFs {
         if t.entry(parent, name)?.is_some() {
             return Err(FsError::Exists);
         }
-        let ino = t.alloc_ino()?;
+        let ino = t.alloc_ino(self.config.node)?;
         t.put(ino, &inode)?;
         t.dirents.insert((parent, name), ino).map_err(db)?;
         p.mtime = self.clock.now();
         p.ctime = p.mtime;
         t.put(parent, &p)?;
+        let snap = self.snapshot(&inode)?;
+        self.emit(
+            t,
+            Op::Create {
+                ino,
+                kind: inode.kind,
+                parent,
+                name: name.to_string(),
+                snap,
+            },
+        )?;
         Ok(self.attr(ino, &inode))
     }
 
@@ -443,6 +488,7 @@ impl FsOps for LocalFs {
             i.mtime = self.clock.now();
             i.ctime = i.mtime;
             t.put(ino, &i)?;
+            self.emit_set(t, ino, &i)?;
             Ok(data.len())
         })
     }

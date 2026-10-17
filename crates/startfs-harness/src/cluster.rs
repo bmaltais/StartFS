@@ -6,6 +6,7 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::{LocalFs, NodeConfig};
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -89,6 +90,7 @@ struct Node {
     fs: NodeFs,
     /// Running control server; present while the node is up.
     server: Mutex<Option<control::Server>>,
+    daemon: Mutex<Option<Arc<Daemon>>>,
     daemon_config: Config,
 }
 
@@ -97,6 +99,8 @@ pub struct Cluster {
     clock: Arc<ManualClock>,
     network: SimNetwork,
     nodes: Vec<Node>,
+    /// Whether nodes are peered; stands in for membership until `join` exists.
+    peered: AtomicBool,
 }
 
 /// 2023-11-14T22:13:20Z, an arbitrary fixed start so runs are deterministic.
@@ -117,6 +121,7 @@ impl Cluster {
             .map(|i| {
                 let dir = TempDir::new().expect("tempdir");
                 let config = NodeConfig {
+                    node: NodeId(i as u32),
                     uid: 1000 + i as u32,
                     gid: 1000 + i as u32,
                 };
@@ -128,6 +133,7 @@ impl Cluster {
                     config,
                     fs,
                     server: Mutex::new(None),
+                    daemon: Mutex::new(None),
                     daemon_config: config_for_nodes.clone(),
                 };
                 open(&node, clock.clone(), i);
@@ -138,7 +144,44 @@ impl Cluster {
             clock,
             network,
             nodes,
+            peered: AtomicBool::new(false),
         }
+    }
+
+    /// Test-only stand-in for `join`: make every node a peer of every other,
+    /// now and after any restart.
+    pub fn peer_all(&self) {
+        self.peered.store(true, Ordering::SeqCst);
+        for i in 0..self.nodes.len() {
+            self.attach(i);
+        }
+    }
+
+    fn attach(&self, i: usize) {
+        if let Some(d) = self.nodes[i].daemon.lock().unwrap().as_ref() {
+            let peers: Vec<NodeId> = (0..self.nodes.len())
+                .filter(|&j| j != i)
+                .map(|j| NodeId(j as u32))
+                .collect();
+            d.attach(Arc::new(self.transport(i)), &peers);
+        }
+    }
+
+    /// Let the live nodes exchange messages until the network goes quiet.
+    /// Time does not pass; advance the clock to trigger retries after a heal.
+    pub fn sync(&self) {
+        for _ in 0..200 {
+            let mut busy = false;
+            for n in &self.nodes {
+                if let Some(d) = n.daemon.lock().unwrap().clone() {
+                    busy |= d.tick();
+                }
+            }
+            if !busy {
+                return;
+            }
+        }
+        panic!("cluster did not settle");
     }
 
     pub fn node_count(&self) -> usize {
@@ -173,6 +216,7 @@ impl Cluster {
     /// Kill the node process: in-memory state is lost, disk state survives.
     pub fn crash(&self, i: usize) {
         self.nodes[i].server.lock().unwrap().take();
+        self.nodes[i].daemon.lock().unwrap().take();
         self.nodes[i].fs.slot.lock().unwrap().take();
         self.network.set_down(NodeId(i as u32), true);
     }
@@ -199,6 +243,9 @@ impl Cluster {
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
         open(&self.nodes[i], self.clock.clone(), i);
+        if self.peered.load(Ordering::SeqCst) {
+            self.attach(i);
+        }
         self.network.set_down(NodeId(i as u32), false);
     }
 }
@@ -219,6 +266,7 @@ fn open(node: &Node, clock: Arc<ManualClock>, index: usize) {
     .expect("open node");
     let daemon = Arc::new(daemon);
     *node.fs.slot.lock().unwrap() = Some(daemon.fs());
+    *node.daemon.lock().unwrap() = Some(daemon.clone());
     let server = control::serve(daemon, &socket_path(node)).expect("serve control socket");
     *node.server.lock().unwrap() = Some(server);
 }

@@ -7,3 +7,5 @@ pub mod daemon;
 pub mod fs;
 pub mod net;
 pub mod ops;
+pub mod oplog;
+pub mod sync;

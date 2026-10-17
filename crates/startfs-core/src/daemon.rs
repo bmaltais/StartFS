@@ -4,6 +4,8 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::control::{FilesystemInfo, NodeState, Request, Response, Status, Usage};
 use crate::fs::{LocalFs, NodeConfig};
+use crate::net::{NodeId, Transport};
+use crate::sync::Syncer;
 use crate::ops::FsOps;
 use crate::ops::FsResult;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,9 @@ pub struct Daemon {
     /// Our address on the tailnet, as resolved by the caller.
     advertise_host: String,
     identity: Mutex<Option<FilesystemInfo>>,
+    clock: Arc<dyn Clock>,
+    /// Log exchange with peers; present once a transport is attached.
+    syncer: Mutex<Option<Syncer>>,
 }
 
 impl Daemon {
@@ -31,7 +36,9 @@ impl Daemon {
             .ok()
             .and_then(|t| toml::from_str(&t).ok());
         Ok(Self {
-            fs: Arc::new(LocalFs::open(dir, node, clock)?),
+            fs: Arc::new(LocalFs::open(dir, node, clock.clone())?),
+            clock,
+            syncer: Mutex::new(None),
             identity_file,
             config,
             advertise_host,
@@ -41,6 +48,23 @@ impl Daemon {
 
     pub fn fs(&self) -> Arc<LocalFs> {
         self.fs.clone()
+    }
+
+    /// Start exchanging logs with `peers` over `transport`.
+    ///
+    /// Membership does not exist yet (`join` arrives with ticket #5), so
+    /// callers name the peers directly; the harness does this for its nodes.
+    pub fn attach(&self, transport: Arc<dyn Transport>, peers: &[NodeId]) {
+        let mut syncer = Syncer::new(self.fs.clone(), transport, self.clock.clone());
+        for p in peers {
+            syncer.add_peer(*p);
+        }
+        *self.syncer.lock().unwrap() = Some(syncer);
+    }
+
+    /// One round of background work: returns whether anything happened.
+    pub fn tick(&self) -> bool {
+        self.syncer.lock().unwrap().as_mut().is_some_and(Syncer::tick)
     }
 
     pub fn handle(&self, req: Request) -> Response {

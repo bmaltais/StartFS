@@ -5,6 +5,7 @@ use startfs_core::config::Config;
 use startfs_core::control::{self, Client, NodeState, Status};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
+use startfs_core::net::NodeId;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
@@ -102,6 +103,7 @@ fn daemon(
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
     // SAFETY: getuid/getgid have no preconditions and cannot fail.
     let node = NodeConfig {
+        node: NodeId(0), // assigned at join once membership exists
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
     };
