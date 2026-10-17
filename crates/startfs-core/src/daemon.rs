@@ -8,7 +8,8 @@ use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::control::{
-    FilesystemInfo, LogStatus, MemberStatus, NodeState, Request, Response, Staging, Status, Usage,
+    FileHealth, FilesystemInfo, LogStatus, MemberStatus, NodeState, Repair, Request, Response,
+    Staging, Status, Tier, Usage, Verdict,
 };
 use crate::fs::{ChunkSource, LocalFs, NodeConfig};
 use crate::members::{Member, Membership, Token};
@@ -78,6 +79,33 @@ fn staging_limit(config: &Config, offer: u64) -> u64 {
         u64::MAX
     } else {
         config.staging_bytes
+    }
+}
+
+/// Is the data safe right now? Copies beyond what the storage nodes allow are
+/// not expected, so a file is only a worry if it has fewer than it could have.
+fn verdict(
+    wanted: u32,
+    possible: u32,
+    unreplicated: &[FileHealth],
+    repair: Option<&Repair>,
+    members: &[MemberStatus],
+) -> Verdict {
+    let target = wanted.min(possible);
+    let behind = || unreplicated.iter().filter(|f| f.copies < target);
+    if behind().any(|f| f.tier == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0) {
+        Verdict::AtRisk
+    } else if behind().next().is_some()
+        || repair.is_some()
+        || members
+            .iter()
+            .any(|m| matches!(m.state, NodeState::Down | NodeState::Lost))
+    {
+        Verdict::Degraded
+    } else if possible < wanted {
+        Verdict::BestEffort
+    } else {
+        Verdict::Safe
     }
 }
 
@@ -740,7 +768,17 @@ impl Daemon {
                         if storage_nodes == 1 { "" } else { "s" }
                     ));
                 }
+                let verdict = filesystem.as_ref().map(|f| {
+                    verdict(
+                        f.copies,
+                        copies_possible,
+                        &unreplicated,
+                        repair.as_ref(),
+                        &members,
+                    )
+                });
                 Response::Status(Box::new(Status {
+                    verdict,
                     filesystem,
                     node_state: NodeState::Online,
                     usage: Usage {

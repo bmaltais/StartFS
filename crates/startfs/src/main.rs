@@ -261,14 +261,18 @@ fn render(s: &Status) -> String {
         NodeState::Lost => "lost",
         NodeState::Leaving => "leaving",
     };
-    let mut out = format!(
+    let mut out = String::new();
+    if let Some(v) = s.verdict {
+        out.push_str(&format!("data: {}\n", v.describe().to_uppercase()));
+    }
+    out.push_str(&format!(
         "filesystem: {} ({} copies)\nnode: {state}\nusage: {} stored in {} chunks, {} offered\n",
         fs.name,
         fs.copies,
         human(s.usage.stored_bytes),
         s.usage.chunks,
         human(s.usage.offer_bytes),
-    );
+    ));
     out.push_str(&format!(
         "redundancy: {} of {} copies possible ({} node{})\n",
         s.copies_possible,

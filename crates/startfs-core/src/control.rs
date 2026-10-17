@@ -169,8 +169,34 @@ pub struct LogStatus {
     pub objects: u64,
 }
 
+/// The overall answer to "is my data safe right now?", worst condition first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    /// Every file has all the copies that can exist and every member is reachable.
+    Safe,
+    /// Redundancy is reduced: a member is unreachable or copies are still being made.
+    Degraded,
+    /// Some data exists as a single copy.
+    AtRisk,
+    /// Fewer storage nodes than N: everything possible is done, but N copies cannot exist.
+    BestEffort,
+}
+
+impl Verdict {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Verdict::Safe => "safe",
+            Verdict::Degraded => "degraded",
+            Verdict::AtRisk => "at risk",
+            Verdict::BestEffort => "best-effort",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
+    /// `None` until a filesystem is created or joined.
+    pub verdict: Option<Verdict>,
     /// `None` until a filesystem is created or joined.
     pub filesystem: Option<FilesystemInfo>,
     pub node_state: NodeState,
