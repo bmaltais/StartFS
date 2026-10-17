@@ -3,6 +3,7 @@
 //! data is needed.
 
 use crate::chunkstore::ChunkId;
+use crate::control::{ScrubState, ScrubStatus};
 use crate::fs::LocalFs;
 use crate::ops::Nanos;
 use std::collections::VecDeque;
@@ -41,8 +42,35 @@ impl Scrubber {
         }
     }
 
+    pub fn status(
+        &self,
+        now: Nanos,
+        period: Duration,
+        on_battery: bool,
+        healing: u32,
+    ) -> ScrubStatus {
+        let running = self.state.lock().unwrap().queue.is_some();
+        let last_pass = self.fs.scrub_last_done();
+        let next_pass = last_pass.map(|t| t + period.as_nanos() as u64);
+        let due = next_pass.is_some_and(|t| t <= now);
+        let state = match (running || due, on_battery) {
+            (true, true) => ScrubState::PausedOnBattery,
+            _ if running => ScrubState::Running,
+            _ => ScrubState::Idle,
+        };
+        ScrubStatus {
+            state,
+            last_pass,
+            next_pass,
+            healing,
+        }
+    }
+
     /// Check a few more replicas if a pass is due or under way.
-    pub fn step(&self, now: Nanos, period: Duration) -> Step {
+    pub fn step(&self, now: Nanos, period: Duration, on_battery: bool) -> Step {
+        if on_battery {
+            return Step::default();
+        }
         let mut st = self.state.lock().unwrap();
         if st.queue.is_none() {
             match self.fs.scrub_last_done() {

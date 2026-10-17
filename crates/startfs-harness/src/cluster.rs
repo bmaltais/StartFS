@@ -5,6 +5,7 @@ use startfs_core::control::{self, Client};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::{LocalFs, NodeConfig};
 use startfs_core::net::NodeId;
+use startfs_core::power::ManualPower;
 use startfs_core::ops::*;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -91,6 +92,7 @@ struct Node {
     server: Mutex<Option<control::Server>>,
     daemon: Mutex<Option<Arc<Daemon>>>,
     daemon_config: Config,
+    power: Arc<ManualPower>,
 }
 
 /// N real nodes sharing one injectable clock and one simulated network.
@@ -129,6 +131,7 @@ impl Cluster {
                 server: Mutex::new(None),
                 daemon: Mutex::new(None),
                 daemon_config: config_for_nodes.clone(),
+                power: Arc::new(ManualPower::default()),
             })
             .collect();
         let nodes = Arc::new(nodes);
@@ -181,6 +184,11 @@ impl Cluster {
 
     pub fn advance(&self, by: Duration) {
         self.clock.advance(by);
+    }
+
+    /// Plug the node's machine in or unplug it.
+    pub fn set_on_battery(&self, i: usize, on: bool) {
+        self.nodes[i].power.set_on_battery(on);
     }
 
     /// Kill the node process: in-memory state is lost, disk state survives.
@@ -272,6 +280,7 @@ fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<M
         host,
     )
     .expect("open node");
+    daemon.set_power_source(node.power.clone());
     daemon.attach(Arc::new(network.transport(NodeId(index as u32))));
     // A request that waits for a peer lets the whole simulated cluster run.
     let cluster: Weak<Vec<Node>> = Arc::downgrade(nodes);

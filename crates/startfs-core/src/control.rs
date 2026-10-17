@@ -4,6 +4,7 @@
 use crate::cache::CacheStats;
 use crate::daemon::Daemon;
 use crate::fs::ConflictCopy;
+use crate::ops::Nanos;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -134,6 +135,28 @@ pub struct Repair {
     pub degraded: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScrubState {
+    /// Nothing to do until the next pass is due.
+    Idle,
+    /// A pass is under way.
+    Running,
+    /// A pass is due or under way, but the machine is on battery power.
+    PausedOnBattery,
+}
+
+/// The background scrub that re-reads every replica to catch silent corruption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrubStatus {
+    pub state: ScrubState,
+    /// When the last full pass finished.
+    pub last_pass: Option<Nanos>,
+    /// When the next full pass starts.
+    pub next_pass: Option<Nanos>,
+    /// Replicas found corrupt and still being re-fetched from other copies.
+    pub healing: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// `None` until a filesystem is created or joined.
@@ -156,6 +179,7 @@ pub struct Status {
     pub unreplicated: Vec<FileHealth>,
     /// Re-replication under way on this node, if any.
     pub repair: Option<Repair>,
+    pub scrub: ScrubStatus,
     /// Things the user should know: redundancy that cannot be met, full nodes.
     pub warnings: Vec<String>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).

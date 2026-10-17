@@ -11,6 +11,7 @@ pub mod net;
 pub mod oplog;
 pub mod ops;
 pub mod placement;
+pub mod power;
 pub mod protocol;
 pub mod replication;
 pub mod scrub;

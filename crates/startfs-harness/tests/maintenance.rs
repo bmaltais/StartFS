@@ -2,6 +2,7 @@
 //! driven through FsOps and the control interface on a simulated cluster
 //! with a manual clock.
 
+use startfs_core::control::ScrubState;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_harness::Cluster;
@@ -158,6 +159,33 @@ fn scrub_finds_a_corrupt_replica_and_heals_it_from_another_copy() {
     pass(&c, 31 * DAY, DAY);
 
     // Cut node 0 off: only a healed local replica can still serve the file.
+    c.network()
+        .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
+    assert_eq!(c.fs(0).read(ino, 0, u32::MAX).unwrap(), data);
+}
+
+#[test]
+fn scrub_pauses_on_battery_power_and_carries_on_when_plugged_in() {
+    let c = cluster(3, 3);
+    let data = noise(20 * 1024, 10);
+    let ino = put(&c.fs(0), "precious", &data);
+    c.sync();
+    c.corrupt_chunks(0);
+
+    c.set_on_battery(0, true);
+    pass(&c, 31 * DAY, DAY);
+    assert_eq!(
+        c.control(0).status().unwrap().scrub.state,
+        ScrubState::PausedOnBattery
+    );
+    c.network()
+        .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
+    assert!(c.fs(0).read(ino, 0, u32::MAX).is_err(), "scrubbed on battery");
+    c.network().heal();
+
+    c.set_on_battery(0, false);
+    pass(&c, HOUR, Duration::from_secs(600));
+    assert_eq!(c.control(0).status().unwrap().scrub.state, ScrubState::Idle);
     c.network()
         .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
     assert_eq!(c.fs(0).read(ino, 0, u32::MAX).unwrap(), data);

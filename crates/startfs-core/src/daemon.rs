@@ -13,6 +13,7 @@ use crate::control::{
 use crate::fs::{ChunkSource, LocalFs, NodeConfig};
 use crate::members::{Member, Membership, Token};
 use crate::net::{NodeId, Transport};
+use crate::power::{MainsPower, PowerSource};
 use crate::ops::Nanos;
 use crate::ops::{FsOps, FsResult};
 use crate::protocol::{Message, Replica};
@@ -63,6 +64,7 @@ pub struct Daemon {
     /// Pushes new chunks to the nodes placement chose and tracks their copies.
     replicator: Replicator,
     scrubber: Scrubber,
+    power: Mutex<Arc<dyn PowerSource>>,
 }
 
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
@@ -98,6 +100,7 @@ impl Daemon {
             Self {
                 replicator: Replicator::new(fs.clone()),
                 scrubber: Scrubber::new(fs.clone()),
+                power: Mutex::new(Arc::new(MainsPower)),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -120,6 +123,15 @@ impl Daemon {
 
     pub fn fs(&self) -> Arc<LocalFs> {
         self.fs.clone()
+    }
+
+    /// Where to learn whether the machine is on battery power.
+    pub fn set_power_source(&self, power: Arc<dyn PowerSource>) {
+        *self.power.lock().unwrap() = power;
+    }
+
+    fn on_battery(&self) -> bool {
+        self.power.lock().unwrap().on_battery()
     }
 
     pub fn set_wait_hook(&self, hook: WaitHook) {
@@ -193,7 +205,8 @@ impl Daemon {
     /// fetched afresh from another replica holder.
     fn scrub(&self) -> bool {
         let period = Duration::from_secs(self.config.scrub_period_secs);
-        let step = self.scrubber.step(self.clock.now(), period);
+        let step = self.scrubber
+            .step(self.clock.now(), period, self.on_battery());
         for id in step.corrupt {
             self.fs.drop_replica(&id);
             self.replicator.heal(id);
@@ -670,6 +683,12 @@ impl Daemon {
                     usable_bytes,
                     unreplicated,
                     repair,
+                    scrub: self.scrubber.status(
+                        now,
+                        Duration::from_secs(self.config.scrub_period_secs),
+                        self.on_battery(),
+                        self.replicator.healing(),
+                    ),
                     warnings,
                     conflicts: match self.fs.conflicts() {
                         Ok(c) => c,
