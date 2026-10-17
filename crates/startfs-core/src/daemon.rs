@@ -48,8 +48,11 @@ pub struct Daemon {
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
-    chunk_replies: Mutex<HashMap<(NodeId, ChunkId), Option<Vec<u8>>>>,
+    chunk_replies: Mutex<HashMap<(NodeId, ChunkId), ChunkAnswer>>,
 }
+
+/// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
+type ChunkAnswer = Option<Vec<u8>>;
 
 /// Fetches chunks from peers on behalf of the filesystem.
 struct PeerChunks(Weak<Daemon>);

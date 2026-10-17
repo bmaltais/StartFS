@@ -338,10 +338,10 @@ fn cache_eviction_never_touches_replica_storage() {
 
     // Reading everything through a cache that holds one file churns it.
     for round in 0..2 {
-        for i in 0..3 {
+        for (i, expected) in files.iter().enumerate() {
             let ino = c.fs(1).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
             let got = c.fs(1).read(ino, 0, u32::MAX).unwrap();
-            assert_eq!(got, files[i], "round {round}");
+            assert_eq!(&got, expected, "round {round}");
         }
     }
     // The reader stores no replicas; the author's replicas are untouched.

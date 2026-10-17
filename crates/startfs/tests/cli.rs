@@ -13,6 +13,15 @@ fn startfs(data: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn stdout(out: &Output) -> String {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout.clone()).unwrap()
+}
+
 struct Daemon(Child);
 impl Drop for Daemon {
     fn drop(&mut self) {
@@ -21,17 +30,8 @@ impl Drop for Daemon {
     }
 }
 
-#[test]
-fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path();
-
-    // No daemon yet: a clear failure, not a hang or panic.
-    let out = startfs(data, &["status"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot reach daemon"));
-
-    let _daemon = Daemon(
+fn start_daemon(data: &Path) -> Daemon {
+    let daemon = Daemon(
         Command::new(env!("CARGO_BIN_EXE_startfs"))
             .arg("--data-dir")
             .arg(data)
@@ -47,20 +47,56 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    daemon
+}
 
+#[test]
+fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // No daemon yet: a clear failure, not a hang or panic.
+    let out = startfs(data, &["status"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot reach daemon"));
+
+    let _daemon = start_daemon(data);
     let out = startfs(data, &["create", "--name", "home", "--copies", "3"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let token = String::from_utf8(out.stdout).unwrap();
+    let token = stdout(&out);
     assert!(token.trim().starts_with("startfs1-"), "{token}");
 
-    let out = startfs(data, &["status"]);
-    assert!(out.status.success());
-    let text = String::from_utf8(out.stdout).unwrap();
+    let text = stdout(&startfs(data, &["status"]));
     for needle in ["home", "3 copies", "online", "1 of 3"] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
+}
+
+#[test]
+fn cli_issues_and_revokes_tokens_sets_the_offer_and_lists_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+
+    // Nothing to issue before a filesystem exists.
+    assert!(!startfs(data, &["token"]).status.success());
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "2"],
+    ));
+    let token = stdout(&startfs(data, &["token"])).trim().to_string();
+    assert!(token.starts_with("startfs1-"), "{token}");
+    stdout(&startfs(data, &["revoke", &token]));
+
+    stdout(&startfs(data, &["config", "--offer", "50G"]));
+    let text = stdout(&startfs(data, &["status"]));
+    assert!(text.contains("members:"), "{text}");
+    assert!(
+        text.contains("this node") && text.contains("50.0 GiB"),
+        "{text}"
+    );
+
+    // A bad token is refused with a clear message.
+    let out = startfs(data, &["join", "not-a-token"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not a StartFS join token"));
 }

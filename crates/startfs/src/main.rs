@@ -15,7 +15,11 @@ const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
 commands:
   daemon                              run the daemon
   create --name NAME --copies N       create a filesystem and print its join token
-  status                              show the state of this node's filesystem";
+  status                              show the state of this node's filesystem
+  join TOKEN [--offer SIZE]           join the filesystem a token names
+  token                               print a new join token
+  revoke TOKEN                        make a join token stop working
+  config [--offer SIZE]               change this node's settings (sizes like 500M, 2T)";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -74,6 +78,27 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             println!("{}", Client::new(socket).create(&name, copies)?);
             Ok(())
         }
+        "join" => {
+            let token = rest.first().ok_or(USAGE)?;
+            let offer = optional_size(rest, "--offer")?;
+            Client::new(socket).join(token, offer)?;
+            println!("joined");
+            Ok(())
+        }
+        "token" => {
+            println!("{}", Client::new(socket).new_token()?);
+            Ok(())
+        }
+        "revoke" => {
+            Client::new(socket).revoke(rest.first().ok_or(USAGE)?)?;
+            Ok(())
+        }
+        "config" => {
+            if let Some(bytes) = optional_size(rest, "--offer")? {
+                Client::new(socket).set_offer(bytes)?;
+            }
+            Ok(())
+        }
         "status" => {
             print!("{}", render(&Client::new(socket).status()?));
             Ok(())
@@ -90,6 +115,37 @@ fn flag_value(args: &[String], name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing {name}\n{USAGE}"))
 }
 
+/// A size such as `500M` or `2T` (powers of 1024), or plain bytes.
+fn parse_size(text: &str) -> Result<u64, String> {
+    let bad = || format!("not a size: {text}");
+    let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => text.split_at(i),
+        None => (text, ""),
+    };
+    let shift = match unit.to_ascii_uppercase().as_str() {
+        "" | "B" => 0,
+        "K" | "KB" | "KIB" => 10,
+        "M" | "MB" | "MIB" => 20,
+        "G" | "GB" | "GIB" => 30,
+        "T" | "TB" | "TIB" => 40,
+        _ => return Err(bad()),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(1 << shift))
+        .ok_or_else(bad)
+}
+
+fn optional_size(args: &[String], name: &str) -> Result<Option<u64>, String> {
+    match args.iter().position(|a| a == name) {
+        None => Ok(None),
+        Some(i) => {
+            parse_size(args.get(i + 1).ok_or(format!("missing value for {name}"))?).map(Some)
+        }
+    }
+}
+
 fn daemon(
     data_dir: PathBuf,
     config_file: &std::path::Path,
@@ -103,7 +159,7 @@ fn daemon(
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
     // SAFETY: getuid/getgid have no preconditions and cannot fail.
     let node = NodeConfig {
-        node: NodeId(0), // assigned at join once membership exists
+        node: NodeId(0), // `create` keeps 0; `join` assigns the real one
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
     };
@@ -156,6 +212,26 @@ fn render(s: &Status) -> String {
         s.nodes,
         if s.nodes == 1 { "" } else { "s" }
     ));
+    out.push_str(&format!(
+        "cache: {} used of {}\n",
+        human(s.cache.used_bytes),
+        human(s.cache.capacity_bytes)
+    ));
+    out.push_str("members:\n");
+    for m in &s.members {
+        let state = match m.state {
+            NodeState::Online => "up",
+            NodeState::Down => "down",
+        };
+        out.push_str(&format!(
+            "  {:<3} {:<22} {:<5} {} offered{}\n",
+            m.id,
+            m.addr,
+            state,
+            human(m.offer_bytes),
+            if m.is_self { "  (this node)" } else { "" }
+        ));
+    }
     if !s.conflicts.is_empty() {
         out.push_str(&format!(
             "conflicts: {} (delete a copy to resolve it)\n",
