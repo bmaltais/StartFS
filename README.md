@@ -17,6 +17,10 @@ running on every machine (peers are identified through `tailscaled`).
 
 ### Linux
 
+Prebuilt x86_64 and aarch64 tarballs are attached to each
+[release](https://github.com/bmaltais/startfs/releases); they need `fuse3` installed.
+To build from source instead:
+
 ```sh
 sudo pacman -S fuse3          # or: apt install fuse3 / dnf install fuse3
 cargo build --release
