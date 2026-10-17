@@ -10,15 +10,17 @@ fn create_prints_a_token_with_filesystem_id_and_bootstrap_address() {
     let token = c.control(0).create("home", 3).unwrap();
     assert!(token.starts_with("startfs1-"), "{token}");
     assert!(token.ends_with("@100.64.0.1:7600"), "{token}");
-    // Filesystem id is 16 bytes in hex.
-    let id = token
+    // Filesystem id is 16 bytes in hex, followed by the token's own id.
+    let ids = token
         .strip_prefix("startfs1-")
         .unwrap()
         .split('@')
         .next()
         .unwrap();
+    let (id, token_id) = ids.split_once('.').unwrap();
     assert_eq!(id.len(), 32);
     assert!(id.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert!(!token_id.is_empty());
 }
 
 #[test]

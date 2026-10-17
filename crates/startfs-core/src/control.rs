@@ -16,6 +16,11 @@ use std::time::Duration;
 pub enum Request {
     Create { name: String, copies: u32 },
     Status,
+    /// Join the filesystem named by a token, optionally setting our space offer.
+    Join {
+        token: String,
+        offer_bytes: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +61,7 @@ pub struct Status {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     Created { token: String },
+    Joined,
     Status(Status),
     Error(String),
 }
@@ -159,6 +165,18 @@ impl Client {
             copies,
         })? {
             Response::Created { token } => Ok(token),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Join the filesystem a token names.
+    pub fn join(&self, token: &str, offer_bytes: Option<u64>) -> Result<(), String> {
+        match self.call(&Request::Join {
+            token: token.into(),
+            offer_bytes,
+        })? {
+            Response::Joined => Ok(()),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
         }

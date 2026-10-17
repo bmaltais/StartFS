@@ -6,8 +6,7 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::{LocalFs, NodeConfig};
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -98,9 +97,7 @@ struct Node {
 pub struct Cluster {
     clock: Arc<ManualClock>,
     network: SimNetwork,
-    nodes: Vec<Node>,
-    /// Whether nodes are peered; stands in for membership until `join` exists.
-    peered: AtomicBool,
+    nodes: Arc<Vec<Node>>,
 }
 
 /// 2023-11-14T22:13:20Z, an arbitrary fixed start so runs are deterministic.
@@ -117,53 +114,32 @@ impl Cluster {
         let config_for_nodes = Config::parse(config_toml).expect("valid config");
         let clock = Arc::new(ManualClock::new(START));
         let network = SimNetwork::new(clock.clone());
-        let nodes = (0..n)
-            .map(|i| {
-                let dir = TempDir::new().expect("tempdir");
-                let config = NodeConfig {
-                    node: NodeId(i as u32),
+        let nodes: Vec<Node> = (0..n)
+            .map(|i| Node {
+                dir: TempDir::new().expect("tempdir"),
+                // Every node starts as member 0, as the CLI does; `join` assigns real ids.
+                config: NodeConfig {
+                    node: NodeId(0),
                     uid: 1000 + i as u32,
                     gid: 1000 + i as u32,
-                };
-                let fs = NodeFs {
+                },
+                fs: NodeFs {
                     slot: Arc::new(Mutex::new(None)),
-                };
-                let node = Node {
-                    dir,
-                    config,
-                    fs,
-                    server: Mutex::new(None),
-                    daemon: Mutex::new(None),
-                    daemon_config: config_for_nodes.clone(),
-                };
-                open(&node, clock.clone(), i);
-                node
+                },
+                server: Mutex::new(None),
+                daemon: Mutex::new(None),
+                daemon_config: config_for_nodes.clone(),
             })
             .collect();
+        let nodes = Arc::new(nodes);
+        for i in 0..n {
+            network.register(&address(i, &config_for_nodes), NodeId(i as u32));
+            open(&nodes, i, &network, clock.clone());
+        }
         Self {
             clock,
             network,
             nodes,
-            peered: AtomicBool::new(false),
-        }
-    }
-
-    /// Test-only stand-in for `join`: make every node a peer of every other,
-    /// now and after any restart.
-    pub fn peer_all(&self) {
-        self.peered.store(true, Ordering::SeqCst);
-        for i in 0..self.nodes.len() {
-            self.attach(i);
-        }
-    }
-
-    fn attach(&self, i: usize) {
-        if let Some(d) = self.nodes[i].daemon.lock().unwrap().as_ref() {
-            let peers: Vec<NodeId> = (0..self.nodes.len())
-                .filter(|&j| j != i)
-                .map(|j| NodeId(j as u32))
-                .collect();
-            d.attach(Arc::new(self.transport(i)), &peers);
         }
     }
 
@@ -171,13 +147,7 @@ impl Cluster {
     /// Time does not pass; advance the clock to trigger retries after a heal.
     pub fn sync(&self) {
         for _ in 0..200 {
-            let mut busy = false;
-            for n in &self.nodes {
-                if let Some(d) = n.daemon.lock().unwrap().clone() {
-                    busy |= d.tick();
-                }
-            }
-            if !busy {
+            if !pump(&self.nodes) {
                 return;
             }
         }
@@ -242,10 +212,7 @@ impl Cluster {
 
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
-        open(&self.nodes[i], self.clock.clone(), i);
-        if self.peered.load(Ordering::SeqCst) {
-            self.attach(i);
-        }
+        open(&self.nodes, i, &self.network, self.clock.clone());
         self.network.set_down(NodeId(i as u32), false);
     }
 }
@@ -254,7 +221,25 @@ fn socket_path(node: &Node) -> std::path::PathBuf {
     node.dir.path().join("control.sock")
 }
 
-fn open(node: &Node, clock: Arc<ManualClock>, index: usize) {
+fn address(index: usize, config: &Config) -> String {
+    format!("100.64.0.{}:{}", index + 1, config.port)
+}
+
+/// One round of background work on every live node; whether anything happened.
+fn pump(nodes: &[Node]) -> bool {
+    let mut busy = false;
+    for n in nodes {
+        let daemon = n.daemon.lock().unwrap().clone();
+        if let Some(d) = daemon {
+            busy |= d.tick();
+        }
+    }
+    busy
+}
+
+/// Start node `index` from its on-disk state and connect it to the network.
+fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<ManualClock>) {
+    let node = &nodes[index];
     let host = format!("100.64.0.{}", index + 1);
     let daemon = Daemon::open(
         node.dir.path(),
@@ -264,6 +249,14 @@ fn open(node: &Node, clock: Arc<ManualClock>, index: usize) {
         host,
     )
     .expect("open node");
+    daemon.attach(Arc::new(network.transport(NodeId(index as u32))));
+    // A request that waits for a peer lets the whole simulated cluster run.
+    let cluster: Weak<Vec<Node>> = Arc::downgrade(nodes);
+    daemon.set_wait_hook(Arc::new(move || {
+        if let Some(nodes) = cluster.upgrade() {
+            pump(&nodes);
+        }
+    }));
     let daemon = Arc::new(daemon);
     *node.fs.slot.lock().unwrap() = Some(daemon.fs());
     *node.daemon.lock().unwrap() = Some(daemon.clone());

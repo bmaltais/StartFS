@@ -173,7 +173,7 @@ impl LocalFs {
 
     /// Append a local operation to this node's log.
     pub(super) fn emit(&self, t: &mut Tables<'_>, op: Op) -> FsResult<()> {
-        let origin = self.config.node.0;
+        let origin = self.node().0;
         let hlc = {
             let mut h = self.hlc.lock().unwrap();
             *h = Hlc::tick(*h, self.clock.now(), origin);

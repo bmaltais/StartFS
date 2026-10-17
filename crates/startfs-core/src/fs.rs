@@ -13,6 +13,7 @@ use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Files up to this size live inside their metadata record, with no chunk.
@@ -37,7 +38,8 @@ pub use merge::ConflictCopy;
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
-    /// This node's identity in the filesystem; stamps its log entries and inode numbers.
+    /// The member id that stamps this node's log entries and inode numbers,
+    /// until `join` assigns a real one.
     pub node: NodeId,
     /// The local user all files appear to belong to on this node.
     pub uid: u32,
@@ -152,6 +154,8 @@ pub struct LocalFs {
     chunks: ChunkStore,
     clock: Arc<dyn Clock>,
     config: NodeConfig,
+    /// This node's member id; changes once, when it joins a filesystem.
+    node: AtomicU32,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -180,6 +184,7 @@ impl LocalFs {
             db: database,
             chunks: ChunkStore::open(&dir.join("chunks"))?,
             clock,
+            node: AtomicU32::new(config.node.0),
             config,
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
@@ -198,7 +203,7 @@ impl LocalFs {
             *fs.hlc.lock().unwrap() = Hlc {
                 wall,
                 counter: counter as u32,
-                node: fs.config.node.0,
+                node: fs.node().0,
             };
             if t.inodes.get(ROOT_INO).map_err(db)?.is_none() {
                 let now = fs.clock.now();
@@ -218,6 +223,17 @@ impl LocalFs {
             Ok(())
         })?;
         Ok(fs)
+    }
+
+    pub fn node(&self) -> NodeId {
+        NodeId(self.node.load(Ordering::SeqCst))
+    }
+
+    /// Take the member id assigned at join. Only valid before the node has
+    /// written anything, since ids stamp log entries and inode numbers.
+    pub fn set_node(&self, node: NodeId) {
+        self.node.store(node.0, Ordering::SeqCst);
+        self.hlc.lock().unwrap().node = node.0;
     }
 
     /// Run `f` in one transaction; read-only runs are rolled back.
@@ -291,7 +307,7 @@ impl LocalFs {
         if t.entry(parent, name)?.is_some() {
             return Err(FsError::Exists);
         }
-        let ino = t.alloc_ino(self.config.node)?;
+        let ino = t.alloc_ino(self.node())?;
         t.put(ino, &inode)?;
         t.dirents.insert((parent, name), ino).map_err(db)?;
         p.mtime = self.clock.now();

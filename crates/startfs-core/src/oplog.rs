@@ -110,22 +110,3 @@ pub struct Entry {
 
 /// How much of each node's log a peer holds: next expected seq per origin.
 pub type Frontier = BTreeMap<u32, u64>;
-
-/// The whole wire protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Message {
-    /// "This is what I have; send me what I lack."
-    Hello(Frontier),
-    /// Log entries, in per-origin order.
-    Entries(Vec<Entry>),
-}
-
-impl Message {
-    pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("message serialises")
-    }
-
-    pub fn decode(raw: &[u8]) -> Option<Message> {
-        postcard::from_bytes(raw).ok()
-    }
-}

@@ -9,3 +9,5 @@ pub mod net;
 pub mod oplog;
 pub mod ops;
 pub mod sync;
+pub mod members;
+pub mod protocol;

@@ -10,8 +10,9 @@ use std::time::Duration;
 /// Two nodes of one filesystem, peered and idle.
 fn pair() -> Cluster {
     let c = Cluster::start(2);
-    c.control(0).create("home", 2).unwrap();
-    c.peer_all();
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    c.sync();
     c
 }
 
@@ -378,8 +379,10 @@ fn a_node_that_was_down_catches_up_when_it_restarts() {
 fn three_nodes_converge_without_quorum_even_with_one_cut_off() {
     let (a, b, z) = (NodeId(0), NodeId(1), NodeId(2));
     let c = Cluster::start(3);
-    c.control(0).create("home", 3).unwrap();
-    c.peer_all();
+    let token = c.control(0).create("home", 3).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    c.control(2).join(&token, None).unwrap();
+    c.sync();
     // Node 2 is isolated: the other two still accept writes and agree.
     c.network().partition(&[&[a, b], &[z]]);
     c.fs(0).create(ROOT_INO, "one", 0o644).unwrap();
@@ -405,8 +408,10 @@ fn three_nodes_converge_without_quorum_even_with_one_cut_off() {
 #[test]
 fn entries_are_relayed_between_nodes_that_cannot_reach_each_other() {
     let c = Cluster::start(3);
-    c.control(0).create("home", 3).unwrap();
-    c.peer_all();
+    let token = c.control(0).create("home", 3).unwrap();
+    c.control(1).join(&token, None).unwrap();
+    c.control(2).join(&token, None).unwrap();
+    c.sync();
     c.network().set_drop(NodeId(0), NodeId(2), true);
     c.fs(0).create(ROOT_INO, "relayed", 0o644).unwrap();
     c.sync();

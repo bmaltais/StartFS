@@ -8,7 +8,8 @@
 use crate::clock::Clock;
 use crate::fs::LocalFs;
 use crate::net::{NodeId, Transport};
-use crate::oplog::{Frontier, Message};
+use crate::oplog::Frontier;
+use crate::protocol::Message;
 use crate::ops::Nanos;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,35 +42,46 @@ impl Syncer {
         }
     }
 
-    pub fn add_peer(&mut self, peer: NodeId) {
-        self.peers.entry(peer).or_default();
+    /// Exchange logs with exactly these peers.
+    pub fn set_peers(&mut self, peers: &[NodeId]) {
+        self.peers.retain(|id, _| peers.contains(id));
+        for p in peers {
+            self.peers.entry(*p).or_default();
+        }
     }
 
     fn send(&self, to: NodeId, msg: &Message) {
         self.transport.send(to, msg.encode());
     }
 
-    /// Handle arrived messages and send what is due. Returns whether anything happened.
-    pub fn tick(&mut self) -> bool {
-        let mut busy = false;
-        while let Some((from, raw)) = self.transport.recv() {
-            busy = true;
-            if !self.peers.contains_key(&from) {
-                continue;
-            }
-            match Message::decode(&raw) {
-                Some(Message::Hello(f)) => {
-                    self.peers.get_mut(&from).expect("known peer").known = Some(f);
-                }
-                Some(Message::Entries(entries)) => {
-                    let _ = self.fs.apply_remote(&entries);
-                    if let Ok(f) = self.fs.frontier() {
-                        self.send(from, &Message::Hello(f));
-                    }
-                }
-                None => {}
-            }
+    /// Handle a log-exchange message from `from`; ignored unless `from` is a peer.
+    pub fn handle(&mut self, from: NodeId, msg: Message) {
+        if !self.peers.contains_key(&from) {
+            return;
         }
+        match msg {
+            Message::Hello(f) => {
+                let peer = self.peers.get_mut(&from).expect("known peer");
+                let first = peer.known.is_none();
+                peer.known = Some(f);
+                if first && let Ok(f) = self.fs.frontier() {
+                    // The peer may not have heard from us yet: say what we hold.
+                    self.send(from, &Message::Hello(f));
+                }
+            }
+            Message::Entries(entries) => {
+                let _ = self.fs.apply_remote(&entries);
+                if let Ok(f) = self.fs.frontier() {
+                    self.send(from, &Message::Hello(f));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Send what is due. Returns whether anything happened.
+    pub fn poll(&mut self) -> bool {
+        let mut busy = false;
         let now = self.clock.now();
         let ids: Vec<NodeId> = self.peers.keys().copied().collect();
         for id in ids {

@@ -21,6 +21,8 @@ struct State {
     dropped: HashSet<(NodeId, NodeId)>,
     delays: HashMap<(NodeId, NodeId), Duration>,
     down: HashSet<NodeId>,
+    /// `host:port` addresses nodes listen on.
+    addrs: HashMap<String, NodeId>,
 }
 
 impl State {
@@ -94,6 +96,11 @@ impl SimNetwork {
         s.delays.insert((b, a), delay);
     }
 
+    /// Make `node` reachable at a `host:port` address, as join tokens name it.
+    pub fn register(&self, addr: &str, node: NodeId) {
+        self.state.lock().unwrap().addrs.insert(addr.into(), node);
+    }
+
     pub(crate) fn set_down(&self, node: NodeId, down: bool) {
         let mut s = self.state.lock().unwrap();
         if down {
@@ -124,6 +131,14 @@ impl Transport for SimTransport {
             to,
             msg,
         });
+    }
+
+    fn local(&self) -> NodeId {
+        self.node
+    }
+
+    fn resolve(&self, addr: &str) -> Option<NodeId> {
+        self.net.state.lock().unwrap().addrs.get(addr).copied()
     }
 
     fn recv(&self) -> Option<(NodeId, Vec<u8>)> {
