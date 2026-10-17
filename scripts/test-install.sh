@@ -61,8 +61,13 @@ expect "enable --now startfs.service" "$work/state/calls"
 expect "loginctl enable-linger" "$work/state/calls"
 expect "startfs service is running" "$work/out"
 echo "ok   fresh install enables and starts the service"
+# The last lines are what a user reads before pasting the next command, so the PATH
+# fix has to be there, not buried above the service messages.
+tail -n 3 "$work/out" | grep -q 'export PATH="'"$HOME"'/.local/bin:\$PATH"' || fail "no PATH fix at the end"
+echo "ok   a missing PATH entry comes with the command that fixes it, as the last thing printed"
 
-install_version v1.0.1 || fail "upgrade"
+PATH=$HOME/.local/bin:$PATH install_version v1.0.1 || fail "upgrade"
+refute "not on your PATH" "$work/out"
 expect "stop startfs.service" "$work/state/calls"
 expect "enable --now startfs.service" "$work/state/calls"
 expect "Upgraded 1.0.0 -> 1.0.1" "$work/out"

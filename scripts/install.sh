@@ -144,7 +144,8 @@ fi
 install -m755 "$new" "$bin.new"
 mv -f "$bin.new" "$bin"
 say "Installed $("$bin" --version) to $bin"
-case ":$PATH:" in *":$install_dir:"*) ;; *) say "Note: $install_dir is not on your PATH." ;; esac
+path_missing=
+case ":$PATH:" in *":$install_dir:"*) ;; *) path_missing=1 ;; esac
 
 if [ "$os" = linux ]; then
   mkdir -p "$(dirname "$unit")"
@@ -187,4 +188,10 @@ else
   say "launchd agent (com.startfs.daemon.plist) is in the release tarball and is not set up for you."
 fi
 [ -n "$installed" ] && say "Upgraded $installed -> ${version#v}. Check the cluster with: startfs status"
+# Last, so it is the thing read before the next command (`startfs join ...`) is pasted.
+if [ -n "$path_missing" ]; then
+  say "Note: $install_dir is not on your PATH, so 'startfs' will not be found yet. In this shell, run:"
+  say "  export PATH=\"$install_dir:\$PATH\""
+  say "To keep it, add that line to ~/.profile (Ubuntu and Debian add ~/.local/bin by themselves at your next login)."
+fi
 exit 0

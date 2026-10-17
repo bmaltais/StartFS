@@ -43,9 +43,10 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
    ```
 
    Set `STARTFS_VERSION=v1.0.3` to pin a release, `INSTALL_DIR` to change the
-   target, or `STARTFS_NO_SERVICE=1` to install the unit without starting it. Make sure `~/.local/bin` is on your `PATH` (it is on Omarchy; on Ubuntu and
-   Fedora, log out and in again after the directory is first created). `startfs --version`
-   shows what is installed.
+   target, or `STARTFS_NO_SERVICE=1` to install the unit without starting it. If `~/.local/bin` is not on your `PATH` (it is on Omarchy; on Ubuntu and
+   Fedora it is only after you log out and in again), the installer ends by printing the
+   `export PATH=...` line to run in the current shell. `startfs --version` shows what is
+   installed.
 
 The service is the only step after the install: check it with
 `systemctl --user status startfs`.
