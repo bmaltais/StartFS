@@ -51,8 +51,7 @@ same code with a different membership scope.
    `startfs join <token>` on another machine contacts the bootstrap peer, and existing members admit
    the new node. No auto-discovery in v1. Member ids need no coordination: each member owns an
    id range and an admission takes the new id from it and gives the node a slice for its own
-   admissions, so concurrent admissions through different members cannot collide. Filesystems
-   created before id ranges existed cannot admit new nodes until they are migrated (not done).
+   admissions, so concurrent admissions through different members cannot collide.
 
 10. **Deletion and space reclaim:** delayed garbage collection. Deleting a file only updates
     metadata. A background GC removes chunks that are unreferenced and have been orphaned longer than
