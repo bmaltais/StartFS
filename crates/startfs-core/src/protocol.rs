@@ -26,6 +26,22 @@ pub enum Message {
     ChunkRequest(ChunkId),
     /// The chunk's bytes, or `None` when the sender does not hold it.
     ChunkReply(ChunkId, Option<Vec<u8>>),
+    /// Ask the receiver to hold a replica of a chunk. Without the bytes it is
+    /// a question: "do you hold it, and would you take it?"
+    ChunkPush(ChunkId, Option<Vec<u8>>),
+    /// The receiver's answer to a [`Message::ChunkPush`].
+    ChunkAck(ChunkId, Replica),
+}
+
+/// A node's standing towards holding a replica of one chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Replica {
+    /// It holds the chunk.
+    Stored,
+    /// It does not, and would take it.
+    Missing,
+    /// It does not, and has no room (or offers no space).
+    Full,
 }
 
 impl Message {

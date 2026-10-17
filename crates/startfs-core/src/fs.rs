@@ -14,7 +14,7 @@ use redb::{Database, ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Files up to this size live inside their metadata record, with no chunk.
@@ -35,6 +35,7 @@ const OBJECTS: TableDefinition<u64, &[u8]> = TableDefinition::new("objects");
 const CONFLICTS: TableDefinition<u64, &[u8]> = TableDefinition::new("conflicts");
 
 mod merge;
+mod replicas;
 pub use merge::ConflictCopy;
 
 #[derive(Debug, Clone)]
@@ -170,6 +171,10 @@ pub struct LocalFs {
     db: Database,
     /// Replica storage: chunks this node is responsible for.
     chunks: ChunkStore,
+    /// Chunks written here that are not yet on all the nodes placement chose.
+    staging: ChunkStore,
+    /// Whether new chunks go to staging (the node belongs to a filesystem).
+    replicating: AtomicBool,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
     source: Mutex<Option<Arc<dyn ChunkSource>>>,
@@ -209,6 +214,8 @@ impl LocalFs {
         let fs = Self {
             db: database,
             chunks: ChunkStore::open(&dir.join("chunks"))?,
+            staging: ChunkStore::open(&dir.join("staging"))?,
+            replicating: AtomicBool::new(false),
             cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
             source: Mutex::new(None),
             clock,
@@ -370,7 +377,9 @@ impl LocalFs {
     /// A chunk held here, replica or cached, verified against its hash.
     /// This is what a peer's fetch is answered from.
     pub fn local_chunk(&self, id: &ChunkId) -> Option<Vec<u8>> {
-        self.chunks.get(id).ok().or_else(|| self.cache.get(id))
+        (self.chunks.get(id).ok())
+            .or_else(|| self.staging.get(id).ok())
+            .or_else(|| self.cache.get(id))
     }
 
     pub fn cache_stats(&self) -> CacheStats {
@@ -441,8 +450,14 @@ impl LocalFs {
         } else {
             let mut refs = Vec::new();
             for c in chunker::split(data) {
+                let id = *blake3::hash(c).as_bytes();
+                if !self.replicating.load(Ordering::SeqCst) {
+                    self.chunks.put(c)?;
+                } else if self.chunks.size_of(&id).is_none() {
+                    self.staging.put(c)?;
+                }
                 refs.push(ChunkRef {
-                    id: self.chunks.put(c)?,
+                    id,
                     len: c.len() as u32,
                 });
             }

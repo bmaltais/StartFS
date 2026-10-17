@@ -27,6 +27,18 @@ fn joined(nodes: usize, copies: u32) -> Cluster {
     c
 }
 
+/// Node 0 stores replicas; every other node is a pure client that only reads
+/// through its cache.
+fn with_clients(clients: usize, copies: u32) -> Cluster {
+    let c = Cluster::start(1 + clients);
+    let token = c.control(0).create("home", copies).unwrap();
+    for i in 1..=clients {
+        c.control(i).join(&token, Some(0)).unwrap();
+    }
+    c.sync();
+    c
+}
+
 #[test]
 fn every_node_gets_its_own_identity_so_inode_numbers_never_clash() {
     let c = joined(3, 3);
@@ -260,7 +272,7 @@ fn file_contents_are_fetched_from_a_peer_when_read() {
 
 #[test]
 fn recently_read_files_stay_readable_offline_and_unread_ones_do_not() {
-    let c = joined(2, 2);
+    let c = with_clients(1, 2);
     let (a, b) = (c.fs(0), c.fs(1));
     let seen = noise(100_000, 1);
     let unseen = noise(100_000, 2);
@@ -281,7 +293,7 @@ fn recently_read_files_stay_readable_offline_and_unread_ones_do_not() {
 
 #[test]
 fn a_chunk_is_fetched_from_whichever_peer_can_supply_it() {
-    let c = joined(3, 3);
+    let c = with_clients(2, 3);
     let data = noise(100_000, 3);
     write_file(&c.fs(0), "f", &data);
     c.sync();
@@ -299,7 +311,7 @@ fn the_cache_is_bounded_and_drops_the_least_recently_used_file() {
     // Room for two of the three 100 KB files.
     let c = Cluster::start_with_config(2, "cache_bytes = 250000");
     let token = c.control(0).create("home", 2).unwrap();
-    c.control(1).join(&token, None).unwrap();
+    c.control(1).join(&token, Some(0)).unwrap();
     let a = c.fs(0);
     let files: Vec<_> = (1..=3u64).map(|i| noise(100_000, 2 * i + 1)).collect();
     for (i, data) in files.iter().enumerate() {
@@ -327,7 +339,7 @@ fn the_cache_is_bounded_and_drops_the_least_recently_used_file() {
 fn cache_eviction_never_touches_replica_storage() {
     let c = Cluster::start_with_config(2, "cache_bytes = 120000");
     let token = c.control(0).create("home", 2).unwrap();
-    c.control(1).join(&token, None).unwrap();
+    c.control(1).join(&token, Some(0)).unwrap();
     let files: Vec<_> = (1..=3u64).map(|i| noise(100_000, 2 * i + 1)).collect();
     for (i, data) in files.iter().enumerate() {
         write_file(&c.fs(0), &format!("f{i}"), data);
@@ -358,7 +370,7 @@ fn cache_eviction_never_touches_replica_storage() {
 
 #[test]
 fn a_corrupt_chunk_on_a_peer_is_never_returned_to_the_reader() {
-    let c = joined(3, 3);
+    let c = with_clients(2, 3);
     let data = noise(100_000, 4);
     write_file(&c.fs(0), "f", &data);
     c.sync();
@@ -374,7 +386,7 @@ fn a_corrupt_chunk_on_a_peer_is_never_returned_to_the_reader() {
 
 #[test]
 fn a_reader_skips_a_peer_with_a_corrupt_chunk_and_uses_a_good_copy() {
-    let c = joined(3, 3);
+    let c = with_clients(2, 3);
     let data = noise(100_000, 5);
     write_file(&c.fs(0), "f", &data);
     c.sync();
@@ -388,7 +400,7 @@ fn a_reader_skips_a_peer_with_a_corrupt_chunk_and_uses_a_good_copy() {
 
 #[test]
 fn a_damaged_cache_entry_is_refetched_not_returned() {
-    let c = joined(2, 2);
+    let c = with_clients(1, 2);
     let data = noise(100_000, 6);
     write_file(&c.fs(0), "f", &data);
     c.sync();

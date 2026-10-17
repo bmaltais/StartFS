@@ -10,5 +10,7 @@ pub mod members;
 pub mod net;
 pub mod oplog;
 pub mod ops;
+pub mod placement;
 pub mod protocol;
+pub mod replication;
 pub mod sync;

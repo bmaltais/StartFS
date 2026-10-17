@@ -63,6 +63,8 @@ fn status_usage_grows_with_stored_data() {
         })
         .collect();
     fs.write(f.ino, 0, &data).unwrap();
+    // Writes are staged; background replication moves them into replica storage.
+    c.sync();
     let s = c.control(0).status().unwrap();
     assert!(s.usage.chunks >= 1);
     assert!(s.usage.stored_bytes > 100_000, "{:?}", s.usage);

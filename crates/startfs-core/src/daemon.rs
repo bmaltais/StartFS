@@ -7,13 +7,16 @@
 use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::control::{FilesystemInfo, MemberStatus, NodeState, Request, Response, Status, Usage};
+use crate::control::{
+    FilesystemInfo, MemberStatus, NodeState, Request, Response, Staging, Status, Usage,
+};
 use crate::fs::{ChunkSource, LocalFs, NodeConfig};
 use crate::members::{Membership, Token};
 use crate::net::{NodeId, Transport};
 use crate::ops::Nanos;
 use crate::ops::{FsOps, FsResult};
-use crate::protocol::Message;
+use crate::protocol::{Message, Replica};
+use crate::replication::{Replicator, View};
 use crate::sync::{HELLO_INTERVAL, Syncer};
 use std::collections::HashMap;
 use std::path::Path;
@@ -49,6 +52,8 @@ pub struct Daemon {
     last_gossip: Mutex<Option<Nanos>>,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
     chunk_replies: Mutex<HashMap<(NodeId, ChunkId), ChunkAnswer>>,
+    /// Pushes new chunks to the nodes placement chose and tracks their copies.
+    replicator: Replicator,
 }
 
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
@@ -75,10 +80,12 @@ impl Daemon {
         let fs = Arc::new(LocalFs::open(dir, node, config.cache_bytes, clock.clone())?);
         if let Some(me) = membership.me() {
             fs.set_node(NodeId(me));
+            fs.set_replicating();
         }
         Ok(Arc::new_cyclic(|me| {
             fs.set_chunk_source(Arc::new(PeerChunks(me.clone())));
             Self {
+                replicator: Replicator::new(fs.clone()),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -156,7 +163,30 @@ impl Daemon {
         if let Some(s) = self.syncer.lock().unwrap().as_mut() {
             busy |= s.poll();
         }
+        busy |= self
+            .with_view(|v| self.replicator.poll(v, &*transport))
+            .unwrap_or(false);
         busy
+    }
+
+    /// Run `f` with the replicator's view of the filesystem, if we belong to one.
+    fn with_view<T>(&self, f: impl FnOnce(&View<'_>) -> T) -> Option<T> {
+        let (me, copies, members, offer) = {
+            let m = self.membership.lock().unwrap();
+            (
+                m.me()?,
+                m.filesystem()?.copies,
+                m.members(),
+                m.my_offer(self.config.offer_bytes),
+            )
+        };
+        Some(f(&View {
+            me,
+            copies,
+            members: &members,
+            offer,
+            now: self.clock.now(),
+        }))
     }
 
     /// Exchange logs with exactly the other members.
@@ -204,6 +234,19 @@ impl Daemon {
             Message::ChunkReply(id, data) => {
                 if self.membership.lock().unwrap().is_member_endpoint(from) {
                     self.chunk_replies.lock().unwrap().insert((from, id), data);
+                }
+            }
+            Message::ChunkPush(id, data) => {
+                if self.membership.lock().unwrap().is_member_endpoint(from) {
+                    let standing = self
+                        .with_view(|v| self.replicator.on_push(v, &id, data.as_deref()))
+                        .unwrap_or(Replica::Full);
+                    transport.send(from, Message::ChunkAck(id, standing).encode());
+                }
+            }
+            Message::ChunkAck(id, standing) => {
+                if self.membership.lock().unwrap().is_member_endpoint(from) {
+                    self.with_view(|v| self.replicator.on_ack(v, from, &id, standing));
                 }
             }
             Message::Members(list) => {
@@ -279,7 +322,9 @@ impl Daemon {
             .wait_for(|| self.join_reply.lock().unwrap().take())
             .ok_or_else(|| format!("no answer from {}", token.addr))??;
         self.fs.set_node(NodeId(reply.id));
-        self.membership.lock().unwrap().install(reply, offer)
+        self.membership.lock().unwrap().install(reply, offer)?;
+        self.fs.set_replicating();
+        Ok(())
     }
 
     fn mint(&self, membership: &mut Membership) -> Result<String, String> {
@@ -310,7 +355,10 @@ impl Daemon {
                     )
                     .and_then(|_| self.mint(&mut membership));
                 match created {
-                    Ok(token) => Response::Created { token },
+                    Ok(token) => {
+                        self.fs.set_replicating();
+                        Response::Created { token }
+                    }
                     Err(e) => Response::Error(e),
                 }
             }
@@ -342,8 +390,11 @@ impl Daemon {
                     Ok(s) => s,
                     Err(e) => return Response::Error(e.to_string()),
                 };
+                let unreplicated = self
+                    .with_view(|v| self.replicator.unreplicated(v))
+                    .unwrap_or_default();
                 let membership = self.membership.lock().unwrap();
-                let filesystem = membership.filesystem().cloned();
+                let filesystem =membership.filesystem().cloned();
                 let now = self.clock.now();
                 let heard = self.heard.lock().unwrap();
                 let members: Vec<MemberStatus> = membership
@@ -382,10 +433,18 @@ impl Daemon {
                         stored_bytes: stats.stored_bytes,
                         offer_bytes: membership.my_offer(self.config.offer_bytes),
                     },
+                    staging: match self.fs.staging_stats() {
+                        Ok(s) => Staging {
+                            chunks: s.chunks,
+                            bytes: s.stored_bytes,
+                        },
+                        Err(e) => return Response::Error(e.to_string()),
+                    },
                     cache: self.fs.cache_stats(),
                     members,
                     nodes,
                     copies_possible,
+                    unreplicated,
                     conflicts: match self.fs.conflicts() {
                         Ok(c) => c,
                         Err(e) => return Response::Error(e.to_string()),

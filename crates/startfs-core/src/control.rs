@@ -72,6 +72,35 @@ pub struct Usage {
     pub offer_bytes: u64,
 }
 
+/// Chunks written here that are waiting for replication to finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Staging {
+    pub chunks: u64,
+    pub bytes: u64,
+}
+
+/// How safe a chunk (or the worst chunk of a file) is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tier {
+    /// All N copies exist on distinct nodes.
+    Healthy,
+    /// Fewer than N copies.
+    Degraded,
+    /// A single copy.
+    AtRisk,
+}
+
+/// A file whose chunks are not all on N distinct nodes yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileHealth {
+    pub path: String,
+    /// Copies of the file's least replicated chunk.
+    pub copies: u32,
+    /// N.
+    pub wanted: u32,
+    pub tier: Tier,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// `None` until a filesystem is created or joined.
@@ -79,6 +108,8 @@ pub struct Status {
     pub node_state: NodeState,
     /// Replica storage on this node.
     pub usage: Usage,
+    /// Local staging area: written here, not yet released after replication.
+    pub staging: Staging,
     /// Chunks fetched from peers; separate from replica storage.
     pub cache: CacheStats,
     /// Members of the filesystem, by id.
@@ -86,6 +117,8 @@ pub struct Status {
     pub nodes: u32,
     /// Best-effort redundancy: min(N, nodes) copies are actually possible.
     pub copies_possible: u32,
+    /// Files this node wrote that are not yet on N nodes, worst first.
+    pub unreplicated: Vec<FileHealth>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).
     pub conflicts: Vec<ConflictCopy>,
 }
