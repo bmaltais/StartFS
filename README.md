@@ -12,39 +12,87 @@ Status: v1, tested on Linux only. **Read "Known limits" before using it for real
 
 ## Install
 
-Requirements: a Rust toolchain to build, and [Tailscale](https://tailscale.com)
-running on every machine (peers are identified through `tailscaled`).
+Every machine needs [Tailscale](https://tailscale.com) running (peers are identified
+through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
+[release](https://github.com/bmaltais/startfs/releases); no Rust toolchain is needed.
+
+| Platform | Tarball suffix |
+|---|---|
+| Linux, 64-bit Intel/AMD | `x86_64-linux` |
+| Linux, ARM64 (Raspberry Pi 4/5, ARM servers) | `aarch64-linux` |
+| macOS, Apple Silicon (experimental) | `aarch64-macos` |
 
 ### Linux
 
-Prebuilt x86_64 and aarch64 tarballs are attached to each
-[release](https://github.com/bmaltais/startfs/releases); they need `fuse3` installed.
-To build from source instead:
+1. Install FUSE 3 and Tailscale with your distro's package manager:
 
-```sh
-sudo pacman -S fuse3          # or: apt install fuse3 / dnf install fuse3
-cargo build --release
-install -Dm755 target/release/startfs ~/.local/bin/startfs
-```
+   | Distro | Command |
+   |---|---|
+   | Omarchy / Arch | `sudo pacman -S fuse3 tailscale` |
+   | Ubuntu / Debian | `sudo apt install fuse3` (Tailscale: <https://tailscale.com/download/linux>) |
+   | Fedora | `sudo dnf install fuse3 tailscale` (add the Tailscale repo first, see the link above) |
 
-The recommended way to run it is as a systemd user service that mounts `~/StartFS`
-and restarts after a crash:
+   Then `sudo systemctl enable --now tailscaled && sudo tailscale up`.
 
-```sh
-install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
-systemctl --user daemon-reload
-systemctl --user enable --now startfs.service
-loginctl enable-linger "$USER"     # start at boot, before you log in
-```
+2. Install the latest release for your CPU (detects x86_64 or aarch64, checks the
+   checksum, installs `~/.local/bin/startfs` and the systemd user unit):
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/bmaltais/startfs/main/scripts/install.sh | sh
+   ```
+
+   Set `STARTFS_VERSION=v1.0.0` to pin a release or `INSTALL_DIR` to change the
+   target. Make sure `~/.local/bin` is on your `PATH` (it is on Omarchy; on Ubuntu and
+   Fedora, log out and in again after the directory is first created). `startfs --version`
+   shows what is installed.
+
+3. Run it as a systemd user service that mounts `~/StartFS` and restarts after a crash:
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now startfs.service
+   loginctl enable-linger "$USER"     # start at boot, before you log in
+   ```
 
 To try it by hand instead: `startfs daemon --mount ~/StartFS`.
 
-### macOS (untested)
+The binaries are built on Ubuntu 22.04 and need glibc 2.35 or newer, which every
+currently supported Ubuntu, Fedora and Arch release has. On an older distro, build
+from source.
 
-The macOS mount adapter is written but has **never been run**; no Mac was available.
-It needs FUSE-T (preferred) or macFUSE and a `whois_socket` setting for Tailscale.
-See `dist/README.md` and `dist/com.startfs.daemon.plist`. Treat it as unsupported
-until someone verifies it.
+### macOS (experimental)
+
+The macOS mount adapter is written but has **never been run**, and the macOS build is
+best-effort, so a release may not include a Mac tarball. Treat it as unsupported until
+someone verifies it.
+
+1. Install [Tailscale](https://tailscale.com/download/mac) and FUSE-T:
+   `brew install --cask fuse-t` (macFUSE also works; see `dist/README.md`).
+2. Run the same installer (it installs to `~/.local/bin`; add `INSTALL_DIR=/usr/local/bin`
+   with `sudo` if you prefer):
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/bmaltais/startfs/main/scripts/install.sh | sh
+   ```
+
+   If you downloaded the tarball in a browser, macOS may refuse to run the binary:
+   clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/startfs`.
+3. Set `whois_socket` in `config.toml` to the Tailscale socket (see the config table
+   below), then start it by hand with `startfs daemon --mount ~/StartFS`, or at login
+   with the launchd agent: edit `USERNAME` in `com.startfs.daemon.plist`, copy it to
+   `~/Library/LaunchAgents/` and run
+   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.startfs.daemon.plist`.
+
+### Building from source
+
+Needs a Rust toolchain and the FUSE development headers (`libfuse3-dev` on
+Debian/Ubuntu, `fuse3-devel` on Fedora, `fuse3` on Arch):
+
+```sh
+cargo build --release
+install -Dm755 target/release/startfs ~/.local/bin/startfs
+install -Dm644 dist/startfs.service ~/.config/systemd/user/startfs.service
+```
 
 ## Quickstart
 

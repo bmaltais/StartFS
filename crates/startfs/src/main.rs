@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
+       startfs --version
 
 commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
@@ -105,6 +106,10 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             }
             _ => break,
         }
+    }
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("startfs {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
     }
     let data_dir = data_dir.unwrap_or_else(|| home_dir("XDG_DATA_HOME", ".local/share"));
     let socket = data_dir.join("control.sock");

@@ -109,6 +109,17 @@ fn start_daemon_with(data: &Path, tailnet_knows_peers: bool, extra_config: &str)
 }
 
 #[test]
+fn version_flag_prints_the_crate_version_without_a_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = startfs(dir.path(), &["--version"]);
+    assert!(out.status.success());
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("startfs {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();

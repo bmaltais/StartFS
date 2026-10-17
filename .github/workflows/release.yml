@@ -16,22 +16,45 @@ jobs:
             runner: ubuntu-22.04
           - target: aarch64-linux
             runner: ubuntu-22.04-arm
+          # The macOS adapter has never been run (see README); a failed build here
+          # must not block the Linux release.
+          - target: aarch64-macos
+            runner: macos-14
+            experimental: true
     # Oldest LTS runner, so the binary runs on any newer glibc.
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install FUSE-T
+        if: runner.os == 'macOS'
+        run: |
+          brew tap macos-fuse-t/homebrew-cask
+          brew install --cask fuse-t
+          brew install pkg-config
       - name: Install FUSE headers
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 pkg-config
       - uses: Swatinem/rust-cache@v2
+      - name: Check the tag matches the crate version
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="startfs"))')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != crate version v$v"; exit 1; }
       - run: cargo build --release --locked -p startfs
       - name: Package
         run: |
           name="startfs-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$name"
-          cp target/release/startfs README.md dist/startfs.service "$name/"
+          cp target/release/startfs README.md "$name/"
+          if [ "$RUNNER_OS" = macOS ]; then
+            cp dist/com.startfs.daemon.plist "$name/"
+            cp dist/README.md "$name/MACOS.md"
+          else
+            cp dist/startfs.service "$name/"
+          fi
           tar czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
