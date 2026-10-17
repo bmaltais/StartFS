@@ -461,3 +461,115 @@ fn a_node_makes_commits_durable_before_a_peer_can_see_them() {
     assert!(!a.has_unsynced(), "durable before the entries went out");
     assert!(b.lookup(ROOT_INO, "n").is_ok());
 }
+
+/// Nodes hold empty root-level directories `names`; while partitioned, node i
+/// renames directory i into directory i+1 (a cycle), one second apart in node
+/// order; then the partition heals.
+fn rename_cycle(names: &[&str]) -> Cluster {
+    rename_cycle_with(names, false)
+}
+
+/// As [`rename_cycle`], optionally with a user directory `lost+found` (holding
+/// `mine.txt`) already at the root.
+fn rename_cycle_with(names: &[&str], user_lost_found: bool) -> Cluster {
+    let n = names.len();
+    let c = Cluster::start(n);
+    let token = c.control(0).create("home", n as u32).unwrap();
+    for i in 1..n {
+        c.control(i).join(&token, None).unwrap();
+    }
+    c.sync();
+    if user_lost_found {
+        let lf = c.fs(0).mkdir(ROOT_INO, "lost+found", 0o755).unwrap();
+        c.fs(0).create(lf.ino, "mine.txt", 0o644).unwrap();
+    }
+    let dirs: Vec<Ino> = names
+        .iter()
+        .map(|d| c.fs(0).mkdir(ROOT_INO, d, 0o755).unwrap().ino)
+        .collect();
+    let f = c.fs(0).create(dirs[0], "inner.txt", 0o644).unwrap();
+    c.fs(0).write(f.ino, 0, b"still here").unwrap();
+    c.sync();
+    let sides: Vec<[NodeId; 1]> = (0..n).map(|i| [NodeId(i as u32)]).collect();
+    let groups: Vec<&[NodeId]> = sides.iter().map(|s| &s[..]).collect();
+    c.network().partition(&groups);
+    for (i, name) in names.iter().enumerate() {
+        c.advance(Duration::from_secs(1));
+        let next = (i + 1) % n;
+        c.fs(i).rename(ROOT_INO, name, dirs[next], name).unwrap();
+    }
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    c
+}
+
+#[test]
+fn a_two_directory_rename_cycle_puts_the_later_rename_in_lost_and_found() {
+    let c = rename_cycle(&["a", "b"]);
+    for i in 0..2 {
+        let fs = c.fs(i);
+        // a moved into b first; b moved into a later and gives way.
+        assert_eq!(names(&fs, ROOT_INO), ["lost+found"], "node {i}");
+        let lf = fs.lookup(ROOT_INO, "lost+found").unwrap();
+        assert_eq!(names(&fs, lf.ino), ["b"], "node {i}");
+        let b = fs.lookup(lf.ino, "b").unwrap();
+        assert_eq!(names(&fs, b.ino), ["a"], "node {i}");
+        let a = fs.lookup(b.ino, "a").unwrap();
+        let f = fs.lookup(a.ino, "inner.txt").unwrap();
+        assert_eq!(read_all(&fs, f.ino), b"still here", "node {i}");
+    }
+}
+
+#[test]
+fn a_three_directory_rename_cycle_breaks_at_exactly_one_directory() {
+    let c = rename_cycle(&["a", "b", "c"]);
+    for i in 0..3 {
+        let fs = c.fs(i);
+        assert_eq!(names(&fs, ROOT_INO), ["lost+found"], "node {i}");
+        let lf = fs.lookup(ROOT_INO, "lost+found").unwrap();
+        assert_eq!(names(&fs, lf.ino), ["c"], "node {i}");
+        let mut at = fs.lookup(lf.ino, "c").unwrap();
+        for next in ["b", "a"] {
+            assert_eq!(names(&fs, at.ino), [next], "node {i}");
+            at = fs.lookup(at.ino, next).unwrap();
+        }
+        let f = fs.lookup(at.ino, "inner.txt").unwrap();
+        assert_eq!(read_all(&fs, f.ino), b"still here", "node {i}");
+    }
+}
+
+#[test]
+fn a_users_own_lost_and_found_directory_absorbs_the_displaced_one() {
+    let c = rename_cycle_with(&["a", "b"], true);
+    for i in 0..2 {
+        let fs = c.fs(i);
+        assert_eq!(names(&fs, ROOT_INO), ["lost+found"], "node {i}");
+        let lf = fs.lookup(ROOT_INO, "lost+found").unwrap();
+        assert_eq!(names(&fs, lf.ino), ["b", "mine.txt"], "node {i}");
+    }
+}
+
+#[test]
+fn moving_a_directory_out_of_lost_and_found_sticks_and_the_folder_goes_away() {
+    let c = rename_cycle(&["a", "b"]);
+    let fs = c.fs(0);
+    let lf = fs.lookup(ROOT_INO, "lost+found").unwrap();
+    c.advance(Duration::from_secs(1));
+    fs.rename(lf.ino, "b", ROOT_INO, "b").unwrap();
+    c.sync();
+    for i in 0..2 {
+        assert_eq!(names(&c.fs(i), ROOT_INO), ["b"], "node {i}");
+    }
+}
+
+#[test]
+fn no_lost_and_found_without_a_cycle() {
+    let c = pair();
+    let a = c.fs(0).mkdir(ROOT_INO, "a", 0o755).unwrap();
+    c.fs(0).mkdir(ROOT_INO, "b", 0o755).unwrap();
+    c.sync();
+    c.fs(0).rename(ROOT_INO, "b", a.ino, "b").unwrap();
+    c.sync();
+    assert_eq!(names(&c.fs(1), ROOT_INO), ["a"]);
+}

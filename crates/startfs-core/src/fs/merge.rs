@@ -145,6 +145,16 @@ fn conflict_ino(of: Ino, from: Hlc) -> Ino {
     u64::from_le_bytes(raw) | (1 << 63)
 }
 
+const LOST_FOUND: &str = "lost+found";
+
+/// Stable inode number of the `lost+found` directory that cycle-breaking adds.
+pub(super) fn lost_found_ino() -> Ino {
+    let raw: [u8; 8] = blake3::hash(LOST_FOUND.as_bytes()).as_bytes()[..8]
+        .try_into()
+        .expect("8 bytes");
+    u64::from_le_bytes(raw) | (1 << 63)
+}
+
 fn enc<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_stdvec(v).expect("serialises")
 }
@@ -201,6 +211,17 @@ impl Tables<'_> {
             .map_err(db)?
             .map_or(0, |g| g.value()))
     }
+}
+
+struct Placed {
+    ino: Ino,
+    kind: FileKind,
+    parent: Ino,
+    name: String,
+    version: Version,
+    /// Set for conflict copies of an older version.
+    seed: Option<Hlc>,
+    conflict: bool,
 }
 
 impl LocalFs {
@@ -465,24 +486,93 @@ impl LocalFs {
         })
     }
 
+    /// Concurrent renames can leave directories pointing at each other, out of
+    /// reach of the root. In each such cycle the directory whose location
+    /// changed last gives way: it moves, with its subtree, to `lost+found`.
+    fn break_cycles(objects: &BTreeMap<Ino, Object>, placed: &mut Vec<Placed>) {
+        let dirs: HashMap<Ino, usize> = placed
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == FileKind::Dir && !p.conflict)
+            .map(|(i, p)| (p.ino, i))
+            .collect();
+        let moved_at = |i: usize| objects[&placed[i].ino].loc.as_ref().map(|l| l.0);
+        // 0 = unvisited, 1 = on the current walk, 2 = done.
+        let mut state: HashMap<Ino, u8> = HashMap::new();
+        let mut losers: Vec<usize> = Vec::new();
+        for &start in dirs.keys() {
+            let mut walk = Vec::new();
+            let mut cur = start;
+            loop {
+                match state.get(&cur).copied().unwrap_or(0) {
+                    0 => {
+                        state.insert(cur, 1);
+                        walk.push(cur);
+                        match dirs.get(&cur).map(|&i| placed[i].parent) {
+                            Some(parent) if dirs.contains_key(&parent) => cur = parent,
+                            _ => break,
+                        }
+                    }
+                    1 => {
+                        let from = walk.iter().position(|&d| d == cur).expect("on walk");
+                        let loser = walk[from..]
+                            .iter()
+                            .map(|d| dirs[d])
+                            .max_by_key(|&i| (moved_at(i), placed[i].ino))
+                            .expect("cycle is not empty");
+                        losers.push(loser);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            for d in walk {
+                state.insert(d, 2);
+            }
+        }
+        if losers.is_empty() {
+            return;
+        }
+        let wall = losers
+            .iter()
+            .filter_map(|&i| moved_at(i))
+            .map(|h| h.wall)
+            .max()
+            .unwrap_or(0);
+        let lost_found = lost_found_ino();
+        for i in losers {
+            placed[i].parent = lost_found;
+        }
+        // Lowest stamp, so a user's own `lost+found` directory wins the name
+        // and this one merges into it.
+        let version = Version {
+            hlc: Hlc::default(),
+            base: None,
+            size: 0,
+            mode: 0o755,
+            mtime: wall,
+            xattrs: BTreeMap::new(),
+            content: Content::Inline(Vec::new()),
+        };
+        placed.push(Placed {
+            ino: lost_found,
+            kind: FileKind::Dir,
+            parent: ROOT_INO,
+            name: LOST_FOUND.to_string(),
+            version,
+            seed: None,
+            conflict: false,
+        });
+    }
+
     /// Rebuild the visible tree from the registers.
-    fn reconcile(&self, t: &mut Tables<'_>) -> FsResult<()> {
+    pub(super) fn reconcile(&self, t: &mut Tables<'_>) -> FsResult<()> {
         let mut objects: BTreeMap<Ino, Object> = BTreeMap::new();
         for row in t.objects.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
             objects.insert(k.value(), dec(v.value())?);
         }
 
-        struct Placed {
-            ino: Ino,
-            kind: FileKind,
-            parent: Ino,
-            name: String,
-            version: Version,
-            /// Set for conflict copies of an older version.
-            seed: Option<Hlc>,
-            conflict: bool,
-        }
         // Live objects, plus any directory a live object needs to sit in: a
         // write into a deleted directory recreates the path.
         let mut alive: HashSet<Ino> = objects
@@ -550,6 +640,8 @@ impl LocalFs {
                 }
             }
         }
+
+        Self::break_cycles(&objects, &mut placed);
 
         let mut by_parent: HashMap<Ino, Vec<usize>> = HashMap::new();
         for (idx, p) in placed.iter().enumerate() {

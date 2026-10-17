@@ -819,7 +819,12 @@ impl FsOps for LocalFs {
                 },
             )?;
             self.touch_dir(t, parent)?;
-            self.touch_dir(t, new_parent)
+            self.touch_dir(t, new_parent)?;
+            if parent == merge::lost_found_ino() {
+                // Leaving `lost+found` may empty it, and it then goes away.
+                self.reconcile(t)?;
+            }
+            Ok(())
         })
     }
 
