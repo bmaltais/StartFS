@@ -19,4 +19,13 @@ pub trait Transport: Send + Sync {
     fn local(&self) -> NodeId;
     /// The endpoint listening at a `host:port` address from a join token.
     fn resolve(&self, addr: &str) -> Option<NodeId>;
+    /// Tell the transport where a member's endpoint listens (`host:port`), as
+    /// the member list says, so it can be reached without a join token.
+    /// A transport whose endpoints need no addresses ignores this.
+    fn learn(&self, _node: NodeId, _addr: &str) {}
+    /// Why the last attempt to reach `node` failed, in words for the user
+    /// (peer refused, protocol version mismatch, unreachable).
+    fn last_error(&self, _node: NodeId) -> Option<String> {
+        None
+    }
 }

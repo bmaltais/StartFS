@@ -172,8 +172,9 @@ impl Daemon {
         while let Some((from, raw)) = transport.recv() {
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());
-            if let Some(msg) = Message::decode(&raw) {
-                self.dispatch(&*transport, from, msg);
+            match Message::decode(&raw) {
+                Ok(msg) => self.dispatch(&*transport, from, msg),
+                Err(e) => eprintln!("startfs: dropped a message from node {}: {e}", from.0),
             }
         }
         let (peers, members) = {
