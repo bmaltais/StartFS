@@ -107,6 +107,14 @@ impl Membership {
             .map_err(|e| format!("cannot save membership: {e}"))
     }
 
+    /// Save where the caller cannot return an error: a failure is reported,
+    /// never silent, and the in-memory state stays authoritative until the next save.
+    fn save_or_report(&self) {
+        if let Err(e) = self.save() {
+            eprintln!("startfs: {e}");
+        }
+    }
+
     pub fn filesystem(&self) -> Option<&FilesystemInfo> {
         self.fs.as_ref()
     }
@@ -295,7 +303,7 @@ impl Membership {
             }
         }
         if changed {
-            let _ = self.save();
+            self.save_or_report();
         }
         changed
     }
@@ -310,7 +318,7 @@ impl Membership {
             m.endpoint = endpoint;
             m.offer_bytes = offer;
             m.rev += 1;
-            let _ = self.save();
+            self.save_or_report();
         }
     }
 
@@ -358,7 +366,7 @@ impl Membership {
             path: std::mem::take(&mut self.path),
             ..Default::default()
         };
-        let _ = self.save();
+        self.save_or_report();
     }
 
     pub fn set_offer(&mut self, bytes: u64) -> Result<(), String> {

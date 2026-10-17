@@ -56,6 +56,13 @@ impl Syncer {
         self.transport.send(to, msg.encode());
     }
 
+    /// Tell `to` what we hold now, so it sends what we lack.
+    fn reply_frontier(&self, to: NodeId) {
+        if let Ok(f) = self.fs.frontier() {
+            self.send(to, &Message::Hello(f));
+        }
+    }
+
     /// Handle a log-exchange message from `from`; ignored unless `from` is a peer.
     pub fn handle(&mut self, from: NodeId, msg: Message) {
         if !self.peers.contains_key(&from) {
@@ -73,16 +80,16 @@ impl Syncer {
                 }
             }
             Message::State(state) => {
-                let _ = self.fs.apply_state(&state);
-                if let Ok(f) = self.fs.frontier() {
-                    self.send(from, &Message::Hello(f));
+                if let Err(e) = self.fs.apply_state(&state) {
+                    eprintln!("startfs: cannot apply state from node {}: {e}", from.0);
                 }
+                self.reply_frontier(from);
             }
             Message::Entries(entries) => {
-                let _ = self.fs.apply_remote(&entries);
-                if let Ok(f) = self.fs.frontier() {
-                    self.send(from, &Message::Hello(f));
+                if let Err(e) = self.fs.apply_remote(&entries) {
+                    eprintln!("startfs: cannot apply entries from node {}: {e}", from.0);
                 }
+                self.reply_frontier(from);
             }
             _ => {}
         }
