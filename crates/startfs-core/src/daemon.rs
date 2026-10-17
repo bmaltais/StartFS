@@ -237,17 +237,19 @@ impl Daemon {
                 Err(e) => eprintln!("startfs: dropped a message from node {}: {e}", from.0),
             }
         }
-        let (peers, members) = {
+        let (peers, members, tokens) = {
             let m = self.membership.lock().unwrap();
-            (m.peers(), m.records())
+            (m.peers(), m.records(), m.token_records())
         };
         let now = self.clock.now();
         let mut last = self.last_gossip.lock().unwrap();
         if last.is_none_or(|t| now.saturating_sub(t) >= HELLO_INTERVAL.as_nanos() as u64) {
             *last = Some(now);
-            let msg = Message::Members(members).encode();
+            let members_msg = Message::Members(members).encode();
+            let tokens_msg = Message::Tokens(tokens).encode();
             for p in &peers {
-                transport.send(*p, msg.clone());
+                transport.send(*p, members_msg.clone());
+                transport.send(*p, tokens_msg.clone());
             }
             busy |= !peers.is_empty();
         }
@@ -496,6 +498,12 @@ impl Daemon {
             Message::ChunkAck(id, standing) => {
                 self.with_view(|v| self.replicator.on_ack(v, from, &id, standing));
             }
+            Message::Tokens(list) => {
+                let mut m = self.membership.lock().unwrap();
+                if m.is_member_endpoint(from) {
+                    m.merge_tokens(list);
+                }
+            }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
                 if m.is_member_endpoint(from) && m.merge(list) {
@@ -592,6 +600,21 @@ impl Daemon {
         }
     }
 
+    /// Tell every member about a new or revoked token right away.
+    fn announce_tokens(&self) {
+        let Some(transport) = self.transport() else {
+            return;
+        };
+        let (peers, tokens) = {
+            let m = self.membership.lock().unwrap();
+            (m.peers(), m.token_records())
+        };
+        let msg = Message::Tokens(tokens).encode();
+        for p in peers {
+            transport.send(p, msg.clone());
+        }
+    }
+
     fn mint(&self, membership: &mut Membership) -> Result<String, String> {
         let ttl = std::time::Duration::from_secs(self.config.token_ttl_secs);
         membership.mint_token(self.clock.now() + ttl.as_nanos() as u64)
@@ -635,10 +658,16 @@ impl Daemon {
                     Err(e) => Response::Error(e),
                 }
             }
-            Request::NewToken => match self.mint(&mut self.membership.lock().unwrap()) {
-                Ok(token) => Response::Created { token },
-                Err(e) => Response::Error(e),
-            },
+            Request::NewToken => {
+                let minted = self.mint(&mut self.membership.lock().unwrap());
+                match minted {
+                    Ok(token) => {
+                        self.announce_tokens();
+                        Response::Created { token }
+                    }
+                    Err(e) => Response::Error(e),
+                }
+            }
             Request::Config { offer_bytes } => {
                 let mut membership = self.membership.lock().unwrap();
                 if let Some(bytes) = offer_bytes
@@ -653,8 +682,12 @@ impl Daemon {
                 Response::Done
             }
             Request::Revoke { token } => {
-                match self.membership.lock().unwrap().revoke_token(&token) {
-                    Ok(()) => Response::Done,
+                let revoked = self.membership.lock().unwrap().revoke_token(&token);
+                match revoked {
+                    Ok(()) => {
+                        self.announce_tokens();
+                        Response::Done
+                    }
                     Err(e) => Response::Error(e),
                 }
             }

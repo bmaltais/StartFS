@@ -453,3 +453,134 @@ fn a_joined_node_keeps_its_identity_and_membership_across_a_restart() {
     assert_eq!(names(&c.fs(0), ROOT_INO), ["after", "while-down"]);
     assert_eq!(names(&c.fs(1), ROOT_INO), ["after", "while-down"]);
 }
+
+/// The token text with its bootstrap address pointed at member `via`.
+fn token_via(c: &Cluster, token: &str, via: usize) -> String {
+    let (head, _) = token.split_once('@').unwrap();
+    let addr = c
+        .control(via)
+        .status()
+        .unwrap()
+        .members
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap()
+        .addr;
+    format!("{head}@{addr}")
+}
+
+#[test]
+fn a_token_minted_on_one_member_is_redeemed_through_another() {
+    let c = Cluster::start(3);
+    let first = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&first, None).unwrap();
+    let token = c.control(0).new_token().unwrap();
+    c.sync();
+
+    c.control(2).join(&token_via(&c, &token, 1), None).unwrap();
+    assert!(c.control(2).status().unwrap().filesystem.is_some());
+}
+
+#[test]
+fn a_token_revoked_on_any_member_is_rejected_by_all_once_synced() {
+    let c = Cluster::start(4);
+    let first = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&first, None).unwrap();
+    let leaked = c.control(0).new_token().unwrap();
+    c.sync();
+
+    // Revoked on a member that did not mint it.
+    c.control(1).revoke(&leaked).unwrap();
+    c.sync();
+
+    for via in [0, 1] {
+        let err = c
+            .control(2)
+            .join(&token_via(&c, &leaked, via), None)
+            .unwrap_err();
+        assert!(err.contains("revoked"), "via {via}: {err}");
+    }
+    assert!(c.control(2).status().unwrap().filesystem.is_none());
+    // Other tokens are unaffected.
+    let other = c.control(0).new_token().unwrap();
+    c.control(3).join(&other, None).unwrap();
+}
+
+#[test]
+fn a_revocation_made_during_a_partition_holds_after_it_heals() {
+    let c = Cluster::start(3);
+    let first = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&first, None).unwrap();
+    let leaked = c.control(0).new_token().unwrap();
+    c.sync();
+
+    let (a, b) = (NodeId(0), NodeId(1));
+    c.network().partition(&[&[a], &[b, NodeId(2)]]);
+    c.control(1).revoke(&leaked).unwrap();
+    c.advance(HELLO_INTERVAL * 2);
+    c.network().heal();
+    c.sync();
+    c.advance(HELLO_INTERVAL * 2);
+    c.sync();
+
+    let err = c.control(2).join(&leaked, None).unwrap_err();
+    assert!(err.contains("revoked"), "{err}");
+}
+
+#[test]
+fn expiry_is_enforced_the_same_by_every_member() {
+    let c = Cluster::start_with_config(3, "token_ttl_secs = 600");
+    let first = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&first, None).unwrap();
+    let token = c.control(0).new_token().unwrap();
+    c.sync();
+    c.advance(Duration::from_secs(601));
+
+    for via in [0, 1] {
+        let err = c
+            .control(2)
+            .join(&token_via(&c, &token, via), None)
+            .unwrap_err();
+        assert!(err.contains("expired"), "via {via}: {err}");
+    }
+}
+
+#[test]
+fn revoking_an_unknown_token_is_an_error() {
+    let c = Cluster::start(1);
+    let token = c.control(0).create("home", 1).unwrap();
+    let forged = token.replace('.', ".0");
+    assert!(c.control(0).revoke(&forged).is_err());
+}
+
+#[test]
+fn a_token_still_works_when_its_issuer_is_unreachable() {
+    let c = Cluster::start(3);
+    let first = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&first, None).unwrap();
+    let token = c.control(0).new_token().unwrap();
+    c.sync();
+
+    c.network()
+        .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
+    c.control(2).join(&token_via(&c, &token, 1), None).unwrap();
+    assert!(c.control(2).status().unwrap().filesystem.is_some());
+}
+
+#[test]
+fn a_token_revoked_on_its_issuer_is_rejected_by_the_others() {
+    let c = Cluster::start(3);
+    let first = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&first, None).unwrap();
+    let leaked = c.control(0).new_token().unwrap();
+    c.sync();
+
+    c.control(0).revoke(&leaked).unwrap();
+    c.sync();
+
+    let err = c
+        .control(2)
+        .join(&token_via(&c, &leaked, 1), None)
+        .unwrap_err();
+    assert!(err.contains("revoked"), "{err}");
+}
