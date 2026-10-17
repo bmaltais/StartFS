@@ -109,5 +109,18 @@ pub struct Entry {
     pub op: Op,
 }
 
+/// A copy of a node's merge state, for a peer that missed log entries which
+/// have since been compacted away. It is joined into the receiver's own state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateTransfer {
+    /// What the sender's log held when the copy was taken: the receiver
+    /// carries on from there.
+    pub frontier: Frontier,
+    /// The sender's clock, so the receiver's later operations sort after it.
+    pub hlc: Hlc,
+    /// Merge registers by object (encoded).
+    pub objects: Vec<(Ino, Vec<u8>)>,
+}
+
 /// How much of each node's log a peer holds: next expected seq per origin.
 pub type Frontier = BTreeMap<u32, u64>;

@@ -267,3 +267,45 @@ fn the_log_stays_bounded_however_much_is_written() {
     assert_eq!(last, b"v199");
     assert_eq!(c.fs(2).read(f, 0, u32::MAX).unwrap(), b"v199");
 }
+
+fn names(fs: &impl FsOps) -> Vec<String> {
+    let mut v: Vec<String> = fs
+        .readdir(ROOT_INO)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_node_offline_across_a_compaction_still_converges() {
+    let c = cluster(2, 3);
+    put(&c.fs(0), "old", b"before");
+    put(&c.fs(0), "doomed", b"soon gone");
+    c.sync();
+
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    // Node 2 carries on alone while the others change plenty and compact.
+    put(&c.fs(2), "from-the-island", b"offline work");
+    c.fs(0).unlink(ROOT_INO, "doomed").unwrap();
+    put(&c.fs(1), "new", b"while you were away");
+    let old = c.fs(0).lookup(ROOT_INO, "old").unwrap().ino;
+    c.fs(0).write(old, 0, b"after!").unwrap();
+    pass(&c, 3 * HOUR, Duration::from_secs(1800));
+    assert!(c.control(0).status().unwrap().log.entries < 3);
+
+    c.network().heal();
+    pass(&c, HOUR, Duration::from_secs(600));
+
+    let want = vec!["from-the-island", "new", "old"];
+    for i in 0..3 {
+        assert_eq!(names(&c.fs(i)), want, "node {i}");
+        let o = c.fs(i).lookup(ROOT_INO, "old").unwrap();
+        assert_eq!(c.fs(i).read(o.ino, 0, u32::MAX).unwrap(), b"after!");
+        let n = c.fs(i).lookup(ROOT_INO, "from-the-island").unwrap();
+        assert_eq!(c.fs(i).read(n.ino, 0, u32::MAX).unwrap(), b"offline work");
+    }
+}

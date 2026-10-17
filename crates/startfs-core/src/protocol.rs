@@ -2,7 +2,7 @@
 
 use crate::chunkstore::ChunkId;
 use crate::members::{Admission, Member};
-use crate::oplog::{Entry, Frontier};
+use crate::oplog::{Entry, Frontier, StateTransfer};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,6 +11,8 @@ pub enum Message {
     Hello(Frontier),
     /// Log entries, in per-origin order.
     Entries(Vec<Entry>),
+    /// The sender's merge state, for a peer whose missing log entries were compacted.
+    State(StateTransfer),
     /// A member's view of who belongs to the filesystem.
     Members(Vec<Member>),
     /// A new node asks the member named in its token to admit it.

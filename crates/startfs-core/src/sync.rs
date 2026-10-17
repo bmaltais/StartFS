@@ -69,6 +69,12 @@ impl Syncer {
                     self.send(from, &Message::Hello(f));
                 }
             }
+            Message::State(state) => {
+                let _ = self.fs.apply_state(&state);
+                if let Ok(f) = self.fs.frontier() {
+                    self.send(from, &Message::Hello(f));
+                }
+            }
             Message::Entries(entries) => {
                 let _ = self.fs.apply_remote(&entries);
                 if let Ok(f) = self.fs.frontier() {
@@ -138,6 +144,16 @@ impl Syncer {
             let Some(known) = self.peers[&id].known.clone() else {
                 continue;
             };
+            // Entries the peer misses may be compacted away: send our state instead.
+            if self.fs.needs_state(&known).unwrap_or(false) {
+                if let Ok(state) = self.fs.state_transfer() {
+                    let p = self.peers.get_mut(&id).expect("known peer");
+                    p.known = Some(state.frontier.clone());
+                    self.send(id, &Message::State(state));
+                    busy = true;
+                }
+                continue;
+            }
             let Ok(entries) = self.fs.entries_since(&known, BATCH) else {
                 continue;
             };

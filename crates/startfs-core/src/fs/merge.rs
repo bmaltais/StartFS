@@ -5,6 +5,7 @@
 //! all nodes holding the same entries show the same tree.
 
 use super::*;
+use crate::oplog::StateTransfer;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// One recorded state of an object.
@@ -35,6 +36,28 @@ struct Object {
 }
 
 impl Object {
+    /// Fold another node's register for the same object into this one.
+    fn join(&mut self, other: Object) {
+        self.kind = self.kind.or(other.kind);
+        if other.loc.as_ref().map(|l| l.0) > self.loc.as_ref().map(|l| l.0) {
+            self.loc = other.loc;
+        }
+        self.max_live = self.max_live.max(other.max_live);
+        self.max_del = self.max_del.max(other.max_del);
+        for s in other.superseded {
+            if !self.superseded.contains(&s) {
+                self.superseded.push(s);
+            }
+        }
+        for h in other.heads {
+            if !self.heads.iter().any(|x| x.hlc == h.hlc) {
+                self.heads.push(h);
+            }
+        }
+        let superseded = &self.superseded;
+        self.heads.retain(|h| !superseded.contains(&h.hlc));
+    }
+
     fn winner(&self) -> Option<&Version> {
         self.heads.iter().max_by_key(|v| v.hlc)
     }
@@ -257,6 +280,78 @@ impl LocalFs {
                 t.put_object(*ino, &o)
             }
         }
+    }
+
+    /// Whether a peer holding `have` lacks log entries that were compacted away,
+    /// so it needs a [`StateTransfer`] rather than entries.
+    pub fn needs_state(&self, have: &Frontier) -> FsResult<bool> {
+        self.run(false, |t| {
+            for row in t.logbase.iter().map_err(db)? {
+                let (origin, base) = row.map_err(db)?;
+                if have.get(&origin.value()).copied().unwrap_or(0) < base.value() {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
+    /// A copy of this node's merge state, as of its whole log.
+    pub fn state_transfer(&self) -> FsResult<StateTransfer> {
+        self.run(false, |t| {
+            let mut frontier = Frontier::new();
+            for row in t.frontier.iter().map_err(db)? {
+                let (k, v) = row.map_err(db)?;
+                frontier.insert(k.value(), v.value());
+            }
+            let mut objects = Vec::new();
+            for row in t.objects.iter().map_err(db)? {
+                let (k, v) = row.map_err(db)?;
+                objects.push((k.value(), v.value().to_vec()));
+            }
+            Ok(StateTransfer {
+                frontier,
+                hlc: *self.hlc.lock().unwrap(),
+                objects,
+            })
+        })
+    }
+
+    /// Join a peer's merge state into ours and carry on from where its log
+    /// stood. Returns whether this moved us forward.
+    pub fn apply_state(&self, st: &StateTransfer) -> FsResult<bool> {
+        self.run(true, |t| {
+            let mut ahead = false;
+            for (origin, next) in &st.frontier {
+                if t.next_seq(*origin)? < *next {
+                    ahead = true;
+                    // Entries below it are folded into the state we are given.
+                    t.log
+                        .retain_in((*origin, 0)..(*origin, *next), |_, _| false)
+                        .map_err(db)?;
+                    t.frontier.insert(*origin, *next).map_err(db)?;
+                    t.logbase.insert(*origin, *next).map_err(db)?;
+                }
+            }
+            if !ahead {
+                return Ok(false);
+            }
+            for (ino, raw) in &st.objects {
+                let mut o = t.object(*ino)?;
+                o.join(dec(raw)?);
+                t.put_object(*ino, &o)?;
+            }
+            {
+                let mut h = self.hlc.lock().unwrap();
+                *h = Hlc::observe(*h, st.hlc, self.clock.now());
+                t.counters.insert("hlc_wall", h.wall).map_err(db)?;
+                t.counters
+                    .insert("hlc_counter", u64::from(h.counter))
+                    .map_err(db)?;
+            }
+            self.reconcile(t)?;
+            Ok(true)
+        })
     }
 
     /// What this node holds of every node's log.

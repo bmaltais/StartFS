@@ -425,7 +425,7 @@ impl Daemon {
                     self.sync_peers();
                 }
             }
-            msg @ (Message::Hello(_) | Message::Entries(_)) => {
+            msg @ (Message::Hello(_) | Message::Entries(_) | Message::State(_)) => {
                 if let Some(s) = self.syncer.lock().unwrap().as_mut() {
                     s.handle(from, msg);
                 }
