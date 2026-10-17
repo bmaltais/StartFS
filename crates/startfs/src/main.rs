@@ -139,6 +139,7 @@ fn render(s: &Status) -> String {
     };
     let state = match s.node_state {
         NodeState::Online => "online",
+        NodeState::Down => "down",
     };
     let mut out = format!(
         "filesystem: {} ({} copies)\nnode: {state}\nusage: {} stored in {} chunks, {} offered\n",

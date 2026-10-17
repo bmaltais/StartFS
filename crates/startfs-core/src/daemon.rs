@@ -6,13 +6,15 @@
 
 use crate::clock::Clock;
 use crate::config::Config;
-use crate::control::{FilesystemInfo, NodeState, Request, Response, Status, Usage};
+use crate::control::{FilesystemInfo, MemberStatus, NodeState, Request, Response, Status, Usage};
 use crate::fs::{LocalFs, NodeConfig};
 use crate::members::{Membership, Token};
 use crate::net::{NodeId, Transport};
 use crate::ops::{FsOps, FsResult};
 use crate::protocol::Message;
-use crate::sync::Syncer;
+use crate::ops::Nanos;
+use crate::sync::{HELLO_INTERVAL, Syncer};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +25,9 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 
 /// How many times a request waits (calling the hook each time) for an answer.
 const WAIT_ROUNDS: usize = 300;
+
+/// A member not heard from for this long is shown as down.
+const DOWN_AFTER: std::time::Duration = std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
 
 pub struct Daemon {
     fs: Arc<LocalFs>,
@@ -37,6 +42,8 @@ pub struct Daemon {
     /// The answer to the join request in flight, if it has arrived.
     join_reply: Mutex<Option<Result<crate::members::Admission, String>>>,
     wait: Mutex<WaitHook>,
+    /// When each peer endpoint was last heard from.
+    heard: Mutex<HashMap<NodeId, Nanos>>,
 }
 
 impl Daemon {
@@ -58,6 +65,7 @@ impl Daemon {
             transport: Mutex::new(None),
             syncer: Mutex::new(None),
             join_reply: Mutex::new(None),
+            heard: Mutex::new(HashMap::new()),
             wait: Mutex::new(Arc::new(|| {
                 std::thread::sleep(std::time::Duration::from_millis(10))
             })),
@@ -102,6 +110,7 @@ impl Daemon {
         let mut busy = false;
         while let Some((from, raw)) = transport.recv() {
             busy = true;
+            self.heard.lock().unwrap().insert(from, self.clock.now());
             if let Some(msg) = Message::decode(&raw) {
                 self.dispatch(&*transport, from, msg);
             }
@@ -249,7 +258,27 @@ impl Daemon {
                 };
                 let membership = self.membership.lock().unwrap();
                 let filesystem = membership.filesystem().cloned();
-                let nodes = membership.members().len() as u32;
+                let now = self.clock.now();
+                let heard = self.heard.lock().unwrap();
+                let members: Vec<MemberStatus> = membership
+                    .members()
+                    .into_iter()
+                    .map(|m| {
+                        let is_self = membership.me() == Some(m.id);
+                        let up = is_self
+                            || heard.get(&m.endpoint).is_some_and(|t| {
+                                now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64
+                            });
+                        MemberStatus {
+                            id: m.id,
+                            addr: m.addr,
+                            state: if up { NodeState::Online } else { NodeState::Down },
+                            offer_bytes: m.offer_bytes,
+                            is_self,
+                        }
+                    })
+                    .collect();
+                let nodes = members.len() as u32;
                 let copies_possible = filesystem.as_ref().map_or(0, |f| f.copies.min(nodes));
                 Response::Status(Status {
                     filesystem,
@@ -259,6 +288,7 @@ impl Daemon {
                         stored_bytes: stats.stored_bytes,
                         offer_bytes: membership.my_offer(self.config.offer_bytes),
                     },
+                    members,
                     nodes,
                     copies_possible,
                     conflicts: match self.fs.conflicts() {

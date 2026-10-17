@@ -1,8 +1,11 @@
 //! Joining a filesystem, membership and remote reads, driven through the
 //! control interface and FsOps on a cluster with a simulated network.
 
+use startfs_core::control::NodeState;
 use startfs_core::ops::*;
 use startfs_harness::Cluster;
+use startfs_core::net::NodeId;
+use startfs_core::sync::HELLO_INTERVAL;
 use std::time::Duration;
 
 fn names(fs: &impl FsOps, dir: Ino) -> Vec<String> {
@@ -100,4 +103,75 @@ fn nonsense_and_foreign_tokens_are_rejected() {
     // A node that is already a member cannot join another filesystem.
     c.control(1).join(&token, None).unwrap();
     assert!(c.control(1).join(&token, None).is_err());
+}
+
+#[test]
+fn status_lists_every_member_with_its_address_and_offer() {
+    let c = Cluster::start(3);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, Some(2_000)).unwrap();
+    c.control(2).join(&token, Some(0)).unwrap();
+    c.sync();
+
+    // Every member sees the same list, including members admitted by others.
+    for i in 0..3 {
+        let s = c.control(i).status().unwrap();
+        let view: Vec<_> = s
+            .members
+            .iter()
+            .map(|m| (m.id, m.addr.as_str(), m.offer_bytes, m.state, m.is_self))
+            .collect();
+        let up = NodeState::Online;
+        assert_eq!(
+            view,
+            [
+                (0, "100.64.0.1:7600", 10 << 30, up, i == 0),
+                (1, "100.64.0.2:7600", 2_000, up, i == 1),
+                (2, "100.64.0.3:7600", 0, up, i == 2),
+            ],
+            "seen from node {i}"
+        );
+        assert_eq!(s.nodes, 3);
+    }
+}
+
+fn states(c: &Cluster, viewer: usize) -> Vec<NodeState> {
+    c.control(viewer)
+        .status()
+        .unwrap()
+        .members
+        .iter()
+        .map(|m| m.state)
+        .collect()
+}
+
+#[test]
+fn a_member_that_goes_quiet_is_shown_down_and_comes_back_up() {
+    let c = joined(3, 2);
+    let (up, down) = (NodeState::Online, NodeState::Down);
+    assert_eq!(states(&c, 0), [up, up, up]);
+
+    // Node 2 is cut off; its silence is noticed once a few hellos are missed.
+    c.network().partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    for _ in 0..4 {
+        c.advance(HELLO_INTERVAL);
+        c.sync();
+    }
+    assert_eq!(states(&c, 0), [up, up, down]);
+    assert_eq!(states(&c, 1), [up, up, down]);
+    // A node always sees itself as up, and the others as down.
+    assert_eq!(states(&c, 2), [down, down, up]);
+
+    c.network().heal();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    assert_eq!(states(&c, 0), [up, up, up]);
+
+    // A crashed node is down for the others too.
+    c.crash(1);
+    for _ in 0..4 {
+        c.advance(HELLO_INTERVAL);
+        c.sync();
+    }
+    assert_eq!(states(&c, 0), [up, down, up]);
 }

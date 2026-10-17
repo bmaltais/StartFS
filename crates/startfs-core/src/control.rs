@@ -38,6 +38,20 @@ pub struct FilesystemInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeState {
     Online,
+    /// Not heard from recently.
+    Down,
+}
+
+/// One member of the filesystem, as `status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberStatus {
+    pub id: u32,
+    pub addr: String,
+    pub state: NodeState,
+    /// Space the member offers to the filesystem.
+    pub offer_bytes: u64,
+    /// Whether this is the node answering.
+    pub is_self: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +68,8 @@ pub struct Status {
     pub filesystem: Option<FilesystemInfo>,
     pub node_state: NodeState,
     pub usage: Usage,
-    /// Members of the filesystem.
+    /// Members of the filesystem, by id.
+    pub members: Vec<MemberStatus>,
     pub nodes: u32,
     /// Best-effort redundancy: min(N, nodes) copies are actually possible.
     pub copies_possible: u32,
