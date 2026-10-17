@@ -18,3 +18,6 @@ _Avoid_: Rename loop, circular move
 **Lost and found**:
 The root directory (`lost+found`) that holds a directory whose rename lost in a rename cycle, so nothing becomes unreachable.
 _Avoid_: Orphan directory, trash
+
+**Id range**:
+The share of the member id space that one member may hand out. Admitting a node takes its id from the admitter's range and gives it a slice of that range, so members admitting at the same time never assign the same id.
