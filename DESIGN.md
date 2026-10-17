@@ -64,7 +64,9 @@ same code with a different membership scope.
 12. **Write durability:** local first, background replication. A write is durable on the local node's
     disk and returns immediately; replication to the other N-1 nodes follows. There is a window with
     a single copy, and `startfs status` must show files not yet fully replicated. Nodes with offer 0
-    need a local staging area for writes until replication completes.
+    need a local staging area for writes until replication completes. "Durable" means after
+    `fsync`, the periodic sync tick or shutdown; `close` alone does not wait for disk, as on a
+    local filesystem.
 
 13. **Metadata sync:** per-node operation log (create, write, rename, delete) stamped with hybrid
     logical clocks. Peers exchange missing entries: push when online, catch-up on reconnect. Applying
@@ -101,6 +103,41 @@ same code with a different membership scope.
 19. **v1 scope and machine-loss recovery:** v1 is tailnet-wide only. A rebuilt machine recovers by
     joining again with a new token and pulling the metadata log and chunks (full metadata is on every
     node, chunks on N nodes). The dead node is removed and repair restores N copies.
+
+## Background maintenance (as built)
+
+- **GC:** a pass every 10 minutes looks at what the visible tree references. A chunk (replica or
+  staged) unreferenced for the retention period (`gc_retention_secs`, fixed per filesystem at
+  creation, default 7 days) is removed. "Unreferenced since" is when this node first saw it so,
+  persisted across restarts, so a node that was away re-waits a full period after catching up.
+- **Scrub:** one pass per `scrub_period_secs` (default 30 days), a few replicas per daemon tick, only
+  when the tick had no other work, paused on battery power. A corrupt replica is deleted and the
+  node asks other members for the chunk until one supplies it (the replicator's heal path).
+- **Log compaction:** hourly, entries every non-lost peer has itself reported holding are dropped.
+  A peer that missed dropped entries is sent a copy of the merge registers instead, which it joins
+  into its own. Superseded-version bookkeeping and tombstones are only purged when every member,
+  lost ones included, has reported the same frontier; a member that is gone for good has to be
+  removed to unblock that. A node offline longer than the retention period is not otherwise
+  special: its state joins in like any other.
+
+## Transport (as built)
+
+`crates/startfs/src/quic.rs` implements the poll-based `Transport` over quinn on a private background
+runtime; the core stays free of async. A node's transport endpoint (`NodeId`) is a stable hash of the
+`ip:port` it listens on, so every member derives the same endpoint for a peer without coordination;
+members' addresses reach the transport through `Transport::learn`.
+
+- One QUIC connection per direction per peer. The dialer opens a handshake stream carrying a magic
+  and the protocol version; the acceptor checks the version, looks the dialer up with `tailscaled`
+  (whois) and the `allowed_tags` policy, and answers "ok" or the reason. The reason is kept
+  (`Transport::last_error`) and shows up in e.g. `startfs join` failures. Dialing is vetted the same way.
+- Metadata messages share one ordered unidirectional stream; messages carrying chunk bytes
+  (`Message::is_bulk`) each get their own lower-priority stream, so a big transfer never delays them.
+- Frames are a 4-byte length plus the message, capped at 256 MiB. Every encoded message starts with a
+  protocol version byte (`PROTOCOL_VERSION`); a mismatch fails at the handshake and in `Message::decode`.
+- Certificates are throwaway and unchecked; identity is whois only. The `whois_socket` config option
+  points at a non-default `tailscaled` socket (macOS needs it set).
+- Not done: a full-state transfer is still one message (bounded by the cap) rather than chunked.
 
 ## Future: personal (group-of-1) scope
 

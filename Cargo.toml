@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/startfs-core", "crates/startfs-harness", "crates/startfs"]
+
+[workspace.lints.clippy]
+# Ignoring a Result needs an explicit allow with a reason (CODING_STANDARDS.md, Errors).
+let_underscore_must_use = "deny"

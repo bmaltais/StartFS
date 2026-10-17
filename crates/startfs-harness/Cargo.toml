@@ -1,0 +1,11 @@
+[package]
+name = "startfs-harness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+startfs-core = { version = "0.1.0", path = "../startfs-core" }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
