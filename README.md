@@ -14,7 +14,7 @@ Status: v1, tested on Linux only. **Read "Known limits" before using it for real
 
 Every machine needs [Tailscale](https://tailscale.com) running (peers are identified
 through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
-[release](https://github.com/bmaltais/startfs/releases); no Rust toolchain is needed.
+[release](https://github.com/bmaltais/StartFS/releases); no Rust toolchain is needed.
 
 | Platform | Tarball suffix |
 |---|---|
@@ -38,7 +38,7 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
    checksum, installs `~/.local/bin/startfs` and the systemd user unit):
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/bmaltais/startfs/main/scripts/install.sh | sh
+   curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
    ```
 
    Set `STARTFS_VERSION=v1.0.0` to pin a release or `INSTALL_DIR` to change the
@@ -72,7 +72,7 @@ someone verifies it.
    with `sudo` if you prefer):
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/bmaltais/startfs/main/scripts/install.sh | sh
+   curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
    ```
 
    If you downloaded the tarball in a browser, macOS may refuse to run the binary:

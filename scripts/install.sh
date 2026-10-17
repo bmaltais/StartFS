@@ -1,10 +1,10 @@
 #!/bin/sh
 # Install the latest prebuilt startfs release for this machine's OS and CPU.
-#   curl -fsSL https://raw.githubusercontent.com/bmaltais/startfs/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
 # Environment: STARTFS_VERSION=v1.0.0 pins a release; INSTALL_DIR overrides ~/.local/bin.
 set -eu
 
-repo=bmaltais/startfs
+repo=bmaltais/StartFS
 install_dir=${INSTALL_DIR:-$HOME/.local/bin}
 
 die() { echo "install: $*" >&2; exit 1; }
