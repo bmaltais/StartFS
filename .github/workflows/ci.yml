@@ -32,8 +32,9 @@ jobs:
           brew tap macos-fuse-t/homebrew-cask
           brew install --cask fuse-t
           brew install pkg-config
-          # fuser asks pkg-config for `fuse`; FUSE-T only ships fuse-t.pc and fuse3.pc.
-          cat /usr/local/lib/pkgconfig/fuse-t.pc
-          sudo cp /usr/local/lib/pkgconfig/fuse-t.pc /usr/local/lib/pkgconfig/fuse.pc
+          # fuser asks pkg-config for `fuse >= 2.6.0`; FUSE-T ships fuse-t.pc (version 1.x).
+          printf '%s\n' 'libdir=/usr/local/lib' 'Name: fuse' 'Description: FUSE-T as libfuse 2' \
+            'Version: 2.9.9' 'Libs: -L${libdir} -Wl,-rpath,${libdir} -lfuse-t' \
+            'Cflags: -I/usr/local/include/fuse' | sudo tee /usr/local/lib/pkgconfig/fuse.pc
       - uses: Swatinem/rust-cache@v2
       - run: PKG_CONFIG_PATH=/usr/local/lib/pkgconfig cargo build --locked -p startfs
