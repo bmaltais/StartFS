@@ -81,6 +81,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `gc_retention_secs` | 604800 | on `create`: how long deleted chunks are kept |
 | `repair_bytes_per_sec` | 8 MiB | repair rate limit |
 | `scrub_period_secs` | 30 days | full integrity pass period |
+| `state_chunk_bytes` | 1 MiB | size of each piece when sending the whole metadata state to a member that missed a log compaction |
 | `mountpoint` | unset | mount here when `--mount` is not given |
 | `allowed_tags` | `[]` | Tailscale ACL tags a peer must carry (empty: any tailnet machine) |
 | `whois_socket` | platform default | `tailscaled` socket |

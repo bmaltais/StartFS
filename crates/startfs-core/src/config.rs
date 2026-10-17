@@ -40,6 +40,9 @@ pub struct Config {
     pub repair_bytes_per_sec: u64,
     /// How often the scrub reads back every replica this node holds, in seconds.
     pub scrub_period_secs: u64,
+    /// Most bytes (encoded, roughly) in one piece when this node sends its
+    /// whole merge state to a member that missed a log compaction.
+    pub state_chunk_bytes: usize,
     /// Where the daemon mounts the filesystem (`startfs daemon --mount DIR`
     /// overrides it). Unset: the daemon runs without a mount.
     pub mountpoint: Option<String>,
@@ -66,6 +69,7 @@ impl Default for Config {
             gc_retention_secs: 7 * 24 * 3600,
             repair_bytes_per_sec: 8 << 20,
             scrub_period_secs: 30 * 24 * 3600,
+            state_chunk_bytes: crate::sync::STATE_CHUNK_BYTES,
             mountpoint: None,
             allowed_tags: Vec::new(),
             whois_socket: None,

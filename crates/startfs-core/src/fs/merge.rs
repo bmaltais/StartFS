@@ -5,7 +5,7 @@
 //! all nodes holding the same entries show the same tree.
 
 use super::*;
-use crate::oplog::StateTransfer;
+use crate::oplog::{StateChunk, StatePin};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// One recorded state of an object.
@@ -80,7 +80,8 @@ impl Object {
 /// What a peer needs to catch up with our log.
 pub enum CatchUp {
     Entries(Vec<Entry>),
-    State(StateTransfer),
+    /// What the peer misses was compacted away: start a state transfer.
+    State(StatePin),
 }
 
 /// An unresolved conflict copy, as shown by `status`.
@@ -350,44 +351,80 @@ impl LocalFs {
     }
 
     /// What a peer holding `have` needs to catch up: the entries it lacks, or,
-    /// when some of those were compacted away, a copy of our merge state.
+    /// when some of those were compacted away, where to start a state transfer.
     pub fn catch_up(&self, have: &Frontier, limit: usize) -> FsResult<CatchUp> {
         self.run(false, |t| {
             for row in t.logbase.iter().map_err(db)? {
                 let (origin, base) = row.map_err(db)?;
                 if have.get(&MemberId(origin.value())).copied().unwrap_or(0) < base.value() {
-                    return Ok(CatchUp::State(self.state_in(t)?));
+                    return Ok(CatchUp::State(self.state_pin(t)?));
                 }
             }
             Ok(CatchUp::Entries(Self::entries_in(t, have, limit)?))
         })
     }
 
-    /// A copy of this node's merge state, as of its whole log.
-    fn state_in(&self, t: &Tables<'_>) -> FsResult<StateTransfer> {
+    /// Where a state transfer starts: our frontier and clock right now.
+    fn state_pin(&self, t: &Tables<'_>) -> FsResult<StatePin> {
         let mut frontier = Frontier::new();
         for row in t.frontier.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
             frontier.insert(MemberId(k.value()), v.value());
         }
-        let mut objects = Vec::new();
-        for row in t.objects.iter().map_err(db)? {
-            let (k, v) = row.map_err(db)?;
-            objects.push((k.value(), v.value().to_vec()));
-        }
-        Ok(StateTransfer {
+        Ok(StatePin {
             frontier,
             hlc: *self.hlc.lock().unwrap(),
-            objects,
         })
     }
 
-    /// Join a peer's merge state into ours and carry on from where its log
-    /// stood. Returns whether this moved us forward.
-    pub fn apply_state(&self, st: &StateTransfer) -> FsResult<bool> {
+    /// The next piece of a state transfer: our merge registers after `after`
+    /// (from the first when `None`), up to about `max_bytes` encoded, cut on
+    /// object boundaries (one object over the bound goes whole).
+    pub fn state_chunk(
+        &self,
+        pin: &StatePin,
+        after: Option<Ino>,
+        max_bytes: usize,
+    ) -> FsResult<StateChunk> {
+        self.run(false, |t| {
+            let from = after.map_or(0, |a| a + 1);
+            let mut objects = Vec::new();
+            let mut bytes = 0;
+            let mut last = true;
+            for row in t.objects.range(from..).map_err(db)? {
+                let (k, v) = row.map_err(db)?;
+                let size = std::mem::size_of::<Ino>() + v.value().len();
+                if !objects.is_empty() && bytes + size > max_bytes {
+                    last = false;
+                    break;
+                }
+                bytes += size;
+                objects.push((k.value(), v.value().to_vec()));
+            }
+            Ok(StateChunk {
+                pin: pin.clone(),
+                objects,
+                last,
+            })
+        })
+    }
+
+    /// Join a chunk of a peer's merge state into ours. With the last chunk,
+    /// carry on from where the peer's log stood. Returns whether this moved
+    /// us forward. Earlier chunks leave our frontier alone, so a transfer that
+    /// breaks off never claims history we do not hold.
+    pub fn apply_state_chunk(&self, chunk: &StateChunk) -> FsResult<bool> {
         self.run(true, |t| {
+            for (ino, raw) in &chunk.objects {
+                let mut o = t.object(*ino)?;
+                o.join(dec(raw)?);
+                t.put_object(*ino, &o)?;
+            }
+            if !chunk.last {
+                return Ok(false);
+            }
             let mut ahead = false;
-            for (origin, next) in &st.frontier {
+            for (origin, next) in &chunk.pin.frontier {
                 if t.next_seq(*origin)? < *next {
                     ahead = true;
                     // Entries below it are folded into the state we are given.
@@ -398,24 +435,16 @@ impl LocalFs {
                     t.logbase.insert(origin.0, *next).map_err(db)?;
                 }
             }
-            if !ahead {
-                return Ok(false);
-            }
-            for (ino, raw) in &st.objects {
-                let mut o = t.object(*ino)?;
-                o.join(dec(raw)?);
-                t.put_object(*ino, &o)?;
-            }
             {
                 let mut h = self.hlc.lock().unwrap();
-                *h = Hlc::observe(*h, st.hlc, self.clock.now());
+                *h = Hlc::observe(*h, chunk.pin.hlc, self.clock.now());
                 t.counters.insert("hlc_wall", h.wall).map_err(db)?;
                 t.counters
                     .insert("hlc_counter", u64::from(h.counter))
                     .map_err(db)?;
             }
             self.reconcile(t)?;
-            Ok(true)
+            Ok(ahead)
         })
     }
 

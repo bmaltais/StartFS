@@ -193,7 +193,8 @@ impl Daemon {
 
     /// Connect the daemon to the network.
     pub fn attach(&self, transport: Arc<dyn Transport>) {
-        let syncer = Syncer::new(self.fs.clone(), transport.clone(), self.clock.clone());
+        let mut syncer = Syncer::new(self.fs.clone(), transport.clone(), self.clock.clone());
+        syncer.set_chunk_bytes(self.config.state_chunk_bytes);
         *self.syncer.lock().unwrap() = Some(syncer);
         self.membership
             .lock()

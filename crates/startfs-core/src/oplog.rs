@@ -110,17 +110,27 @@ pub struct Entry {
     pub op: Op,
 }
 
-/// A copy of a node's merge state, for a peer that missed log entries which
-/// have since been compacted away. It is joined into the receiver's own state.
+/// Where a state transfer stands when it starts: the receiver carries on from
+/// `frontier` once it has every chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StateTransfer {
-    /// What the sender's log held when the copy was taken: the receiver
-    /// carries on from there.
+pub struct StatePin {
+    /// What the sender's log held when the transfer started.
     pub frontier: Frontier,
-    /// The sender's clock, so the receiver's later operations sort after it.
+    /// The sender's clock then, so the receiver's later operations sort after it.
     pub hlc: Hlc,
-    /// Merge registers by object (encoded).
+}
+
+/// One bounded piece of a state transfer, for a peer that missed log entries
+/// which have since been compacted away. Its objects are joined into the
+/// receiver's own state as they arrive; the receiver moves on to `pin` only
+/// with the last chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateChunk {
+    pub pin: StatePin,
+    /// Merge registers by object (encoded), in object order.
     pub objects: Vec<(Ino, Vec<u8>)>,
+    /// Whether no objects follow in this transfer.
+    pub last: bool,
 }
 
 /// How much of each node's log a peer holds: next expected seq per origin.

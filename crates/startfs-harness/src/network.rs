@@ -23,6 +23,8 @@ struct State {
     down: HashSet<NodeId>,
     /// `host:port` addresses nodes listen on.
     addrs: HashMap<String, NodeId>,
+    /// Every message that was sent over a working link, oldest first.
+    traffic: Vec<(NodeId, NodeId, Vec<u8>)>,
 }
 
 impl State {
@@ -96,6 +98,12 @@ impl SimNetwork {
         s.delays.insert((b, a), delay);
     }
 
+    /// Every message sent so far over a working link, as `(from, to, bytes)`,
+    /// oldest first.
+    pub fn traffic(&self) -> Vec<(NodeId, NodeId, Vec<u8>)> {
+        self.state.lock().unwrap().traffic.clone()
+    }
+
     /// Make `node` reachable at a `host:port` address, as join tokens name it.
     pub fn register(&self, addr: &str, node: NodeId) {
         self.state.lock().unwrap().addrs.insert(addr.into(), node);
@@ -123,6 +131,7 @@ impl Transport for SimTransport {
         if !s.reachable(self.node, to) {
             return;
         }
+        s.traffic.push((self.node, to, msg.clone()));
         let delay = s.delays.get(&(self.node, to)).copied().unwrap_or_default();
         let deliver_at = self.net.clock.now() + delay.as_nanos() as u64;
         s.in_flight.push(InFlight {

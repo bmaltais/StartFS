@@ -4,6 +4,13 @@ A filesystem replicated across a group of machines (members) that each hold its 
 
 ## Language
 
+**State transfer**:
+The sender's whole merge state, sent in bounded pieces to a member whose missing log entries were compacted away.
+_Avoid_: Snapshot, full sync
+
+**State chunk**:
+One bounded piece of a state transfer.
+
 **Rename cycle**:
 Two or more directories that, through concurrent renames on different members, would each end up inside the other.
 _Avoid_: Rename loop, circular move

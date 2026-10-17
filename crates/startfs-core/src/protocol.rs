@@ -3,7 +3,7 @@
 use crate::chunkstore::ChunkId;
 use crate::control::{FileHealth, Repair};
 use crate::members::{Admission, JoinRequest, Member, TokenRec};
-use crate::oplog::{Entry, Frontier, StateTransfer};
+use crate::oplog::{Entry, Frontier, StateChunk};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,8 +12,9 @@ pub enum Message {
     Hello(Frontier),
     /// Log entries, in per-origin order.
     Entries(Vec<Entry>),
-    /// The sender's merge state, for a peer whose missing log entries were compacted.
-    State(StateTransfer),
+    /// One piece of the sender's merge state, for a peer whose missing log
+    /// entries were compacted.
+    StateChunk(StateChunk),
     /// A member's view of who belongs to the filesystem.
     Members(Vec<Member>),
     /// A new node asks the member named in its token to admit it.
@@ -57,7 +58,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Why a received message could not be understood.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
