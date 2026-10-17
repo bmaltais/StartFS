@@ -157,6 +157,11 @@ impl Cluster {
         panic!("cluster did not settle");
     }
 
+    /// One round of background work on every live node, nothing more.
+    pub fn tick(&self) -> bool {
+        pump(&self.nodes)
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

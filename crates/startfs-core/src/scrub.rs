@@ -49,7 +49,14 @@ impl Scrubber {
         on_battery: bool,
         healing: u32,
     ) -> ScrubStatus {
-        let running = self.state.lock().unwrap().queue.is_some();
+        let remaining = self
+            .state
+            .lock()
+            .unwrap()
+            .queue
+            .as_ref()
+            .map(|q| q.len() as u64);
+        let running = remaining.is_some();
         let last_pass = self.fs.scrub_last_done();
         let next_pass = last_pass.map(|t| t + period.as_nanos() as u64);
         let due = next_pass.is_some_and(|t| t <= now);
@@ -62,6 +69,7 @@ impl Scrubber {
             state,
             last_pass,
             next_pass,
+            remaining: remaining.unwrap_or(0),
             healing,
         }
     }

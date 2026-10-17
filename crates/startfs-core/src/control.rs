@@ -153,6 +153,8 @@ pub struct ScrubStatus {
     pub last_pass: Option<Nanos>,
     /// When the next full pass starts.
     pub next_pass: Option<Nanos>,
+    /// Replicas the pass under way has yet to check.
+    pub remaining: u64,
     /// Replicas found corrupt and still being re-fetched from other copies.
     pub healing: u32,
 }

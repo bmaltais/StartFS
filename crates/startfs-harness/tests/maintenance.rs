@@ -190,3 +190,59 @@ fn scrub_pauses_on_battery_power_and_carries_on_when_plugged_in() {
         .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
     assert_eq!(c.fs(0).read(ino, 0, u32::MAX).unwrap(), data);
 }
+
+/// Files enough that a scrub pass needs several rounds.
+fn many_files(c: &Cluster, count: u64) {
+    for i in 0..count {
+        put(&c.fs(0), &format!("f{i}"), &noise(8 * 1024, 100 + i));
+    }
+    c.sync();
+}
+
+/// Run rounds until a scrub pass is under way on node 0.
+fn until_scrubbing(c: &Cluster) {
+    for _ in 0..50 {
+        if c.control(0).status().unwrap().scrub.state == ScrubState::Running {
+            return;
+        }
+        c.tick();
+    }
+    panic!("the scrub never started");
+}
+
+#[test]
+fn a_scrub_pass_is_spread_over_many_rounds() {
+    let c = cluster(2, 2);
+    many_files(&c, 40);
+    let before = c.control(0).status().unwrap().scrub.last_pass;
+
+    c.advance(31 * DAY);
+    until_scrubbing(&c);
+    let first = c.control(0).status().unwrap().scrub;
+    assert_eq!(first.last_pass, before);
+    assert!(first.remaining > 0);
+
+    c.sync();
+    let done = c.control(0).status().unwrap().scrub;
+    assert_eq!(done.state, ScrubState::Idle);
+    assert!(done.last_pass > before, "{before:?} -> {:?}", done.last_pass);
+}
+
+#[test]
+fn the_scrub_waits_while_replication_has_work_to_do() {
+    let c = cluster(2, 2);
+    many_files(&c, 40);
+    c.advance(31 * DAY);
+    until_scrubbing(&c);
+    let remaining = |c: &Cluster| c.control(0).status().unwrap().scrub.remaining;
+    let started = remaining(&c);
+
+    // A fresh write is still being replicated: the round goes to that.
+    let f = c.fs(0).lookup(ROOT_INO, "f0").unwrap();
+    c.fs(0).write(f.ino, 0, &noise(8 * 1024, 999)).unwrap();
+    c.tick();
+    assert_eq!(remaining(&c), started);
+
+    c.sync();
+    assert_eq!(c.control(0).status().unwrap().scrub.state, ScrubState::Idle);
+}
