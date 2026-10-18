@@ -2,34 +2,13 @@
 //! interface on a simulated cluster.
 
 use startfs_core::ops::*;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 use std::time::Duration;
 
 const BIG: u64 = 10 << 30;
 
-/// Incompressible bytes, so a file really needs chunk storage.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
-/// `nodes` members, all offering plenty, on a filesystem of `copies` copies.
 fn cluster(nodes: usize, copies: u32) -> Cluster {
-    let c = Cluster::start(nodes);
-    let token = c.control(0).create("home", copies).unwrap();
-    c.control(0).set_offer(BIG).unwrap();
-    for i in 1..nodes {
-        c.control(i).join(&token, Some(BIG)).unwrap();
-    }
-    c.sync();
-    c
+    Cluster::with_offers(copies, &vec![BIG; nodes])
 }
 
 fn write(c: &Cluster, node: usize, name: &str, data: &[u8]) {

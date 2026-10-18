@@ -300,8 +300,9 @@ fn an_offer_of_zero_makes_a_pure_client_that_adds_no_storage() {
     assert_eq!(c.control(0).status().unwrap().copies_possible, 2);
 }
 
-/// Incompressible bytes, so a file really needs chunk storage.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
+/// Like `startfs_harness::noise`, but takes the top byte of the state, so the
+/// bytes differ; these tests keep the data they were written against.
+fn noise_hi(len: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..len)
         .map(|_| {
@@ -323,7 +324,7 @@ fn write_file(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
 fn file_contents_are_fetched_from_a_peer_when_read() {
     let c = Cluster::start(2);
     let token = c.control(0).create("home", 2).unwrap();
-    let data = noise(300_000, 7);
+    let data = noise_hi(300_000, 7);
     write_file(&c.fs(0), "big", &data);
     c.control(1).join(&token, None).unwrap();
     c.sync();
@@ -344,8 +345,8 @@ fn file_contents_are_fetched_from_a_peer_when_read() {
 fn recently_read_files_stay_readable_offline_and_unread_ones_do_not() {
     let c = with_clients(1, 2);
     let (a, b) = (c.fs(0), c.fs(1));
-    let seen = noise(100_000, 1);
-    let unseen = noise(100_000, 2);
+    let seen = noise_hi(100_000, 1);
+    let unseen = noise_hi(100_000, 2);
     write_file(&a, "seen", &seen);
     write_file(&a, "unseen", &unseen);
     c.sync();
@@ -364,7 +365,7 @@ fn recently_read_files_stay_readable_offline_and_unread_ones_do_not() {
 #[test]
 fn a_chunk_is_fetched_from_whichever_peer_can_supply_it() {
     let c = with_clients(2, 3);
-    let data = noise(100_000, 3);
+    let data = noise_hi(100_000, 3);
     write_file(&c.fs(0), "f", &data);
     c.sync();
     // Node 1 reads (and so caches) the file, then the author goes away.
@@ -383,7 +384,7 @@ fn the_cache_is_bounded_and_drops_the_least_recently_used_file() {
     let token = c.control(0).create("home", 2).unwrap();
     c.control(1).join(&token, Some(0)).unwrap();
     let a = c.fs(0);
-    let files: Vec<_> = (1..=3u64).map(|i| noise(100_000, 2 * i + 1)).collect();
+    let files: Vec<_> = (1..=3u64).map(|i| noise_hi(100_000, 2 * i + 1)).collect();
     for (i, data) in files.iter().enumerate() {
         write_file(&a, &format!("f{i}"), data);
     }
@@ -410,7 +411,7 @@ fn cache_eviction_never_touches_replica_storage() {
     let c = Cluster::start_with_config(2, "cache_bytes = 120000");
     let token = c.control(0).create("home", 2).unwrap();
     c.control(1).join(&token, Some(0)).unwrap();
-    let files: Vec<_> = (1..=3u64).map(|i| noise(100_000, 2 * i + 1)).collect();
+    let files: Vec<_> = (1..=3u64).map(|i| noise_hi(100_000, 2 * i + 1)).collect();
     for (i, data) in files.iter().enumerate() {
         write_file(&c.fs(0), &format!("f{i}"), data);
     }
@@ -441,7 +442,7 @@ fn cache_eviction_never_touches_replica_storage() {
 #[test]
 fn a_corrupt_chunk_on_a_peer_is_never_returned_to_the_reader() {
     let c = with_clients(2, 3);
-    let data = noise(100_000, 4);
+    let data = noise_hi(100_000, 4);
     write_file(&c.fs(0), "f", &data);
     c.sync();
     let on = |i: usize| c.fs(i).lookup(ROOT_INO, "f").unwrap().ino;
@@ -457,7 +458,7 @@ fn a_corrupt_chunk_on_a_peer_is_never_returned_to_the_reader() {
 #[test]
 fn a_reader_skips_a_peer_with_a_corrupt_chunk_and_uses_a_good_copy() {
     let c = with_clients(2, 3);
-    let data = noise(100_000, 5);
+    let data = noise_hi(100_000, 5);
     write_file(&c.fs(0), "f", &data);
     c.sync();
     let on = |i: usize| c.fs(i).lookup(ROOT_INO, "f").unwrap().ino;
@@ -471,7 +472,7 @@ fn a_reader_skips_a_peer_with_a_corrupt_chunk_and_uses_a_good_copy() {
 #[test]
 fn a_damaged_cache_entry_is_refetched_not_returned() {
     let c = with_clients(1, 2);
-    let data = noise(100_000, 6);
+    let data = noise_hi(100_000, 6);
     write_file(&c.fs(0), "f", &data);
     c.sync();
     let on_b = c.fs(1).lookup(ROOT_INO, "f").unwrap().ino;
@@ -488,7 +489,7 @@ fn a_damaged_cache_entry_is_refetched_not_returned() {
 fn editing_a_remote_file_fetches_it_first_and_the_author_then_reads_the_edit() {
     let c = joined(2, 2);
     let (a, b) = (c.fs(0), c.fs(1));
-    let data = noise(100_000, 8);
+    let data = noise_hi(100_000, 8);
     write_file(&a, "f", &data);
     c.sync();
 

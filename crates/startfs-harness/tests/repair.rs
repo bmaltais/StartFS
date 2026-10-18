@@ -5,38 +5,15 @@ use startfs_core::control::NodeState;
 use startfs_core::members::MemberId;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 use std::time::Duration;
 
 const BIG: u64 = 10 << 30;
 const MINUTE: Duration = Duration::from_secs(60);
 
-/// Incompressible bytes, so a file really needs chunk storage.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
 /// A filesystem of `copies` copies on `nodes` nodes, all offering plenty.
 fn cluster(copies: u32, nodes: usize) -> Cluster {
-    cluster_with(copies, nodes, "")
-}
-
-fn cluster_with(copies: u32, nodes: usize, config: &str) -> Cluster {
-    let c = Cluster::start_with_config(nodes, config);
-    let token = c.control(0).create("home", copies).unwrap();
-    for i in 1..nodes {
-        c.control(i).join(&token, Some(BIG)).unwrap();
-    }
-    c.sync();
-    c
+    Cluster::with_filesystem(copies, nodes, "")
 }
 
 fn put(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
@@ -81,7 +58,7 @@ fn after_the_grace_period_every_chunk_is_back_to_n_copies_without_user_action() 
 #[test]
 fn an_outage_shorter_than_the_grace_period_triggers_no_repair_while_two_copies_remain() {
     // Without stand-in copies, which would cover for the member from five minutes on.
-    let c = cluster_with(3, 4, "standin_days = 0");
+    let c = Cluster::with_filesystem(3, 4, "standin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
 
@@ -134,7 +111,7 @@ fn stand_in_copies_made_during_a_short_outage_are_trimmed_when_the_node_returns(
 #[test]
 fn a_returning_nodes_copies_count_again_and_the_surplus_is_trimmed() {
     // Without stand-in copies, which would keep the surplus for days.
-    let c = cluster_with(2, 4, "standin_days = 0");
+    let c = Cluster::with_filesystem(2, 4, "standin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
     c.crash(3);
@@ -157,7 +134,7 @@ fn a_returning_nodes_copies_count_again_and_the_surplus_is_trimmed() {
 #[test]
 fn repair_is_rate_limited_per_node() {
     // About two and a half 8 KiB chunks a second per node.
-    let c = cluster_with(2, 4, "repair_bytes_per_sec = 20000");
+    let c = Cluster::with_filesystem(2, 4, "repair_bytes_per_sec = 20000");
     write_files(&c, 60);
     let before = replicas(&c);
     let target = before.iter().sum::<u64>();
@@ -185,7 +162,7 @@ fn repair_is_rate_limited_per_node() {
 
 #[test]
 fn status_shows_repair_progress_and_clears_it_when_done() {
-    let c = cluster_with(2, 4, "repair_bytes_per_sec = 20000");
+    let c = Cluster::with_filesystem(2, 4, "repair_bytes_per_sec = 20000");
     write_files(&c, 60);
     c.crash(3);
     for s in (0..3).map(|i| c.control(i).status().unwrap()) {
@@ -224,7 +201,7 @@ fn status_shows_repair_progress_and_clears_it_when_done() {
 
 #[test]
 fn at_risk_chunks_are_repaired_before_degraded_ones() {
-    let c = cluster_with(3, 5, "repair_bytes_per_sec = 20000");
+    let c = Cluster::with_filesystem(3, 5, "repair_bytes_per_sec = 20000");
     write_files(&c, 80);
 
     // Two nodes die: chunks that lived on both are down to one copy.
@@ -261,7 +238,7 @@ fn at_risk_chunks_are_repaired_before_degraded_ones() {
 
 #[test]
 fn the_grace_period_is_configurable() {
-    let c = cluster_with(3, 4, "repair_grace_secs = 600\nstandin_days = 0");
+    let c = Cluster::with_filesystem(3, 4, "repair_grace_secs = 600\nstandin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
 
