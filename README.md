@@ -42,7 +42,7 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
    curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
    ```
 
-   Set `STARTFS_VERSION=v1.3.0` to pin a release, `INSTALL_DIR` to change the
+   Set `STARTFS_VERSION=v1.3.1` to pin a release, `INSTALL_DIR` to change the
    target, or `STARTFS_NO_SERVICE=1` to install the unit without starting it. If `~/.local/bin` is not on your `PATH` (it is on Omarchy; on Ubuntu and
    Fedora it is only after you log out and in again), the installer ends by printing the
    `export PATH=...` line to run in the current shell. `startfs --version` shows what is
@@ -102,7 +102,7 @@ curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/insta
 On a machine that already has StartFS, this is what it does, in order:
 
 1. **Picks the release.** The latest published release, or the one named by
-   `STARTFS_VERSION=v1.3.0`. If that is the version already installed it prints
+   `STARTFS_VERSION=v1.3.1`. If that is the version already installed it prints
    "already up to date" and stops without touching anything. If it is older than the
    installed one it refuses, unless you named it with `STARTFS_VERSION`, in which case
    it warns and goes ahead.
