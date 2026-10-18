@@ -693,6 +693,19 @@ fn render(s: &Status) -> String {
     if let Some(line) = unreplicated_line(&s.unreplicated) {
         out.push_str(&line);
     }
+    for st in &s.stranded {
+        let addr = s
+            .members
+            .iter()
+            .find(|m| m.id == st.member)
+            .map_or("a member", |m| m.addr.as_str());
+        out.push_str(&format!(
+            "at risk: {} chunk{} may exist only on {addr} (single copy in its report {} ago)\n",
+            st.chunks,
+            if st.chunks == 1 { "" } else { "s" },
+            time_left(st.secs_ago)
+        ));
+    }
     if !s.conflicts.is_empty() {
         out.push_str(&format!(
             "conflicts: {} (delete a copy to resolve it)\n",

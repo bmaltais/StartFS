@@ -54,3 +54,10 @@ _Avoid_: Temporary replica, backup copy
 **Asleep**:
 A member unseen for 5 minutes but not yet lost. Others cover for it with stand-in copies. A member unseen past the repair grace period is lost instead, and its chunks are re-replicated.
 _Avoid_: Offline, down (down means unseen for three hello intervals)
+
+**Collective memory**:
+What the members remember about each other that none of them stores on disk: when a member was last seen, when it was last seen asleep, and what a member that is not up last reported holding alone. Each daemon keeps it in memory and gossips it in `Health`, so a restarted daemon relearns it from its peers as it reconnects. It is lost only if every daemon that knows it stops at once (ADR 0003).
+_Avoid_: Hive mind, shared state
+
+**Stranded chunks**:
+Chunks a member that is not up last reported as a single copy. Nobody else knows they exist, so they may exist only on that member. `status` lists them and holds the verdict at risk until the member returns.

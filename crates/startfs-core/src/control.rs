@@ -201,6 +201,17 @@ pub struct Shortfall {
     pub chunks: u32,
 }
 
+/// Chunks a member that is not up last reported as a single copy (zero when it
+/// reported none). Others may have been given a copy since, but nobody else
+/// knows of these chunks, so they may exist only on that member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stranded {
+    pub member: MemberId,
+    pub chunks: u32,
+    /// How old the report is.
+    pub secs_ago: u64,
+}
+
 impl Shortfall {
     pub fn tier(&self) -> Tier {
         crate::replication::tier(self.copies)
@@ -319,6 +330,10 @@ pub struct Status {
     /// Members whose replication state is missing from `unreplicated` and
     /// `repair`: unreachable, or not heard from yet. Empty when the view is complete.
     pub unheard: Vec<MemberId>,
+    /// Single-copy chunks that members not up last reported, which may now
+    /// exist only on them.
+    #[serde(default)]
+    pub stranded: Vec<Stranded>,
     pub scrub: ScrubStatus,
     pub log: LogStatus,
     pub gc: GcStatus,
