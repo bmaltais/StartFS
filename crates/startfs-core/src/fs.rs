@@ -3,14 +3,16 @@
 //! Metadata records are versioned (first byte) so the format can grow, for
 //! example to add an encryption envelope, without a redesign.
 
-use crate::cache::{CacheStats, ChunkCache};
+use crate::cache::{CacheStats, ChunkCache, DEFAULT_DECODED_BYTES, DecodedCache};
 use crate::chunker;
-use crate::chunkstore::{ChunkId, ChunkStore};
+use crate::chunkstore::{ChunkId, ChunkStore, Compression};
 use crate::clock::Clock;
 use crate::members::MemberId;
 use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
-use redb::{Database, Durability, ReadableTable, Table, TableDefinition};
+use redb::{
+    Database, Durability, ReadOnlyTable, ReadableDatabase, ReadableTable, Table, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -45,6 +47,7 @@ mod compact;
 mod gc;
 mod merge;
 mod replicas;
+use replicas::Piece;
 mod scrub;
 mod usage;
 mod writebuf;
@@ -170,6 +173,50 @@ impl Tables<'_> {
     }
 }
 
+/// Anything that can look an inode up by number.
+pub(crate) trait Inodes {
+    fn inode(&self, ino: Ino) -> FsResult<Inode>;
+}
+
+impl Inodes for Tables<'_> {
+    fn inode(&self, ino: Ino) -> FsResult<Inode> {
+        Tables::inode(self, ino)
+    }
+}
+
+/// A snapshot of the tree for operations that only read it. Taking one needs
+/// neither the node lock nor the single write transaction, so reads run
+/// alongside each other and alongside a writer.
+pub(crate) struct View {
+    inodes: ReadOnlyTable<u64, &'static [u8]>,
+    dirents: ReadOnlyTable<(u64, &'static str), u64>,
+}
+
+impl Inodes for View {
+    fn inode(&self, ino: Ino) -> FsResult<Inode> {
+        let g = self.inodes.get(ino).map_err(db)?.ok_or(FsError::NotFound)?;
+        decode(g.value())
+    }
+}
+
+impl View {
+    fn dir(&self, ino: Ino) -> FsResult<Inode> {
+        let i = self.inode(ino)?;
+        if i.kind == FileKind::Dir {
+            Ok(i)
+        } else {
+            Err(FsError::NotDir)
+        }
+    }
+    fn entry(&self, parent: Ino, name: &str) -> FsResult<Option<Ino>> {
+        Ok(self
+            .dirents
+            .get((parent, name))
+            .map_err(db)?
+            .map(|g| g.value()))
+    }
+}
+
 /// Where chunks this node lacks can be fetched from.
 pub trait ChunkSource: Send + Sync {
     /// Ask peers for a chunk. `accept` says whether received bytes are the
@@ -197,6 +244,8 @@ pub struct LocalFs {
     usable_bytes: AtomicU64,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
+    /// Decoded chunks recently read, so small reads do not decode a chunk each.
+    decoded: DecodedCache,
     source: Mutex<Option<Arc<dyn ChunkSource>>>,
     clock: Arc<dyn Clock>,
     config: NodeConfig,
@@ -248,6 +297,7 @@ impl LocalFs {
             staging_limit: AtomicU64::new(u64::MAX),
             usable_bytes: AtomicU64::new(0),
             cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
+            decoded: DecodedCache::new(DEFAULT_DECODED_BYTES),
             source: Mutex::new(None),
             clock,
             node: AtomicU32::new(config.node.0),
@@ -298,6 +348,44 @@ impl LocalFs {
 
     pub fn node(&self) -> MemberId {
         MemberId(self.node.load(Ordering::SeqCst))
+    }
+
+    /// Cap the memory used to keep recently read chunks decoded; 0 turns it off.
+    pub fn set_read_cache_limit(&self, bytes: u64) {
+        self.decoded.set_limit(bytes);
+    }
+
+    /// Choose whether chunks this node stores from now on are compressed.
+    pub fn set_compression(&self, mode: Compression) {
+        self.chunks.set_compression(mode);
+        self.staging.set_compression(mode);
+        self.cache.set_compression(mode);
+    }
+
+    /// Run `f` on a snapshot of the tree, without the node lock.
+    fn view<T>(&self, f: impl FnOnce(&View) -> FsResult<T>) -> FsResult<T> {
+        let txn = self.db.begin_read().map_err(db)?;
+        let view = View {
+            inodes: txn.open_table(INODES).map_err(db)?,
+            dirents: txn.open_table(DIRENTS).map_err(db)?,
+        };
+        f(&view)
+    }
+
+    /// [`Self::fetching`] for read-only work on a [`View`].
+    fn fetching_view<T>(&self, mut f: impl FnMut(&View, &mut Spill) -> FsResult<T>) -> FsResult<T> {
+        let mut spill = Spill::default();
+        loop {
+            spill.miss = None;
+            match self.view(|v| f(v, &mut spill)) {
+                Err(FsError::Unavailable) if spill.miss.is_some() => {
+                    let id = spill.miss.take().expect("checked");
+                    let data = self.fetch_remote(&id)?;
+                    spill.got.insert(id, data);
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Take the member id assigned at join. Only valid before the node has
@@ -500,9 +588,23 @@ impl LocalFs {
         self.cache.stats()
     }
 
-    fn chunk(&self, id: &ChunkId, spill: &mut Spill) -> FsResult<Vec<u8>> {
-        if let Some(data) = self.local_chunk(id).or_else(|| spill.got.get(id).cloned()) {
+    /// The bytes of a chunk, from memory when a recent read decoded them. A
+    /// decoded chunk is used only while a copy is still held here (replica,
+    /// staged or cached), so eviction and removal mean what they did before;
+    /// using one counts as a use of the cached copy.
+    fn chunk(&self, id: &ChunkId, spill: &mut Spill) -> FsResult<Arc<Vec<u8>>> {
+        if let Some(data) = self.decoded.get(id)
+            && (self.cache.touch(id) || self.has_replica(id) || self.has_staged(id))
+        {
             return Ok(data);
+        }
+        if let Some(data) = self.local_chunk(id) {
+            let data = Arc::new(data);
+            self.decoded.put(*id, data.clone());
+            return Ok(data);
+        }
+        if let Some(data) = spill.got.get(id) {
+            return Ok(Arc::new(data.clone()));
         }
         spill.miss = Some(*id);
         Err(FsError::Unavailable)
@@ -559,7 +661,7 @@ impl LocalFs {
             Content::Chunks(refs) => {
                 let mut out = Vec::with_capacity(i.size as usize);
                 for r in refs {
-                    out.extend(self.chunk(&r.id, spill)?);
+                    out.extend_from_slice(&self.chunk(&r.id, spill)?);
                 }
                 Ok(out)
             }
@@ -606,13 +708,13 @@ impl LocalFs {
         i.content = if data.len() <= INLINE_MAX {
             Content::Inline(data.to_vec())
         } else {
-            let pieces: Vec<&[u8]> = chunker::split(data);
+            let pieces: Vec<Piece<'_>> = chunker::split(data).into_iter().map(Piece::new).collect();
             self.make_room(&pieces)?;
             let mut refs = Vec::new();
-            for c in pieces {
+            for c in &pieces {
                 refs.push(ChunkRef {
                     id: self.keep(c)?,
-                    len: c.len() as u32,
+                    len: c.data.len() as u32,
                 });
             }
             Content::Chunks(refs)
@@ -621,7 +723,7 @@ impl LocalFs {
         Ok(())
     }
 
-    fn file(t: &Tables<'_>, ino: Ino) -> FsResult<Inode> {
+    fn file(t: &impl Inodes, ino: Ino) -> FsResult<Inode> {
         let i = t.inode(ino)?;
         match i.kind {
             FileKind::File => Ok(i),
@@ -675,7 +777,7 @@ impl LocalFs {
 
 impl FsOps for LocalFs {
     fn lookup(&self, parent: Ino, name: &str) -> FsResult<Attr> {
-        let attr = self.run(false, |t| {
+        let attr = self.view(|t| {
             let p = t.dir(parent)?;
             let ino = match name {
                 "." => parent,
@@ -688,7 +790,7 @@ impl FsOps for LocalFs {
     }
 
     fn getattr(&self, ino: Ino) -> FsResult<Attr> {
-        let attr = self.run(false, |t| Ok(self.attr(ino, &t.inode(ino)?)))?;
+        let attr = self.view(|t| Ok(self.attr(ino, &t.inode(ino)?)))?;
         Ok(self.with_buffered(attr))
     }
 
@@ -749,7 +851,7 @@ impl FsOps for LocalFs {
     }
 
     fn readlink(&self, ino: Ino) -> FsResult<String> {
-        self.run(false, |t| {
+        self.view(|t| {
             let i = t.inode(ino)?;
             match (i.kind, i.content) {
                 (FileKind::Symlink, Content::Inline(b)) => String::from_utf8(b)
@@ -794,7 +896,7 @@ impl FsOps for LocalFs {
         let to = offset.saturating_add(len as u64);
         // Taken first: a commit in between only makes the committed read newer.
         let buffered = self.buffered_part(ino, offset, to);
-        self.fetching(false, |t, spill| {
+        self.fetching_view(|t, spill| {
             let i = Self::file(t, ino)?;
             let size = i.size.max(buffered.as_ref().map_or(0, |b| b.2));
             let end = to.min(size);
@@ -927,7 +1029,7 @@ impl FsOps for LocalFs {
     }
 
     fn readdir(&self, ino: Ino) -> FsResult<Vec<DirEntry>> {
-        self.run(false, |t| {
+        self.view(|t| {
             t.dir(ino)?;
             let mut out = Vec::new();
             for row in t.dirents.range((ino, "")..(ino + 1, "")).map_err(db)? {
@@ -963,7 +1065,7 @@ impl FsOps for LocalFs {
         if is_acl(name) {
             return Err(FsError::NotSupported);
         }
-        self.run(false, |t| {
+        self.view(|t| {
             t.inode(ino)?
                 .xattrs
                 .get(name)
@@ -973,7 +1075,7 @@ impl FsOps for LocalFs {
     }
 
     fn listxattr(&self, ino: Ino) -> FsResult<Vec<String>> {
-        self.run(false, |t| Ok(t.inode(ino)?.xattrs.into_keys().collect()))
+        self.view(|t| Ok(t.inode(ino)?.xattrs.into_keys().collect()))
     }
 
     fn removexattr(&self, ino: Ino, name: &str) -> FsResult<()> {

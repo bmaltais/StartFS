@@ -60,6 +60,7 @@ impl LocalFs {
             out.local_disk_bytes += info.disk_bytes;
             if info.zstd {
                 out.zstd_chunks += 1;
+                out.zstd_plain_bytes += info.plain_bytes;
             } else {
                 out.raw_chunks += 1;
             }

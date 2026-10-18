@@ -85,7 +85,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 10;
+pub const PROTOCOL_VERSION: u8 = 11;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -169,13 +169,13 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        10,
-        "2d841955146d5aa6f27a363bbabd9df2fecc7b019819e813fd6b9f90bb3f23f6",
+        11,
+        "67924192397a86dc550bae3e6dfd5b4df7f93ecf849879858510cdb6218e8a0c",
     );
 
     #[test]
     fn a_change_to_the_wire_shape_comes_with_a_protocol_version_bump() {
-        use crate::control::{FilesystemInfo, Repair, Shortfall};
+        use crate::control::{Efficiency, FilesystemInfo, NodeStats, Repair, Shortfall, Usage};
         use crate::members::{Admission, IdRange, Member, MemberId, TokenRec};
         use crate::net::NodeId;
         let member = Member {
@@ -236,6 +236,24 @@ mod tests {
             Message::Copies { copies: 3, rev: 2 },
             Message::ChunkAck([1u8; 32], Replica::Missing),
             Message::StatsRequest,
+            Message::StatsReply(NodeStats {
+                usage: Usage {
+                    chunks: 1,
+                    stored_bytes: 2,
+                    offer_bytes: 3,
+                },
+                efficiency: Efficiency {
+                    logical_bytes: 4,
+                    referenced_bytes: 5,
+                    inline_bytes: 6,
+                    local_plain_bytes: 7,
+                    local_disk_bytes: 8,
+                    raw_chunks: 9,
+                    zstd_chunks: 10,
+                    zstd_plain_bytes: 11,
+                },
+                pending_gc_bytes: 12,
+            }),
         ];
         // Without the version byte, so only the shape of the messages is pinned.
         let bytes: Vec<u8> = samples

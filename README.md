@@ -316,6 +316,8 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `port` | 7600 | QUIC port peers connect to |
 | `offer_bytes` | 10 GiB | space this node offers (0 = pure client) |
 | `cache_bytes` | 1 GiB | LRU cache of chunks fetched from peers |
+| `read_cache_bytes` | 32 MiB | recently read chunks kept decoded in memory, so reading a file in small pieces does not decode a chunk per read (0 = off) |
+| `compression` | `auto` | `auto` compresses only chunks a quick sample shows to shrink, and keeps the result when it saves at least an eighth; `off` stores chunks as they are; `always` compresses every chunk and keeps any saving. Applies to chunks stored from now on |
 | `staging_bytes` | 4 GiB | unreplicated writes held before writes are refused |
 | `sync_quiet_ms` | 1000 | how long without a metadata commit before recent creates are made durable on disk |
 | `write_commit_delay_ms` | 1000 | how long a file must go unwritten before the background tick commits its buffered writes |

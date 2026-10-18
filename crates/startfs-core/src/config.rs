@@ -1,5 +1,7 @@
 //! Daemon configuration. Every field has a default so no file is needed.
 
+use crate::cache::DEFAULT_DECODED_BYTES;
+use crate::chunkstore::Compression;
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +17,14 @@ pub struct Config {
     pub offer_bytes: u64,
     /// Most bytes of fetched chunks kept on this node (the LRU cache).
     pub cache_bytes: u64,
+    /// Most bytes of recently read chunks kept decoded in memory, so reading a
+    /// file in small pieces does not decode a chunk for each piece. 0 turns it off.
+    pub read_cache_bytes: u64,
+    /// Whether chunks this node stores are compressed: `auto` (try zstd on
+    /// chunks a sample shows to be compressible, keep it only when it saves
+    /// at least an eighth), `off`, or `always` (every chunk, kept whenever
+    /// smaller). Only affects chunks stored from now on.
+    pub compression: Compression,
     /// Most bytes of not-yet-replicated writes this node holds; writes are
     /// refused beyond it.
     pub staging_bytes: u64,
@@ -67,6 +77,8 @@ impl Default for Config {
             port: 7600,
             offer_bytes: 10 << 30,
             cache_bytes: 1 << 30,
+            read_cache_bytes: DEFAULT_DECODED_BYTES,
+            compression: Compression::Auto,
             staging_bytes: 4 << 30,
             write_buffer_bytes: crate::fs::DEFAULT_WRITE_BUFFER,
             write_commit_delay_ms: 1000,

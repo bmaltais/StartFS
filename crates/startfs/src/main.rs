@@ -570,6 +570,13 @@ fn efficiency_lines(s: &Status, copies: u32) -> String {
         ", {} compressed and {} stored as is\n",
         e.zstd_chunks, e.raw_chunks
     ));
+    if e.zstd_chunks > 0 && e.local_plain_bytes > 0 {
+        out.push_str(&format!(
+            "  compression saved {} ({:.0}% of this node's chunk bytes were compressed)\n",
+            human(e.local_plain_bytes.saturating_sub(e.local_disk_bytes)),
+            100.0 * e.zstd_plain_bytes as f64 / e.local_plain_bytes as f64
+        ));
+    }
     let expected = e.referenced_bytes.saturating_mul(u64::from(copies));
     if expected > 0 {
         out.push_str(&format!(

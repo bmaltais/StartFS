@@ -7,6 +7,22 @@ use crate::protocol::Replica;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
+/// A chunk's bytes with their BLAKE3 hash, computed once for everything that
+/// writes the chunk.
+pub(super) struct Piece<'a> {
+    pub id: ChunkId,
+    pub data: &'a [u8],
+}
+
+impl<'a> Piece<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            id: *blake3::hash(data).as_bytes(),
+            data,
+        }
+    }
+}
+
 impl LocalFs {
     /// From now on new chunks are staged and replicated by placement, rather
     /// than kept in the replica store. Set once the node belongs to a filesystem.
@@ -36,18 +52,15 @@ impl LocalFs {
     /// the cap in force (a node offering no space), this and a full local disk
     /// are the only reasons a write fails for lack of space: copies that cannot
     /// be placed elsewhere never stop a write.
-    pub(super) fn make_room(&self, pieces: &[&[u8]]) -> FsResult<()> {
+    pub(super) fn make_room(&self, pieces: &[Piece<'_>]) -> FsResult<()> {
         if !self.replicating.load(Ordering::SeqCst) {
             return Ok(());
         }
         let mut seen = HashSet::new();
         let needed: u64 = pieces
             .iter()
-            .filter(|c| {
-                let id = *blake3::hash(c).as_bytes();
-                !self.has_replica(&id) && !self.has_staged(&id) && seen.insert(id)
-            })
-            .map(|c| c.len() as u64)
+            .filter(|p| !self.has_replica(&p.id) && !self.has_staged(&p.id) && seen.insert(p.id))
+            .map(|p| p.data.len() as u64)
             .sum();
         if self.staging.stats()?.stored_bytes + needed > self.staging_limit.load(Ordering::SeqCst) {
             return Err(FsError::NoSpace);
@@ -57,14 +70,13 @@ impl LocalFs {
 
     /// Keep a chunk written here: in staging while the node belongs to a
     /// filesystem (replication places it), else straight in the replica store.
-    pub(super) fn keep(&self, data: &[u8]) -> FsResult<ChunkId> {
-        let id = *blake3::hash(data).as_bytes();
+    pub(super) fn keep(&self, piece: &Piece<'_>) -> FsResult<ChunkId> {
         if !self.replicating.load(Ordering::SeqCst) {
-            self.chunks.put_lazy(data)?;
-        } else if !self.has_replica(&id) {
-            self.staging.put_lazy(data)?;
+            self.chunks.put_lazy_hashed(piece.id, piece.data)?;
+        } else if !self.has_replica(&piece.id) {
+            self.staging.put_lazy_hashed(piece.id, piece.data)?;
         }
-        Ok(id)
+        Ok(piece.id)
     }
 
     /// Chunks this node holds as replicas.
@@ -106,7 +118,7 @@ impl LocalFs {
         if used + data.len() as u64 > offer {
             return Ok(Replica::Full);
         }
-        self.chunks.put(data)?;
+        self.chunks.put_hashed(id, data)?;
         Ok(Replica::Stored)
     }
 

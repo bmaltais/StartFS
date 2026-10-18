@@ -63,7 +63,7 @@ impl LocalFs {
     pub(super) fn buffered_write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
         let mut dirty = self.dirty.lock().unwrap();
         if !dirty.contains_key(&ino) {
-            self.run(false, |t| Self::file(t, ino).map(|_| ()))?;
+            self.view(|t| Self::file(t, ino).map(|_| ()))?;
         }
         self.admit(&dirty, data.len() as u64)?;
         let now = self.clock.now();
@@ -212,7 +212,7 @@ impl LocalFs {
         loop {
             let eof = b == n;
             for r in &refs[loaded..b] {
-                win.extend(self.chunk(&r.id, spill)?);
+                win.extend_from_slice(&self.chunk(&r.id, spill)?);
             }
             loaded = b;
             let wend = if eof { new_total } else { bounds[b] };
@@ -226,7 +226,7 @@ impl LocalFs {
                     rest: None,
                 }));
             }
-            let pieces = chunker::split(&win);
+            let pieces: Vec<Piece<'_>> = chunker::split(&win).into_iter().map(Piece::new).collect();
             // Where the new chunks rejoin the old ones, if they do: a cut at or
             // past the region that is also an old boundary. A cut is only
             // trusted when the chunker saw its whole maximum span.
@@ -234,7 +234,7 @@ impl LocalFs {
             if !eof {
                 let mut at = sa;
                 for (idx, p) in pieces.iter().enumerate() {
-                    let (s, e) = (at, at + p.len() as u64);
+                    let (s, e) = (at, at + p.data.len() as u64);
                     at = e;
                     if s + MAX_CHUNK as u64 > wend {
                         break;
@@ -264,7 +264,7 @@ impl LocalFs {
                 let at = sa
                     + pieces[..used - 1]
                         .iter()
-                        .map(|p| p.len() as u64)
+                        .map(|p| p.data.len() as u64)
                         .sum::<u64>();
                 if at >= i.size {
                     used -= 1;
@@ -282,9 +282,9 @@ impl LocalFs {
             for p in committed {
                 out.push(ChunkRef {
                     id: self.keep(p)?,
-                    len: p.len() as u32,
+                    len: p.data.len() as u32,
                 });
-                size += p.len() as u64;
+                size += p.data.len() as u64;
             }
             out.extend_from_slice(&refs[tail_from..]);
             size += i.size - bounds[tail_from];

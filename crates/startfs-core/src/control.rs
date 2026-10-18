@@ -154,6 +154,9 @@ pub struct Efficiency {
     pub raw_chunks: u64,
     /// Compressed with zstd.
     pub zstd_chunks: u64,
+    /// Plaintext bytes of the chunks compressed with zstd.
+    #[serde(default)]
+    pub zstd_plain_bytes: u64,
 }
 
 /// One node's storage figures: what it holds and how well it is stored.

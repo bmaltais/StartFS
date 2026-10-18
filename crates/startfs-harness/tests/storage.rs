@@ -117,6 +117,91 @@ fn compressible_data_shrinks_and_incompressible_data_is_stored_as_is() {
     assert!((100_000..=100_016).contains(&noise), "stored {noise}");
 }
 
+/// Noise with a zeroed kilobyte in every sixteen: zstd saves about 6%.
+fn barely_compressible(len: usize) -> Vec<u8> {
+    let mut data = random(len, 9);
+    for block in data.chunks_mut(16 * 1024) {
+        let n = block.len().min(1024);
+        block[..n].fill(0);
+    }
+    data
+}
+
+#[test]
+fn by_default_compression_is_kept_only_when_it_saves_a_worthwhile_amount() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+
+    let data = barely_compressible(1 << 20);
+    put(&fs, "barely", &data);
+    let stored = fs.stats().unwrap().stored_bytes;
+    assert!(stored <= data.len() as u64 + 16, "stored {stored}");
+    assert_eq!(
+        fs.read(fs.lookup(ROOT_INO, "barely").unwrap().ino, 0, u32::MAX)
+            .unwrap(),
+        data
+    );
+
+    put(&fs, "zeros", &vec![0u8; 1 << 20]);
+    let zeros = fs.stats().unwrap().stored_bytes - stored;
+    assert!(zeros < 10_000, "stored {zeros}");
+}
+
+#[test]
+fn compression_always_keeps_any_saving() {
+    let c = Cluster::start_with_config(1, "compression = \"always\"");
+    let fs = c.fs(0);
+
+    let data = barely_compressible(1 << 20);
+    put(&fs, "barely", &data);
+    let stored = fs.stats().unwrap().stored_bytes;
+    assert!(
+        stored < data.len() as u64 - data.len() as u64 / 32,
+        "stored {stored}"
+    );
+    assert_eq!(
+        fs.read(fs.lookup(ROOT_INO, "barely").unwrap().ino, 0, u32::MAX)
+            .unwrap(),
+        data
+    );
+}
+
+#[test]
+fn compression_off_stores_every_chunk_as_is() {
+    let c = Cluster::start_with_config(1, "compression = \"off\"");
+    let fs = c.fs(0);
+    c.control(0).create("home", 1).unwrap();
+
+    let zeros = vec![0u8; 1 << 20];
+    let ino = put(&fs, "zeros", &zeros);
+    c.sync();
+    let stored = fs.stats().unwrap().stored_bytes;
+    assert!(stored >= zeros.len() as u64, "stored {stored}");
+    assert_eq!(c.control(0).status().unwrap().efficiency.zstd_chunks, 0);
+    assert_eq!(fs.read(ino, 0, u32::MAX).unwrap(), zeros);
+}
+
+#[test]
+fn a_file_read_in_small_pieces_reads_back_whole() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    let mut data = random(5 << 20, 11);
+    data[1 << 20..3 << 20].fill(b'x');
+    let ino = put(&fs, "pieces", &data);
+    fs.flush(ino).unwrap();
+
+    // Odd sizes straddle chunk boundaries; the second pass reads the same ranges again.
+    for _ in 0..2 {
+        let mut got = Vec::new();
+        while got.len() < data.len() {
+            let piece = fs.read(ino, got.len() as u64, 100_003).unwrap();
+            assert!(!piece.is_empty());
+            got.extend(piece);
+        }
+        assert!(got == data, "bytes differ");
+    }
+}
+
 #[test]
 fn corrupted_chunks_are_detected_and_never_returned() {
     let c = Cluster::start(1);
@@ -187,6 +272,8 @@ fn status_reports_dedup_and_compression_efficiency() {
     assert!(e.zstd_chunks >= 1, "{e:?}");
     assert!(e.raw_chunks >= 1, "{e:?}");
     assert_eq!(e.zstd_chunks + e.raw_chunks, fs.stats().unwrap().chunks);
+    // Only the text chunk was compressed, and status says how much of the data that is.
+    assert_eq!(e.zstd_plain_bytes, text.len() as u64, "{e:?}");
 }
 
 #[test]
