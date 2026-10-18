@@ -423,10 +423,15 @@ impl Replicator {
             }
             let replicas = t.holders.len() as u32 + u32::from(held);
             // A staged copy only counts while it is the sole copy.
-            let copies = if replicas == 0 { 1 } else { replicas };
+            let copies = if replicas == 0 && self.fs.has_staged(id) {
+                1
+            } else {
+                replicas
+            };
             // Holders share the counting by hash. A node that wrote the chunk
-            // and no longer (or not yet) holds it counts it alone: the
-            // holders it reached are not tracking it.
+            // and does not hold it counts it alone, since the holders it
+            // reached may not be tracking it. Around a membership change both
+            // can count it, for a moment.
             let mine = !held || is_steward(id, view.me, t.holders.iter().copied());
             if copies < view.copies && mine {
                 *by_copies.entry(copies).or_default() += 1;
