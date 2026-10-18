@@ -154,6 +154,8 @@ impl Daemon {
             membership.my_offer(config.offer_bytes),
         ));
         fs.set_write_buffer_limit(config.write_buffer_bytes);
+        fs.set_read_cache_limit(config.read_cache_bytes);
+        fs.set_compression(config.compression);
         if let Some(me) = membership.me() {
             fs.set_node(me);
             fs.set_replicating();

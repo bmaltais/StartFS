@@ -137,6 +137,31 @@ slower than local disk) and daemon peak RSS was 206 to 222 MiB for a 128 MiB wri
   0.34 s, and a 128 MiB `dd` 0.26 to 0.50 s (it was 0.6 to 0.98 s). The cost moved to the later
   sync: data is on disk about `sync_quiet_ms` after `close`, not at `close`.
 
+**Read and write path tuning.** `O_DIRECT` reads of a 256 MiB file through the mount, before and
+after (one run each, shared machine). Before, every FUSE read loaded, decompressed and hashed the
+whole 1 to 4 MiB chunk it touched, and every metadata read took the global lock and a write
+transaction. Now recently read chunks stay decoded in memory (`read_cache_bytes`, 32 MiB) and
+reads use read-only redb snapshots.
+
+| Read, incompressible / text | Before | After |
+|---|---|---|
+| sequential, 128 KiB blocks | 1.48 s / 2.28 s | 0.17 s / 0.16 s |
+| sequential, 4 KiB blocks, 16 MiB | 2.97 s / 8.15 s | 0.09 s / 0.09 s |
+| sequential, 1 MiB blocks | 0.26 s / 0.39 s | 0.12 s / 0.14 s |
+| random 4 KiB, 2000 reads over 100 MiB | 1.42 s / 4.10 s | 1.44 s / 2.86 s |
+
+Random reads over a file larger than the cache still decode a chunk per miss. Writes of 256 MiB
+plus `sync` (first write only; the second is deduplicated), seconds and cumulative disk use:
+
+| Data | `always` (old behaviour) | `auto` (default) | `off` |
+|---|---|---|---|
+| random | 0.99 s | 0.84 s | 0.79 s |
+| 6% compressible | 0.95 s, saves 6% | 0.79 s, stored as is | 0.71 s |
+| text | 1.02 s, 7.5x smaller | 1.04 s, 7.5x smaller | 0.74 s |
+
+Each chunk is also hashed once instead of three times on write, and chunk fsyncs of a sync run on
+up to 8 threads (not separately measured).
+
 Criterion 5 ("normal operations on cached data at near-local-disk speed") is met for reading
 cached data. Writes no longer degrade with file size, but remain about 6x to 9x slower than
 the local disk, so the criterion is only partly met.

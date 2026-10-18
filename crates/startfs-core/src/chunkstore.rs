@@ -21,7 +21,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 pub type ChunkId = [u8; 32];
 
@@ -31,6 +31,95 @@ const CIPHER_NONE: u8 = 0;
 const CODEC_RAW: u8 = 0;
 const CODEC_ZSTD: u8 = 1;
 const ZSTD_LEVEL: i32 = 3;
+/// Threads that fsync chunk files at once when many are waiting.
+const SYNC_THREADS: usize = 8;
+/// Fewer chunks than this are synced one after the other.
+const SYNC_PARALLEL_MIN: usize = 4;
+/// `auto` samples this many spans of this many bytes to judge a chunk.
+const PROBE_SPANS: usize = 4;
+const PROBE_SPAN: usize = 16 * 1024;
+/// `auto` keeps zstd output only when it is at least this fraction smaller
+/// (1/8): a smaller gain is not worth decompressing on every read.
+const MIN_SAVING_DIV: usize = 8;
+
+/// Whether chunks are compressed before they are written to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Compression {
+    /// Try zstd only on chunks a quick sample shows to be compressible, and
+    /// keep the result only when it saves a worthwhile fraction.
+    #[default]
+    Auto,
+    /// Store chunks as they are.
+    Off,
+    /// Compress every chunk and keep the result whenever it is smaller.
+    Always,
+}
+
+impl Compression {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Off,
+            2 => Self::Always,
+            _ => Self::Auto,
+        }
+    }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Off => 1,
+            Self::Always => 2,
+        }
+    }
+}
+
+fn zstd_pack(data: &[u8]) -> Option<Vec<u8>> {
+    zstd::bulk::compress(data, ZSTD_LEVEL).ok()
+}
+
+/// Whether `packed` bytes out of `plain` is a saving worth keeping.
+fn saves_enough(packed: usize, plain: usize) -> bool {
+    packed <= plain - plain / MIN_SAVING_DIV
+}
+
+/// A cheap guess at whether compressing all of `data` would pay: compress a
+/// few spans spread across it. Small chunks are cheap enough to just try.
+fn looks_compressible(data: &[u8]) -> bool {
+    if data.len() <= 2 * PROBE_SPANS * PROBE_SPAN {
+        return true;
+    }
+    let step = (data.len() - PROBE_SPAN) / (PROBE_SPANS - 1);
+    let mut packed = 0;
+    for k in 0..PROBE_SPANS {
+        let span = &data[k * step..][..PROBE_SPAN];
+        packed += zstd_pack(span).map_or(PROBE_SPAN, |z| z.len().min(PROBE_SPAN));
+    }
+    saves_enough(packed, PROBE_SPANS * PROBE_SPAN)
+}
+
+/// The envelope for `data` under the compression policy `mode`.
+fn encode(data: &[u8], mode: Compression) -> Vec<u8> {
+    let packed = match mode {
+        Compression::Off => None,
+        Compression::Always => zstd_pack(data).filter(|z| z.len() < data.len()),
+        Compression::Auto => looks_compressible(data)
+            .then(|| zstd_pack(data))
+            .flatten()
+            .filter(|z| saves_enough(z.len(), data.len())),
+    };
+    let codec = if packed.is_some() {
+        CODEC_ZSTD
+    } else {
+        CODEC_RAW
+    };
+    let body = packed.as_deref().unwrap_or(data);
+    let mut envelope = Vec::with_capacity(HEADER_LEN + body.len());
+    envelope.extend_from_slice(&[FORMAT_VERSION, CIPHER_NONE, codec, 0]);
+    envelope.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    envelope.extend_from_slice(body);
+    envelope
+}
 
 /// The plaintext length from an envelope's header (at least [`HEADER_LEN`] bytes).
 fn plain_len(envelope: &[u8]) -> u32 {
@@ -69,6 +158,8 @@ pub struct ChunkStore {
     added: Option<Mutex<Vec<ChunkId>>>,
     /// Chunks stored with [`Self::put_lazy`] that may not be on disk yet.
     unsynced: Mutex<HashSet<ChunkId>>,
+    /// A [`Compression`] as a number; read when a chunk is stored.
+    compression: AtomicU8,
 }
 
 /// Chunk files written within this long before the dirty marker may not have
@@ -86,12 +177,19 @@ impl ChunkStore {
             tmp: AtomicU64::new(0),
             added: None,
             unsynced: Mutex::new(HashSet::new()),
+            compression: AtomicU8::new(Compression::default().as_u8()),
         };
         store.recover()?;
         let found = store.scan()?;
         *store.chunks.get_mut() = found.chunks;
         *store.bytes.get_mut() = found.stored_bytes;
         Ok(store)
+    }
+
+    /// Choose whether chunks stored from now on are compressed. Chunks already
+    /// stored keep the codec they have, and read back the same either way.
+    pub fn set_compression(&self, mode: Compression) {
+        self.compression.store(mode.as_u8(), Ordering::SeqCst);
     }
 
     /// Remember each chunk added from now on, for [`Self::take_added`].
@@ -116,38 +214,42 @@ impl ChunkStore {
 
     /// Store a chunk, returning its id. Identical content is stored once.
     pub fn put(&self, data: &[u8]) -> FsResult<ChunkId> {
-        self.store(data, true)
+        let id = *blake3::hash(data).as_bytes();
+        self.put_hashed(id, data)?;
+        Ok(id)
+    }
+
+    /// [`Self::put`] for a caller that has already hashed `data` into `id`,
+    /// which must be its BLAKE3 hash: a wrong id stores a chunk that fails
+    /// verification when read.
+    pub fn put_hashed(&self, id: ChunkId, data: &[u8]) -> FsResult<()> {
+        self.store(id, data, true)
     }
 
     /// Like [`Self::put`], but the chunk may reach disk later: [`Self::sync`]
     /// makes it durable. A crash before then can lose the chunk, never keep
     /// a damaged one (see [`Self::open`]).
-    pub fn put_lazy(&self, data: &[u8]) -> FsResult<ChunkId> {
-        self.store(data, false)
+    ///
+    /// `id` must be the BLAKE3 hash of `data`, as for [`Self::put_hashed`].
+    pub fn put_lazy_hashed(&self, id: ChunkId, data: &[u8]) -> FsResult<()> {
+        self.store(id, data, false)
     }
 
-    fn store(&self, data: &[u8], durable: bool) -> FsResult<ChunkId> {
-        let id = *blake3::hash(data).as_bytes();
+    fn store(&self, id: ChunkId, data: &[u8], durable: bool) -> FsResult<()> {
         let path = self.path(&id);
         if path.exists() {
             if durable {
                 self.sync_chunks(&[id])?;
             }
-            return Ok(id);
+            return Ok(());
         }
         if !durable {
             self.expect_unsynced(id)?;
         }
-        let mut envelope = vec![FORMAT_VERSION, CIPHER_NONE, CODEC_RAW, 0];
-        envelope.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        // Compress, but keep the raw bytes when that does not actually help.
-        match zstd::bulk::compress(data, ZSTD_LEVEL) {
-            Ok(z) if z.len() < data.len() => {
-                envelope[2] = CODEC_ZSTD;
-                envelope.extend_from_slice(&z);
-            }
-            _ => envelope.extend_from_slice(data),
-        }
+        let envelope = encode(
+            data,
+            Compression::from_u8(self.compression.load(Ordering::SeqCst)),
+        );
         let dir = path.parent().expect("chunk path has a parent");
         fs::create_dir_all(dir).map_err(io)?;
         let n = self.tmp.fetch_add(1, Ordering::SeqCst);
@@ -168,7 +270,7 @@ impl ChunkStore {
             if durable {
                 self.sync_chunks(&[id])?;
             }
-            return Ok(id);
+            return Ok(());
         }
         fs::rename(&tmp, &path).map_err(io)?;
         self.chunks.fetch_add(1, Ordering::SeqCst);
@@ -177,7 +279,7 @@ impl ChunkStore {
         if let Some(added) = &self.added {
             added.lock().unwrap().push(id);
         }
-        Ok(id)
+        Ok(())
     }
 
     /// Whether lazily stored chunks wait for [`Self::sync`].
@@ -195,28 +297,62 @@ impl ChunkStore {
     }
 
     fn sync_chunks(&self, ids: &[ChunkId]) -> FsResult<()> {
-        for id in ids {
-            if !self.unsynced.lock().unwrap().contains(id) {
-                continue;
-            }
-            match fs::File::open(self.path(id)).and_then(|f| f.sync_all()) {
-                Ok(()) => {}
-                // Removed since: nothing left to make durable.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(io(e)),
-            }
-            let mut unsynced = self.unsynced.lock().unwrap();
-            unsynced.remove(id);
-            if unsynced.is_empty() {
-                // Nothing is at risk now: a crash needs no recovery pass.
-                #[allow(
-                    clippy::let_underscore_must_use,
-                    reason = "a marker left behind only costs a recovery pass"
-                )]
-                let _ = fs::remove_file(self.marker());
+        let pending: Vec<ChunkId> = {
+            let unsynced = self.unsynced.lock().unwrap();
+            ids.iter()
+                .filter(|id| unsynced.contains(*id))
+                .copied()
+                .collect()
+        };
+        let sync_one = |id: &ChunkId| match fs::File::open(self.path(id)).and_then(|f| f.sync_all())
+        {
+            // Removed since: nothing left to make durable.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other.map_err(io),
+        };
+        // Flushes of different files overlap on a device with a deep queue.
+        let results: Vec<(ChunkId, FsResult<()>)> = if pending.len() < SYNC_PARALLEL_MIN {
+            pending.iter().map(|id| (*id, sync_one(id))).collect()
+        } else {
+            let per = pending.len().div_ceil(SYNC_THREADS);
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = pending
+                    .chunks(per)
+                    .map(|part| {
+                        let sync_one = &sync_one;
+                        scope.spawn(move || {
+                            part.iter()
+                                .map(|id| (*id, sync_one(id)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .flat_map(|w| w.join().expect("sync worker does not panic"))
+                    .collect()
+            })
+        };
+        // Only chunks that reached disk leave the set.
+        let mut first_err = Ok(());
+        let mut unsynced = self.unsynced.lock().unwrap();
+        for (id, result) in results {
+            match result {
+                Ok(()) => {
+                    unsynced.remove(&id);
+                }
+                Err(e) => first_err = first_err.and(Err(e)),
             }
         }
-        Ok(())
+        if unsynced.is_empty() {
+            // Nothing is at risk now: a crash needs no recovery pass.
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "a marker left behind only costs a recovery pass"
+            )]
+            let _ = fs::remove_file(self.marker());
+        }
+        first_err
     }
 
     /// Where the dirty marker lives: next to the store, so scans of the store never see it.
@@ -268,14 +404,17 @@ impl ChunkStore {
 
     /// Fetch a chunk, verifying its BLAKE3 hash. Corruption is an I/O error.
     pub fn get(&self, id: &ChunkId) -> FsResult<Vec<u8>> {
-        let raw = fs::read(self.path(id)).map_err(io)?;
+        let mut raw = fs::read(self.path(id)).map_err(io)?;
         let corrupt = || FsError::Io("chunk is corrupt".into());
         if raw.len() < HEADER_LEN || raw[0] != FORMAT_VERSION || raw[1] != CIPHER_NONE {
             return Err(corrupt());
         }
         let len = plain_len(&raw) as usize;
         let data = match raw[2] {
-            CODEC_RAW => raw[HEADER_LEN..].to_vec(),
+            CODEC_RAW => {
+                raw.drain(..HEADER_LEN);
+                raw
+            }
             CODEC_ZSTD => zstd::bulk::decompress(&raw[HEADER_LEN..], len).map_err(|_| corrupt())?,
             _ => return Err(corrupt()),
         };
