@@ -13,7 +13,7 @@ use crate::fs::LocalFs;
 use crate::members::{Member, MemberId};
 use crate::net::{NodeId, Transport};
 use crate::ops::Nanos;
-use crate::placement::place;
+use crate::placement::{is_steward, place};
 use crate::protocol::{Message, Replica};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -275,11 +275,12 @@ impl Replicator {
         }
         let track = st.tracks.get_mut(id).expect("tracked");
         let held = self.fs.has_replica(id);
-        // Of several holders, only the lowest-numbered pushes to targets that
-        // lack the chunk, so a new target is not sent it more than once.
+        // Of several holders, only one (picked per chunk by hash, so the work
+        // spreads) pushes to targets that lack the chunk, so a new target is
+        // not sent it more than once.
         let steward = staged
             || !targets.contains(&view.me)
-            || track.holders.first().is_none_or(|h| view.me < *h);
+            || is_steward(id, view.me, track.holders.iter().copied());
         for t in &targets {
             if *t == view.me || track.holders.contains(t) {
                 continue;
@@ -396,7 +397,7 @@ impl Replicator {
         };
         for (id, t) in &st.tracks {
             let replicas = t.holders.len() as u32 + 1;
-            let mine = t.holders.first().is_none_or(|h| view.me < *h);
+            let mine = is_steward(id, view.me, t.holders.iter().copied());
             if t.heard && !t.settled && mine && replicas < view.copies && self.fs.has_replica(id) {
                 match tier(replicas) {
                     Tier::AtRisk => progress.at_risk += 1,

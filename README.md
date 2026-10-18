@@ -247,7 +247,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `token_ttl_secs` | 86400 | join token lifetime |
 | `repair_grace_secs` | 1800 | on `create`: how long a member may be unseen before re-replication |
 | `gc_retention_secs` | 604800 | on `create`: how long deleted chunks are kept |
-| `repair_bytes_per_sec` | 8 MiB | repair rate limit |
+| `repair_bytes_per_sec` | 64 MiB | most bytes per second each node sends when repairing (restoring copies after a lost node or a `config --copies` increase); every holder sends its share, so the cluster's speed grows with its size |
 | `scrub_period_secs` | 30 days | full integrity pass period |
 | `state_chunk_bytes` | 1 MiB | size of each piece when sending the whole metadata state to a member that missed a log compaction |
 | `mountpoint` | unset | mount here when `--mount` is not given |

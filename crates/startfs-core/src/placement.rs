@@ -38,3 +38,22 @@ pub fn place(
         .map(|s| s.1)
         .collect()
 }
+
+/// Whether `me` is the one of the members holding `chunk` that sends it on to
+/// targets that lack it. The choice is a hash of chunk and member, so the
+/// sending is spread over the holders instead of falling on the lowest id.
+pub fn is_steward(
+    chunk: &ChunkId,
+    me: MemberId,
+    others: impl IntoIterator<Item = MemberId>,
+) -> bool {
+    let rank = |m: MemberId| (unit(chunk, m), m);
+    let mine = rank(me);
+    others.into_iter().all(|o| {
+        let theirs = rank(o);
+        mine.0
+            .total_cmp(&theirs.0)
+            .then(mine.1.cmp(&theirs.1))
+            .is_le()
+    })
+}

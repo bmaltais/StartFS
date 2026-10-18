@@ -479,22 +479,18 @@ fn render(s: &Status) -> String {
         ));
     }
     if !s.unreplicated.is_empty() {
+        let n = s.unreplicated.len();
+        let count = |tier: Tier| s.unreplicated.iter().filter(|f| f.tier == tier).count();
+        let tiers: Vec<String> = [(Tier::AtRisk, "at risk"), (Tier::Degraded, "degraded")]
+            .into_iter()
+            .filter(|(t, _)| count(*t) > 0)
+            .map(|(t, name)| format!("{} {name}", count(t)))
+            .collect();
         out.push_str(&format!(
-            "not fully replicated: {} file{}\n",
-            s.unreplicated.len(),
-            if s.unreplicated.len() == 1 { "" } else { "s" }
+            "not fully replicated: {n} file{} ({})\n",
+            if n == 1 { "" } else { "s" },
+            tiers.join(", ")
         ));
-        for f in &s.unreplicated {
-            let tier = match f.tier {
-                Tier::Healthy => "healthy",
-                Tier::Degraded => "degraded",
-                Tier::AtRisk => "at risk",
-            };
-            out.push_str(&format!(
-                "  {:<8} {} of {} copies  {}\n",
-                tier, f.copies, f.wanted, f.path
-            ));
-        }
     }
     if !s.conflicts.is_empty() {
         out.push_str(&format!(
