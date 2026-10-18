@@ -79,9 +79,12 @@ same code with a different membership scope.
     a single copy, and `startfs status` must show files not yet fully replicated. Nodes with offer 0
     need a local staging area for writes until replication completes. "Durable" means after
     `fsync`, the periodic sync tick or shutdown; `close` alone does not wait for disk, as on a
-    local filesystem. Deleting an inline file or an empty directory is lazy in the same way, so a
-    crash may bring it back; deleting a chunk-backed file is durable before it returns, since its
-    chunks may be collected.
+    local filesystem. That holds for a file of any size that is only being added to. Deleting an
+    inline file or an empty directory is lazy in the same way, so a crash may bring it back;
+    deleting a chunk-backed file, or overwriting or truncating one so that chunks are dropped, is
+    durable before it returns, since the dropped chunks may be collected. Chunks written without a
+    sync are flagged on disk, and a store opened after a crash drops any of them that were cut
+    short, so a later write of the same content stores it afresh.
 
 13. **Metadata sync:** per-node operation log (create, write, rename, delete) stamped with hybrid
     logical clocks. Peers exchange missing entries: push when online, catch-up on reconnect. Applying

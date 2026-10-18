@@ -79,7 +79,7 @@ call for a new machine to join, or `remove` once the machine is gone for good.
 
 ## Tell the user
 
-- Creates and small writes reach disk about a second late; a power cut can lose the last
+- Creates and new file contents reach disk about a second late; a power cut can lose the last
   second unless the file was fsynced. Programs should check the result of `close()`.
 - `fcntl`/`flock` locks work within one machine only, so two machines can both hold the
   same lock.
