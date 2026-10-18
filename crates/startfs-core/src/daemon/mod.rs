@@ -28,6 +28,7 @@ use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -99,7 +100,7 @@ pub struct Daemon {
     scrubber: Scrubber,
     power: Mutex<Arc<dyn PowerSource>>,
     /// Set once the process has been asked to stop; `status` reports it.
-    stopping: std::sync::atomic::AtomicBool,
+    stopping: AtomicBool,
 }
 
 /// Garbage collection as `status` reports it.
@@ -169,7 +170,7 @@ impl Daemon {
                 replicator: Replicator::new(fs.clone()),
                 scrubber: Scrubber::new(fs.clone()),
                 power: Mutex::new(Arc::new(MainsPower)),
-                stopping: std::sync::atomic::AtomicBool::new(false),
+                stopping: AtomicBool::new(false),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -208,8 +209,7 @@ impl Daemon {
 
     /// Mark the daemon as shutting down, so `status` says so while it winds down.
     pub fn set_stopping(&self) {
-        self.stopping
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopping.store(true, Ordering::SeqCst);
     }
 
     fn on_battery(&self) -> bool {

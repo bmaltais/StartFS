@@ -31,24 +31,24 @@ make_release v1.0.2 1.0.2 5
 make_release v1.0.3 1.0.3 5 broken
 
 # Fake systemctl: tracks "active" in a file and logs every call. When state/interrupt_on
-# names the subcommand being run, it acts as Ctrl-C (SIGTERM here: a shell started with SIGINT ignored cannot trap it): it signals the installer (its parent)
-# once, then carries on.
+# names the subcommand being run, it acts as Ctrl-C and signals the installer (its parent)
+# once. SIGTERM stands in for SIGINT: a shell started with SIGINT ignored cannot trap that.
 cat >"$work/bin/systemctl" <<SH
 #!/bin/sh
 echo "\$*" >>"$work/state/calls"
+if [ "\$2" = "\$(cat "$work/state/interrupt_on" 2>/dev/null)" ]; then
+  rm -f "$work/state/interrupt_on"
+  [ "\$2" != stop ] || rm -f "$work/state/active" # a stop completes; a start is cut short
+  kill -TERM \$PPID
+  sleep 0.2 # the installer handles the signal once this returns, as for a real Ctrl-C
+  exit 0
+fi
 case "\$2" in
   daemon-reload) ;;
   is-active) [ -e "$work/state/active" ] ;;
   stop) rm -f "$work/state/active" ;;
   enable|start) touch "$work/state/active" ;;
 esac
-rc=\$?
-if [ "\$2" = "\$(cat "$work/state/interrupt_on" 2>/dev/null)" ]; then
-  rm -f "$work/state/interrupt_on"
-  kill -TERM \$PPID
-  sleep 0.2 # the installer handles the signal once this returns, as for a real Ctrl-C
-fi
-exit \$rc
 SH
 printf '#!/bin/sh\necho "loginctl $*" >>"%s/state/calls"\n' "$work" >"$work/bin/loginctl"
 for t in fusermount3 tailscale; do printf '#!/bin/sh\n' >"$work/bin/$t"; done

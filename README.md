@@ -114,7 +114,7 @@ On a machine that already has StartFS, this is what it does, in order:
    every member.
 4. **Stops the service.** First it lists the programs with a working directory or open
    file on `~/StartFS`, since they lose the mount; on a terminal it asks before going on
-   (`STARTFS_FORCE=1` never asks). Then the daemon unmounts the mount, or detaches it
+   (`STARTFS_FORCE=1` never asks; Linux only, macOS skips the check). Then the daemon unmounts the mount, or detaches it
    after a few seconds if something is still using it. `startfs status` says "stopping"
    meanwhile. Press Ctrl-C at any point after this and the installer puts the old binary
    and the running service back.

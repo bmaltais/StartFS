@@ -25,8 +25,10 @@ installer started the `startfs` systemd user service; read failures with
 ## Upgrade
 
 Run the same install command on every machine. It skips a machine that is already current,
-otherwise stops the service, swaps the binary (the old one stays as `startfs.prev`),
-restarts and checks the daemon, and rolls back if it does not answer. Data and config are
+otherwise names any program with its working directory or an open file on `~/StartFS` (they lose the
+mount; on a terminal it asks first, `STARTFS_FORCE=1` skips the question), stops the service, swaps the binary (the old one stays as `startfs.prev`),
+restarts and checks the daemon, and rolls back if it does not answer; Ctrl-C after the stop puts the old binary and the running service
+back. While the daemon stops, `startfs status` says `stopping`. Data and config are
 untouched. If it warns that the protocol changed, upgrade every member: until they match,
 `startfs status` lists the others as down with `cannot reach: protocol version mismatch`.
 Done when `startfs status` on each machine shows all members `up`.

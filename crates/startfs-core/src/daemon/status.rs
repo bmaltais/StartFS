@@ -12,6 +12,7 @@ use crate::ops::FsOps;
 use crate::ops::Nanos;
 use crate::protocol::{Health, Message, Sighting};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
@@ -396,7 +397,7 @@ impl Daemon {
             )
         });
         Ok(Status {
-            stopping: self.stopping.load(std::sync::atomic::Ordering::SeqCst),
+            stopping: self.stopping.load(Ordering::SeqCst),
             verdict,
             filesystem,
             node_state: NodeState::Online,
