@@ -5,14 +5,14 @@
 #   MODE=burst   write a mixed tree through A's mount, then watch (default)
 #   MODE=stall   freeze C (SIGSTOP) before the write and resume it at the end, so the others
 #                push to a peer that does not answer, then C catches up
-# Environment: FILES=4000 (8 KiB to 72 KiB each), BIG=200 (1 MiB each), WATCH=90 (samples, 2 s
-# apart); malloc settings pass through to the daemons, for example
+# Environment: FILES=4000 (8 KiB to 72 KiB each), BIG=200 (1 MiB each), WATCH=90 (samples after
+# the write, taken about 2 s apart), RESUME=45 (samples after C resumes, MODE=stall only); malloc settings pass through to the daemons, for example
 #   MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=131072 scripts/profile-memory.sh
 # Usage: profile-memory.sh   (needs /dev/fuse, fusermount3)
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 MODE=${MODE:-burst}
-FILES=${FILES:-4000}; BIG=${BIG:-200}; WATCH=${WATCH:-90}
+FILES=${FILES:-4000}; BIG=${BIG:-200}; WATCH=${WATCH:-90}; RESUME=${RESUME:-45}
 build; setup_env
 mkdir -p "$WORK/A/mnt" "$WORK/B/mnt" "$WORK/C/mnt" "$WORK/src"
 start_node A "$WORK/A/mnt"
@@ -36,5 +36,5 @@ while kill -0 "$copier" 2>/dev/null; do sample write; sleep 2; done
 for _ in $(seq "$WATCH"); do sample after; sleep 2; done
 if [ "$MODE" = stall ]; then
   kill -CONT "$PID_C"
-  for _ in $(seq 45); do sample resumed; sleep 2; done
+  for _ in $(seq "$RESUME"); do sample resumed; sleep 2; done
 fi

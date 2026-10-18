@@ -1,0 +1,12 @@
+seconds,phase,rssA,rssB,rssC,peakA,staging_on_A
+0,idle,9,9,9,9,
+0,write,9,9,9,10,300.4KiB
+2,write,13,12,11,13,356.1MiB
+6,after,16,12,11,17,356.1MiB
+9,after,16,36,36,17,351.6MiB
+11,after,21,131,133,23,349.0MiB
+13,after,18,127,121,24,344.1MiB
+15,after,23,100,91,27,334.0MiB
+17,after,20,100,91,27,248.7MiB
+20,after,20,100,91,27,
+22,after,19,100,91,27,

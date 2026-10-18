@@ -33,7 +33,7 @@ upgraded. Each checkpoint names the data it needs (see "Test data") and what mus
 
 | After | Checkpoint | How | Must hold |
 |---|---|---|---|
-| now (before #63) | Baseline on current `main` | `scripts/profile-memory.sh`, `MODE=stall scripts/profile-memory.sh`, `profile-write.sh`; record in this file | numbers exist for `main` with #62 in, to compare against the table below |
+| now (before #63) | Baseline on current `main` | memory runs done 2026-10-18, see `docs/baselines/`; **still to do:** `profile-write.sh` on a quiet machine, right before #63 | numbers exist for `main` with #62 in |
 | #63 | Instrumented burst on the real cluster | upgrade one node, `make-tree.py` with a new seed into its mount, run `startfs activity` every minute | each reading in the skill section is explained by `status`; overhead under 1% |
 | #66 | Bound holds | `profile-memory.sh` at the baseline load and at 5x (`FILES=20000 BIG=1000`), both modes | receiver peak stays near the bound while the load grows 5x |
 | #66 | Live catch-up | restart a node that was away, with `startfs activity` open on a peer | inbound bytes stay under the bound; RSS does not climb past baseline plus the bound |
@@ -111,6 +111,9 @@ otherwise close the issue with the numbers.
 
 ## The baseline to beat
 
+The current baseline (after #62) is in `docs/baselines/2026-10-18-main-b69b396/README.md`, with the
+raw samples. The table below is the earlier one from #65 (before #62), kept for comparison.
+
 `scripts/profile-memory.sh`, `FILES=4000 BIG=200`, 3 copies, commit `de69ac3` (rerun it on the
 current `main` first, because #62 changed the receive path):
 
@@ -148,6 +151,7 @@ cp -r /tmp/burst ~/StartFS/burst-$(date +%s)
 
 ## Open questions
 
-- What did #62 change about the memory behaviour? Rerun the baseline on `main` before #66.
+- What did #62 change about the memory behaviour? Baseline rerun: settled receiver memory looks higher (258 to 271 against 149 MiB) and the malloc settings now cut the peak by half; one run each, repeat before relying on either.
+- `quic.rs` `local_api` tests failed once in `scripts/check.sh` and passed on rerun and alone; a flaky test, not investigated.
 - Is a way to purge deleted data on request wanted, given the 7 day retention? Not filed.
 - Is the 3090 daemon's 2.4 GB reproducible with a multi-GB inbound burst? Test once #63 can show it.
