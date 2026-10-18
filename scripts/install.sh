@@ -9,6 +9,8 @@
 #   STARTFS_NO_SERVICE=1     install files only; never stop, start or enable the service
 #   STARTFS_BASE_URL=URL     download releases from URL/<tag>/ (testing)
 #   STARTFS_VERIFY_SECS=15   how long to wait for the new daemon to answer before rolling back
+#   STARTFS_FORCE=1          never ask before restarting a daemon whose mount is in use
+#   STARTFS_MOUNTPOINT=DIR   the mount to check for users before a restart (default ~/StartFS)
 set -eu
 
 repo=bmaltais/StartFS
@@ -106,9 +108,42 @@ if [ -z "${STARTFS_NO_SERVICE:-}" ]; then
   fi
 fi
 
+# Processes of this user with their working directory or an open file on the mount, as
+# "name (pid N)" lines. They lose the mount when the daemon restarts. Linux only (/proc).
+mount_users() {
+  [ -d /proc/self ] || return 0
+  mnt=${STARTFS_MOUNTPOINT:-$HOME/StartFS}
+  for p in /proc/[0-9]*; do
+    pid=${p#/proc/}
+    [ "$pid" != "$$" ] || continue
+    for link in "$p/cwd" "$p"/fd/*; do
+      target=$(readlink "$link" 2>/dev/null) || continue
+      case "$target" in
+        "$mnt" | "$mnt"/*)
+          echo "$(cat "$p/comm" 2>/dev/null || echo '?') (pid $pid)"
+          break ;;
+      esac
+    done
+  done
+}
+
+# Say who will lose the mount, and on a terminal let the user back out first.
+warn_mount_users() {
+  [ -n "$was_running" ] || return 0
+  users=$(mount_users | paste -sd, - | sed 's/,/, /g')
+  [ -n "$users" ] || return 0
+  say "These will lose ${STARTFS_MOUNTPOINT:-~/StartFS} when the daemon restarts: $users"
+  say "cd out of the mount in those sessions first, or carry on and they will need to cd back in."
+  if [ -z "${STARTFS_FORCE:-}" ] && [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
+    printf 'install: Continue? [y/N] '
+    read -r answer </dev/tty || answer=
+    case "$answer" in y | Y | yes) ;; *) die "cancelled; nothing was changed" ;; esac
+  fi
+}
+
 stop_service() {
   [ -n "$was_running" ] || return 0
-  say "Stopping the service (the daemon unmounts ~/StartFS cleanly)"
+  say "Stopping the daemon (up to 90s)..."
   case "$manage" in
     systemd) systemctl --user stop startfs.service ;;
     launchd) launchctl bootout "gui/$(id -u)/$label" ;;
@@ -135,11 +170,24 @@ daemon_answers() {
 
 # 5. Replace: stop, swap the binary (keeping the old one), refresh the unit, start, verify.
 mkdir -p "$install_dir"
-stop_service
+warn_mount_users
 had_binary=
+prev_saved=
+# Interrupted once the service may be stopped: put back the binary (only a finished copy)
+# and restart what was running, so the node is not left down on a half-done upgrade.
+on_interrupt() {
+  trap '' INT TERM HUP
+  say "interrupted; restoring the previous state."
+  if [ -n "$prev_saved" ]; then mv -f "$bin.prev" "$bin"; fi
+  if [ -n "$was_running" ]; then start_service || true; fi
+  exit 130
+}
+trap on_interrupt INT TERM HUP
+stop_service
 if [ -e "$bin" ]; then
   had_binary=1
   cp -p "$bin" "$bin.prev"
+  prev_saved=1
 fi
 install -m755 "$new" "$bin.new"
 mv -f "$bin.new" "$bin"
@@ -166,6 +214,7 @@ rollback() {
 
 if [ -n "$was_running" ] || [ -n "$first_install" ]; then
   start_service || { [ -n "$had_binary" ] && rollback; die "could not start the service (see: journalctl --user -u startfs)"; }
+  trap - INT TERM HUP # started: from here a failure is the rollback's business, not an interrupt's
   if daemon_answers; then
     say "The startfs service is running and mounts ~/StartFS."
   elif [ -n "$had_binary" ]; then
