@@ -162,6 +162,24 @@ impl Transport for SimTransport {
         s.errors.get(&(self.node, node)).cloned()
     }
 
+    fn rtt(&self, node: NodeId) -> Option<Duration> {
+        let s = self.net.state.lock().unwrap();
+        if !s.reachable(self.node, node) {
+            return None;
+        }
+        let there = s
+            .delays
+            .get(&(self.node, node))
+            .copied()
+            .unwrap_or_default();
+        let back = s
+            .delays
+            .get(&(node, self.node))
+            .copied()
+            .unwrap_or_default();
+        Some(there + back)
+    }
+
     fn resolve(&self, addr: &str) -> Option<NodeId> {
         self.net.state.lock().unwrap().addrs.get(addr).copied()
     }

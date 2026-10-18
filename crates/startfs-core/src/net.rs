@@ -28,4 +28,9 @@ pub trait Transport: Send + Sync {
     fn last_error(&self, _node: NodeId) -> Option<String> {
         None
     }
+    /// The transport's own smoothed round-trip time to `node`, when it has a
+    /// live path to it and can measure one.
+    fn rtt(&self, _node: NodeId) -> Option<std::time::Duration> {
+        None
+    }
 }

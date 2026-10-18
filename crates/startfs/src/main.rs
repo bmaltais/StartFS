@@ -452,7 +452,7 @@ fn tailnet_address() -> IpAddr {
 /// One line per member, in columns sized to the longest entry.
 fn members_table(members: &[control::MemberStatus]) -> String {
     let mut out = String::new();
-    let rows: Vec<[String; 4]> = members
+    let rows: Vec<[String; 5]> = members
         .iter()
         .map(|m| {
             let state = match m.state {
@@ -466,18 +466,24 @@ fn members_table(members: &[control::MemberStatus]) -> String {
                 m.addr.clone(),
                 state.to_string(),
                 format!("{} offered", human(m.offer_bytes)),
+                m.rtt_micros.map_or_else(String::new, rtt_text),
             ]
         })
         .collect();
     let width = |col: usize| rows.iter().map(|r| r[col].len()).max().unwrap_or(0);
-    let (wid, waddr, wstate, woffer) = (width(0), width(1), width(2), width(3));
+    let (wid, waddr, wstate, woffer, wrtt) = (width(0), width(1), width(2), width(3), width(4));
     for (m, r) in members.iter().zip(&rows) {
         out.push_str(&format!(
-            "  {:<wid$}  {:<waddr$}  {:<wstate$}  {:>woffer$}{}\n",
+            "  {:<wid$}  {:<waddr$}  {:<wstate$}  {:>woffer$}{}{}\n",
             r[0],
             r[1],
             r[2],
             r[3],
+            if wrtt > 0 {
+                format!("  {:>wrtt$}", r[4])
+            } else {
+                String::new()
+            },
             if m.is_self { "  (this node)" } else { "" }
         ));
         if let Some(why) = &m.problem {
@@ -503,6 +509,16 @@ fn members_table(members: &[control::MemberStatus]) -> String {
 }
 
 /// "2d 4h", "5h 10m" or "12m": the two largest units of `secs`.
+/// A round-trip time for the members table: `340µs`, `12ms`, `1.2s`.
+fn rtt_text(micros: u64) -> String {
+    match micros {
+        0..1_000 => format!("{micros}µs"),
+        1_000..100_000 => format!("{:.1}ms", micros as f64 / 1_000.0),
+        100_000..1_000_000 => format!("{}ms", micros / 1_000),
+        _ => format!("{:.1}s", micros as f64 / 1_000_000.0),
+    }
+}
+
 fn time_left(secs: u64) -> String {
     let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
     match (d, h) {
