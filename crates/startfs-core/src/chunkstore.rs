@@ -16,6 +16,7 @@
 //! lets encrypted and plain chunks coexist without a migration.
 
 use crate::ops::{FsError, FsResult, StoreStats};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -66,7 +67,13 @@ pub struct ChunkStore {
     tmp: AtomicU64,
     /// Chunks added since the last [`Self::take_added`], when recording.
     added: Option<Mutex<Vec<ChunkId>>>,
+    /// Chunks stored with [`Self::put_lazy`] that may not be on disk yet.
+    unsynced: Mutex<HashSet<ChunkId>>,
 }
+
+/// Chunk files written within this long before the dirty marker may not have
+/// reached disk; coarse file timestamps make the margin necessary.
+const DIRTY_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl ChunkStore {
     pub fn open(root: &Path) -> FsResult<Self> {
@@ -78,7 +85,9 @@ impl ChunkStore {
             publish: Mutex::new(()),
             tmp: AtomicU64::new(0),
             added: None,
+            unsynced: Mutex::new(HashSet::new()),
         };
+        store.recover()?;
         let found = store.scan()?;
         *store.chunks.get_mut() = found.chunks;
         *store.bytes.get_mut() = found.stored_bytes;
@@ -107,10 +116,27 @@ impl ChunkStore {
 
     /// Store a chunk, returning its id. Identical content is stored once.
     pub fn put(&self, data: &[u8]) -> FsResult<ChunkId> {
+        self.store(data, true)
+    }
+
+    /// Like [`Self::put`], but the chunk may reach disk later: [`Self::sync`]
+    /// makes it durable. A crash before then can lose the chunk, never keep
+    /// a damaged one (see [`Self::open`]).
+    pub fn put_lazy(&self, data: &[u8]) -> FsResult<ChunkId> {
+        self.store(data, false)
+    }
+
+    fn store(&self, data: &[u8], durable: bool) -> FsResult<ChunkId> {
         let id = *blake3::hash(data).as_bytes();
         let path = self.path(&id);
         if path.exists() {
+            if durable {
+                self.sync_chunks(&[id])?;
+            }
             return Ok(id);
+        }
+        if !durable {
+            self.expect_unsynced(id)?;
         }
         let mut envelope = vec![FORMAT_VERSION, CIPHER_NONE, CODEC_RAW, 0];
         envelope.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -128,7 +154,9 @@ impl ChunkStore {
         let tmp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
         let mut f = fs::File::create(&tmp).map_err(io)?;
         f.write_all(&envelope).map_err(io)?;
-        f.sync_all().map_err(io)?;
+        if durable {
+            f.sync_all().map_err(io)?;
+        }
         let _publish = self.publish.lock().unwrap();
         if path.exists() {
             // Stored by someone else since the check above.
@@ -137,6 +165,9 @@ impl ChunkStore {
                 reason = "the temporary file is not needed any more"
             )]
             let _ = fs::remove_file(&tmp);
+            if durable {
+                self.sync_chunks(&[id])?;
+            }
             return Ok(id);
         }
         fs::rename(&tmp, &path).map_err(io)?;
@@ -147,6 +178,92 @@ impl ChunkStore {
             added.lock().unwrap().push(id);
         }
         Ok(id)
+    }
+
+    /// Whether lazily stored chunks wait for [`Self::sync`].
+    pub fn has_unsynced(&self) -> bool {
+        !self.unsynced.lock().unwrap().is_empty()
+    }
+
+    /// Make every lazily stored chunk durable.
+    pub fn sync(&self) -> FsResult<()> {
+        let ids: Vec<ChunkId> = self.unsynced.lock().unwrap().iter().copied().collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.sync_chunks(&ids)
+    }
+
+    fn sync_chunks(&self, ids: &[ChunkId]) -> FsResult<()> {
+        for id in ids {
+            if !self.unsynced.lock().unwrap().contains(id) {
+                continue;
+            }
+            match fs::File::open(self.path(id)).and_then(|f| f.sync_all()) {
+                Ok(()) => {}
+                // Removed since: nothing left to make durable.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io(e)),
+            }
+            let mut unsynced = self.unsynced.lock().unwrap();
+            unsynced.remove(id);
+            if unsynced.is_empty() {
+                // Nothing is at risk now: a crash needs no recovery pass.
+                #[allow(
+                    clippy::let_underscore_must_use,
+                    reason = "a marker left behind only costs a recovery pass"
+                )]
+                let _ = fs::remove_file(self.marker());
+            }
+        }
+        Ok(())
+    }
+
+    /// Where the dirty marker lives: next to the store, so scans of the store never see it.
+    fn marker(&self) -> PathBuf {
+        let mut name = self.root.file_name().unwrap_or_default().to_os_string();
+        name.push(".dirty");
+        self.root.with_file_name(name)
+    }
+
+    /// Note that `id` is about to be written without a sync. While anything
+    /// is unsynced a marker file says so on disk, made durable first, so that
+    /// after a crash [`Self::open`] knows which chunk files to check.
+    fn expect_unsynced(&self, id: ChunkId) -> FsResult<()> {
+        let mut unsynced = self.unsynced.lock().unwrap();
+        if unsynced.is_empty() {
+            let marker = self.marker();
+            fs::File::create(&marker)
+                .and_then(|f| f.sync_all())
+                .map_err(io)?;
+            if let Some(parent) = marker.parent() {
+                fs::File::open(parent)
+                    .and_then(|d| d.sync_all())
+                    .map_err(io)?;
+            }
+        }
+        unsynced.insert(id);
+        Ok(())
+    }
+
+    /// After a crash with unsynced chunks, drop the chunk files written since
+    /// the marker that do not hash to their name: they were cut short.
+    fn recover(&self) -> FsResult<()> {
+        let marker = self.marker();
+        let Ok(since) = fs::metadata(&marker).and_then(|m| m.modified()) else {
+            return Ok(());
+        };
+        let since = since.checked_sub(DIRTY_SLACK).unwrap_or(since);
+        for (id, _, mtime) in self.scan_files()? {
+            if mtime >= since && self.get(&id).is_err() {
+                #[allow(
+                    clippy::let_underscore_must_use,
+                    reason = "a chunk that cannot be removed is reported when read"
+                )]
+                let _ = fs::remove_file(self.path(&id));
+            }
+        }
+        fs::remove_file(&marker).map_err(io)
     }
 
     /// Fetch a chunk, verifying its BLAKE3 hash. Corruption is an I/O error.
@@ -188,6 +305,10 @@ impl ChunkStore {
 
     /// Every stored chunk with its size on disk and last modification time.
     pub fn list(&self) -> FsResult<Vec<(ChunkId, u64, std::time::SystemTime)>> {
+        self.scan_files()
+    }
+
+    fn scan_files(&self) -> FsResult<Vec<(ChunkId, u64, std::time::SystemTime)>> {
         let mut out = Vec::new();
         for shard in fs::read_dir(&self.root).map_err(io)? {
             let shard = shard.map_err(io)?.path();

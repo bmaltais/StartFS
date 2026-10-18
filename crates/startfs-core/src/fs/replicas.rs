@@ -60,9 +60,9 @@ impl LocalFs {
     pub(super) fn keep(&self, data: &[u8]) -> FsResult<ChunkId> {
         let id = *blake3::hash(data).as_bytes();
         if !self.replicating.load(Ordering::SeqCst) {
-            self.chunks.put(data)?;
+            self.chunks.put_lazy(data)?;
         } else if !self.has_replica(&id) {
-            self.staging.put(data)?;
+            self.staging.put_lazy(data)?;
         }
         Ok(id)
     }
