@@ -10,6 +10,7 @@
 use super::*;
 use crate::chunker::MAX_CHUNK;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 /// Default cap on a file's buffered bytes before a batch is committed.
@@ -34,6 +35,18 @@ struct Spliced {
     content: Content,
     size: u64,
     rest: Option<Dirty>,
+}
+
+/// Whether `new` stops referring to a chunk that `old` referred to.
+fn drops_chunks(old: &Content, new: &Content) -> bool {
+    let Content::Chunks(old) = old else {
+        return false;
+    };
+    let kept: HashSet<ChunkId> = match new {
+        Content::Chunks(refs) => refs.iter().map(|r| r.id).collect(),
+        Content::Inline(_) => HashSet::new(),
+    };
+    old.iter().any(|r| !kept.contains(&r.id))
 }
 
 impl LocalFs {
@@ -124,13 +137,13 @@ impl LocalFs {
         let Some(d) = dirty.remove(&ino) else {
             return Ok(());
         };
-        let chunked = Cell::new(false);
+        let dropped = Cell::new(false);
         let done = self.fetching_as(true, Durability::None, |t, spill| {
             let mut i = Self::file(t, ino)?;
             let Some(spliced) = self.splice(&i, &d, last, spill)? else {
                 return Ok(None);
             };
-            chunked.set(matches!(spliced.content, Content::Chunks(_)));
+            dropped.set(drops_chunks(&i.content, &spliced.content));
             i.content = spliced.content;
             i.size = spliced.size;
             i.mtime = d.mtime;
@@ -139,9 +152,11 @@ impl LocalFs {
             self.emit_set_at(t, ino, &i, d.mtime)?;
             Ok(Some(spliced.rest))
         });
-        // Chunk-backed content keeps its durability: only inline files commit lazily.
+        // A commit that drops chunk references stays durable, since the old chunks
+        // may be collected; one that only adds them waits for the periodic sync,
+        // an fsync or shutdown, like any other lazy commit.
         let done = match done {
-            Ok(Some(rest)) if chunked.get() => self.sync().map(|()| Some(rest)),
+            Ok(Some(rest)) if dropped.get() => self.sync().map(|()| Some(rest)),
             other => other,
         };
         match done {

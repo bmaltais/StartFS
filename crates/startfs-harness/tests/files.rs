@@ -402,7 +402,7 @@ fn only_dropping_the_last_name_of_a_chunk_backed_file_is_durable_at_once() {
     let fs = c.fs(0);
     let f = fs.create(ROOT_INO, "f", 0o600).unwrap();
     fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
-    fs.flush(f.ino).unwrap();
+    fs.fsync(f.ino).unwrap();
     assert!(!fs.has_unsynced());
 
     fs.link(f.ino, ROOT_INO, "g").unwrap();
@@ -500,14 +500,55 @@ fn deleting_a_chunk_backed_file_is_durable_when_unlink_returns() {
 }
 
 #[test]
-fn a_file_larger_than_inline_is_durable_when_its_close_returns() {
+fn closing_a_new_chunk_backed_file_waits_for_the_quiet_period_like_any_create() {
     let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
     let fs = c.fs(0);
     let f = fs.create(ROOT_INO, "big", 0o600).unwrap();
     fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
     fs.flush(f.ino).unwrap();
+    assert!(fs.has_unsynced(), "close alone does not wait for disk");
+
+    c.advance(std::time::Duration::from_millis(1500));
+    c.tick();
+    assert!(!fs.has_unsynced(), "quiet long enough: made durable");
+
+    let g = fs.create(ROOT_INO, "other", 0o600).unwrap();
+    fs.write(g.ino, 0, &vec![9u8; 200_000]).unwrap();
+    fs.fsync(g.ino).unwrap();
+    assert!(!fs.has_unsynced(), "fsync is durable at once");
+}
+
+#[test]
+fn overwriting_chunk_backed_data_is_durable_when_the_close_returns() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "big", 0o600).unwrap();
+    fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
+    fs.fsync(f.ino).unwrap();
+
+    fs.write(f.ino, 0, &[8u8; 100]).unwrap();
+    fs.flush(f.ino).unwrap();
     assert!(
         !fs.has_unsynced(),
-        "chunk-backed writes keep their durability"
+        "the old chunk may be collected, so dropping it is durable"
     );
+}
+
+#[test]
+fn a_chunk_cut_short_by_a_power_cut_is_not_mistaken_for_stored_content() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let body = vec![7u8; 200_000];
+    let f = fs.create(ROOT_INO, "lost", 0o600).unwrap();
+    fs.write(f.ino, 0, &body).unwrap();
+    fs.flush(f.ino).unwrap();
+    assert!(fs.has_unsynced());
+
+    c.power_cut(0);
+    c.restart(0);
+
+    let g = fs.create(ROOT_INO, "again", 0o600).unwrap();
+    fs.write(g.ino, 0, &body).unwrap();
+    fs.fsync(g.ino).unwrap();
+    assert_eq!(fs.read(g.ino, 0, 300_000).unwrap(), body);
 }
