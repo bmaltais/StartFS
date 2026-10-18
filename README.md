@@ -229,6 +229,11 @@ wanted, usable size, members and their state, files not yet fully replicated,
 repair progress, scrub state, cache usage, warnings, and conflicts.
 `startfs status --json` prints the same as JSON, for scripts and GUIs.
 
+`startfs stats` asks every member that is up for its storage figures, right then, and
+prints one line each: space used on its disk, chunks, compression, its share of the
+replicas and what it offers. A member that does not answer is listed as `no answer`.
+Run it on any node. `startfs stats --json` gives the full figures per member.
+
 Other commands: `startfs leave` (hand this node's data over and leave),
 `startfs remove <member>` (drop a dead member; its data is re-replicated),
 `startfs config --offer 500G` (this node's space) and `startfs config --copies 3`, which

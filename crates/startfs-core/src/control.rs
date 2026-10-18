@@ -23,6 +23,8 @@ pub enum Request {
         copies: u32,
     },
     Status,
+    /// Ask every reachable member for its storage figures.
+    NodeStats,
     /// Mint another join token (valid for the configured time).
     NewToken,
     /// Change settings of this node; unset fields stay as they are.
@@ -128,6 +130,26 @@ pub struct Efficiency {
     pub raw_chunks: u64,
     /// Compressed with zstd.
     pub zstd_chunks: u64,
+}
+
+/// One node's storage figures: what it holds and how well it is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStats {
+    pub usage: Usage,
+    pub efficiency: Efficiency,
+    /// Bytes on the node's disk that no file uses, waiting for garbage collection.
+    pub pending_gc_bytes: u64,
+}
+
+/// A member's answer to a node-stats query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeReport {
+    pub member: MemberId,
+    pub addr: String,
+    /// Whether this is the node that was asked.
+    pub is_self: bool,
+    /// `None` when the member did not answer: it is down or unreachable.
+    pub stats: Option<NodeStats>,
 }
 
 /// Chunks written here that are waiting for replication to finish.
@@ -288,6 +310,7 @@ pub enum Response {
     Joined,
     Done,
     Status(Box<Status>),
+    NodeStats(Vec<NodeReport>),
     Error(String),
 }
 
@@ -492,6 +515,14 @@ impl Client {
     pub fn remove(&self, member: MemberId) -> Result<(), Error> {
         match self.call(&Request::Remove { member })? {
             Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Every member's storage figures, fetched from the members themselves now.
+    pub fn node_stats(&self) -> Result<Vec<NodeReport>, Error> {
+        match self.call(&Request::NodeStats)? {
+            Response::NodeStats(rows) => Ok(rows),
             other => Err(unexpected(other)),
         }
     }

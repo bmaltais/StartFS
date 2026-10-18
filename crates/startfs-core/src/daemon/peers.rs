@@ -22,6 +22,8 @@ impl Daemon {
                 | Message::ChunkReply(..)
                 | Message::ChunkPush(..)
                 | Message::ChunkAck(..)
+                | Message::StatsRequest
+                | Message::StatsReply(_)
         ) && !self.membership.lock().unwrap().is_member_endpoint(from)
         {
             return;
@@ -63,6 +65,14 @@ impl Daemon {
             }
             Message::ChunkAck(id, standing) => {
                 self.with_view(|v| self.replicator.on_ack(v, from, &id, standing));
+            }
+            Message::StatsRequest => {
+                if let Ok(stats) = self.local_node_stats() {
+                    transport.send(from, Message::StatsReply(stats).encode());
+                }
+            }
+            Message::StatsReply(stats) => {
+                self.stats_replies.lock().unwrap().insert(from, stats);
             }
             Message::Tokens(list) => {
                 let mut m = self.membership.lock().unwrap();

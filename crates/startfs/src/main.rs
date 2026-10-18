@@ -24,6 +24,7 @@ commands:
                                       create a filesystem and print its join token
   status [--json]                     show the state of this node's filesystem (--json: as JSON,
                                       for scripts and GUIs)
+  stats [--json]                      ask every member for its storage figures (--json: as JSON)
   join TOKEN [--offer SIZE]           join the filesystem a token names
   token [--example]                   print a new join token (--example: the full join
                                       command to paste on the other machine)
@@ -205,8 +206,85 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             }
             Ok(())
         }
+        "stats" => {
+            let client = Client::new(socket);
+            let rows = client.node_stats()?;
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string(&rows).map_err(CliError::Json)?);
+            } else {
+                let copies = client.status()?.filesystem.map_or(1, |f| f.copies);
+                print!("{}", node_stats_table(&rows, copies));
+            }
+            Ok(())
+        }
         _ => Err(CliError::Usage),
     }
+}
+
+/// One line per member: what it stores, how well, and its share of the replicas.
+fn node_stats_table(rows: &[control::NodeReport], copies: u32) -> String {
+    // Every member has the full metadata, so any answering member knows the
+    // cluster-wide size after dedup.
+    let referenced = rows
+        .iter()
+        .find_map(|r| r.stats.map(|s| s.efficiency.referenced_bytes))
+        .unwrap_or(0);
+    let expected = referenced.saturating_mul(u64::from(copies));
+    let cells: Vec<[String; 6]> = rows
+        .iter()
+        .map(|r| match &r.stats {
+            Some(s) => [
+                r.addr.clone(),
+                format!("{} on disk", human(s.usage.stored_bytes)),
+                format!("{} chunks", s.usage.chunks),
+                ratio(
+                    s.efficiency.local_plain_bytes,
+                    s.efficiency.local_disk_bytes,
+                )
+                .map_or_else(|| "-".into(), |x| format!("{x} compression")),
+                if expected > 0 {
+                    format!(
+                        "{:.1}% of replicas",
+                        100.0 * s.efficiency.local_plain_bytes as f64 / expected as f64
+                    )
+                } else {
+                    "-".into()
+                },
+                format!("{} offered", human(s.usage.offer_bytes)),
+            ],
+            None => [
+                r.addr.clone(),
+                "no answer".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+        })
+        .collect();
+    let width = |col: usize| cells.iter().map(|c| c[col].len()).max().unwrap_or(0);
+    let w: Vec<usize> = (0..6).map(width).collect();
+    let mut out = String::new();
+    for (r, c) in rows.iter().zip(&cells) {
+        let line = format!(
+            "  {:<w0$}  {:>w1$}  {:>w2$}  {:>w3$}  {:>w4$}  {:>w5$}",
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+            c[4],
+            c[5],
+            w0 = w[0],
+            w1 = w[1],
+            w2 = w[2],
+            w3 = w[3],
+            w4 = w[4],
+            w5 = w[5],
+        );
+        out.push_str(line.trim_end());
+        out.push_str(if r.is_self { "  (this node)\n" } else { "\n" });
+    }
+    out
 }
 
 /// Prints the token alone, so scripts can capture it, or with `--example` the command to
