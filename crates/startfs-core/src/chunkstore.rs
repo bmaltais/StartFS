@@ -19,6 +19,7 @@ use crate::ops::{FsError, FsResult, StoreStats};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type ChunkId = [u8; 32];
@@ -57,15 +58,32 @@ pub struct ChunkStore {
     /// Counts additions and removals, so a caller can tell cheaply whether
     /// the contents may have changed since it last looked.
     generation: AtomicU64,
+    /// Chunk count and bytes on disk, kept up to date by `put` and `remove`
+    /// so that `stats` never walks the store.
+    chunks: AtomicU64,
+    bytes: AtomicU64,
+    /// Held while a finished temporary file is moved into place, so a chunk
+    /// stored twice at once is counted once.
+    publish: Mutex<()>,
+    /// Makes each temporary file name unique.
+    tmp: AtomicU64,
 }
 
 impl ChunkStore {
     pub fn open(root: &Path) -> FsResult<Self> {
         fs::create_dir_all(root).map_err(io)?;
-        Ok(Self {
+        let mut store = Self {
             root: root.to_path_buf(),
             generation: AtomicU64::new(0),
-        })
+            chunks: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            publish: Mutex::new(()),
+            tmp: AtomicU64::new(0),
+        };
+        let found = store.scan()?;
+        *store.chunks.get_mut() = found.chunks;
+        *store.bytes.get_mut() = found.stored_bytes;
+        Ok(store)
     }
 
     /// Changes whenever a chunk is added or removed through this store.
@@ -97,11 +115,25 @@ impl ChunkStore {
         }
         let dir = path.parent().expect("chunk path has a parent");
         fs::create_dir_all(dir).map_err(io)?;
-        let tmp = dir.join(format!(".tmp-{}", std::process::id()));
+        let n = self.tmp.fetch_add(1, Ordering::SeqCst);
+        let tmp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
         let mut f = fs::File::create(&tmp).map_err(io)?;
         f.write_all(&envelope).map_err(io)?;
         f.sync_all().map_err(io)?;
+        let _publish = self.publish.lock().unwrap();
+        if path.exists() {
+            // Stored by someone else since the check above.
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "the temporary file is not needed any more"
+            )]
+            let _ = fs::remove_file(&tmp);
+            return Ok(id);
+        }
         fs::rename(&tmp, &path).map_err(io)?;
+        self.chunks.fetch_add(1, Ordering::SeqCst);
+        self.bytes
+            .fetch_add(envelope.len() as u64, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(id)
     }
@@ -127,11 +159,15 @@ impl ChunkStore {
 
     /// Delete a chunk; absent chunks are fine.
     pub fn remove(&self, id: &ChunkId) {
-        #[allow(
-            clippy::let_underscore_must_use,
-            reason = "an absent chunk is already removed"
-        )]
-        let _ = fs::remove_file(self.path(id));
+        let path = self.path(id);
+        let _publish = self.publish.lock().unwrap();
+        let Ok(len) = fs::metadata(&path).map(|m| m.len()) else {
+            return; // an absent chunk is already removed
+        };
+        if fs::remove_file(&path).is_ok() {
+            self.chunks.fetch_sub(1, Ordering::SeqCst);
+            self.bytes.fetch_sub(len, Ordering::SeqCst);
+        }
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -189,6 +225,14 @@ impl ChunkStore {
     }
 
     pub fn stats(&self) -> FsResult<StoreStats> {
+        Ok(StoreStats {
+            chunks: self.chunks.load(Ordering::SeqCst),
+            stored_bytes: self.bytes.load(Ordering::SeqCst),
+        })
+    }
+
+    /// Count the store by walking it: only needed once, when it is opened.
+    fn scan(&self) -> FsResult<StoreStats> {
         let mut stats = StoreStats::default();
         for shard in fs::read_dir(&self.root).map_err(io)? {
             let shard = shard.map_err(io)?.path();
