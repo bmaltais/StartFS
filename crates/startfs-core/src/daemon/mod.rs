@@ -77,8 +77,8 @@ pub struct Daemon {
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
-    /// The latest replication health each peer gossiped.
-    peer_health: Mutex<HashMap<NodeId, Health>>,
+    /// The latest replication health each peer gossiped, and when it arrived.
+    peer_health: Mutex<HashMap<NodeId, (Nanos, Health)>>,
     /// Storage figures peers sent in answer to the query in flight.
     stats_replies: Mutex<HashMap<NodeId, NodeStats>>,
     last_gc: Mutex<Option<Nanos>>,

@@ -483,6 +483,14 @@ fn members_table(members: &[control::MemberStatus]) -> String {
         if let Some(why) = &m.problem {
             out.push_str(&format!("  {:<wid$}  cannot reach: {why}\n", ""));
         }
+        if let Some(seen) = m.last_seen {
+            out.push_str(&format!(
+                "  {:<wid$}  last seen {}{} ago\n",
+                "",
+                if seen.exact { "" } else { "over " },
+                time_left(seen.secs_ago)
+            ));
+        }
         if let Some(left) = m.standin_secs_left {
             out.push_str(&format!(
                 "  {:<wid$}  extra copies kept for {} in case it sleeps again\n",

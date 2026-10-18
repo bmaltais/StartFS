@@ -82,7 +82,10 @@ impl Daemon {
             }
             Message::Health(health) => {
                 if self.membership.lock().unwrap().is_member_endpoint(from) {
-                    self.peer_health.lock().unwrap().insert(from, health);
+                    self.peer_health
+                        .lock()
+                        .unwrap()
+                        .insert(from, (self.clock.now(), health));
                 }
             }
             Message::Copies { copies, rev } => {

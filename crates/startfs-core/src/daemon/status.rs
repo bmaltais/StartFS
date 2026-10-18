@@ -2,18 +2,24 @@
 
 use super::{DOWN_AFTER, Daemon};
 use crate::control::{
-    GcStatus, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair, Shortfall,
-    Staging, Status, Tier, Usage, Verdict,
+    GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
+    Shortfall, Staging, Status, Tier, Usage, Verdict,
 };
 use crate::error::Error;
-use crate::members::{Member, Membership};
+use crate::members::{Member, MemberId, Membership};
 use crate::net::NodeId;
 use crate::ops::FsOps;
-use crate::protocol::{Health, Message};
+use crate::ops::Nanos;
+use crate::protocol::{Health, Message, Sighting};
 use std::time::Duration;
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// Is the data safe right now? Copies beyond what the storage nodes allow are
 /// not expected, so a file is only a worry if it has fewer than it could have.
+/// A lost member's copies no longer count and have been re-made elsewhere, so
+/// once nothing is short and no repair runs it no longer reduces redundancy;
+/// a merely down member may still return, so it does.
 fn verdict(
     wanted: u32,
     possible: u32,
@@ -27,9 +33,7 @@ fn verdict(
         Verdict::AtRisk
     } else if behind().next().is_some()
         || repair.is_some()
-        || members
-            .iter()
-            .any(|m| matches!(m.state, NodeState::Down | NodeState::Lost))
+        || members.iter().any(|m| m.state == NodeState::Down)
     {
         Verdict::Degraded
     } else if possible < wanted {
@@ -59,6 +63,34 @@ fn merge_health(into: &mut Health, from: &Health) {
     }
 }
 
+/// When a member was last seen by anyone, as the cluster remembers it: the
+/// freshest of this node's own sighting and those its peers gossiped, each
+/// aged by the time since it arrived. When nobody has seen it since this
+/// daemon started, only a lower bound is known.
+fn last_seen<'a>(
+    member: MemberId,
+    own: Option<Nanos>,
+    peers: impl Iterator<Item = &'a (Nanos, Health)>,
+    started: Nanos,
+    now: Nanos,
+) -> LastSeen {
+    let own = own.map(|at| now.saturating_sub(at) / NANOS_PER_SEC);
+    let theirs = peers.filter_map(|(arrived, h)| {
+        let s = h.seen.iter().find(|s| s.member == member)?;
+        Some(s.secs_ago + now.saturating_sub(*arrived) / NANOS_PER_SEC)
+    });
+    match own.into_iter().chain(theirs).min() {
+        Some(secs) => LastSeen {
+            secs_ago: secs,
+            exact: true,
+        },
+        None => LastSeen {
+            secs_ago: now.saturating_sub(started) / NANOS_PER_SEC,
+            exact: false,
+        },
+    }
+}
+
 /// Roughly how much data fits: the space members offer, divided by N.
 pub(super) fn usable_bytes(membership: &Membership) -> u64 {
     let offered: u64 = membership.members().iter().map(|m| m.offer_bytes).sum();
@@ -70,7 +102,25 @@ pub(super) fn usable_bytes(membership: &Membership) -> u64 {
 impl Daemon {
     /// This node's own replication state: what it gossips and contributes to `status`.
     pub(super) fn local_health(&self) -> Health {
+        let now = self.clock.now();
+        let seen = {
+            let membership = self.membership.lock().unwrap();
+            let heard = self.heard.lock().unwrap();
+            membership
+                .members()
+                .iter()
+                .filter(|m| Some(m.id) != membership.me())
+                .filter_map(|m| {
+                    let at = heard.get(&m.endpoint)?;
+                    Some(Sighting {
+                        member: m.id,
+                        secs_ago: now.saturating_sub(*at) / NANOS_PER_SEC,
+                    })
+                })
+                .collect()
+        };
         Health {
+            seen,
             unreplicated: self
                 .with_view(|v| self.replicator.unreplicated(v))
                 .unwrap_or_default(),
@@ -171,7 +221,7 @@ impl Daemon {
                 if !is_self {
                     // Only a member that is up speaks for its own chunks.
                     match peer_health.get(&m.endpoint) {
-                        Some(h) if up => merge_health(&mut health, h),
+                        Some((_, h)) if up => merge_health(&mut health, h),
                         _ => unheard.push(m.id),
                     }
                 }
@@ -190,6 +240,15 @@ impl Daemon {
                     offer_bytes: m.offer_bytes,
                     is_self,
                     standin_secs_left: self.standin_secs_left(m.id, standin_days, now),
+                    last_seen: (!up).then(|| {
+                        last_seen(
+                            m.id,
+                            heard.get(&m.endpoint).copied(),
+                            peer_health.values(),
+                            self.started,
+                            now,
+                        )
+                    }),
                     problem: if up {
                         None
                     } else {
@@ -202,6 +261,7 @@ impl Daemon {
         let Health {
             unreplicated,
             repair,
+            seen: _,
         } = health;
         let nodes = members.len() as u32;
         // Only members offering space, and with room left, can hold a copy.
