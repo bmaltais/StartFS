@@ -224,6 +224,7 @@ This was validated with real processes (`kill -9` of members, 2 and 3 copies, se
 `startfs status` answers "is my data safe right now?": copies possible versus
 wanted, usable size, members and their state, files not yet fully replicated,
 repair progress, scrub state, cache usage, warnings, and conflicts.
+`startfs status --json` prints the same as JSON, for scripts and GUIs.
 
 Other commands: `startfs leave` (hand this node's data over and leave),
 `startfs remove <member>` (drop a dead member; its data is re-replicated),

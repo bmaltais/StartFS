@@ -22,7 +22,8 @@ commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
   create --name NAME --copies N [--example]
                                       create a filesystem and print its join token
-  status                              show the state of this node's filesystem
+  status [--json]                     show the state of this node's filesystem (--json: as JSON,
+                                      for scripts and GUIs)
   join TOKEN [--offer SIZE]           join the filesystem a token names
   token [--example]                   print a new join token (--example: the full join
                                       command to paste on the other machine)
@@ -40,6 +41,8 @@ enum CliError {
     MissingFlag(String),
     #[error("missing value for {0}")]
     MissingValue(String),
+    #[error("cannot encode the status as JSON: {0}")]
+    Json(serde_json::Error),
     #[error("--copies must be a number")]
     CopiesNotANumber,
     #[error("remove needs a member number (see `startfs status`)")]
@@ -191,7 +194,15 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Ok(())
         }
         "status" => {
-            print!("{}", render(&Client::new(socket).status()?));
+            let status = Client::new(socket).status()?;
+            if rest.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string(&status).map_err(CliError::Json)?
+                );
+            } else {
+                print!("{}", render(&status));
+            }
             Ok(())
         }
         _ => Err(CliError::Usage),
