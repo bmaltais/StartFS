@@ -178,3 +178,46 @@ fn a_node_that_was_asleep_itself_does_not_take_its_peers_for_asleep() {
     assert_eq!(replicas(&c), before);
     assert!(!degraded(&c, &[0, 1, 2, 3]));
 }
+
+#[test]
+fn status_shows_whose_stand_ins_are_kept_and_for_how_long() {
+    let c = cluster_with(3, 4, "standin_days = 1");
+    write_files(&c, 24);
+    let left = |c: &Cluster| c.control(0).status().unwrap().members[3].standin_secs_left;
+    assert_eq!(left(&c), None);
+
+    c.crash(3);
+    pass(&c, 10 * MINUTE);
+    let asleep = left(&c).expect("covered while asleep");
+    assert!(
+        asleep > 2 * 24 * 3600 && asleep <= 3 * 24 * 3600,
+        "{asleep}"
+    );
+
+    c.restart(3);
+    settle(&c);
+    pass(&c, 12 * HOUR);
+    let back = left(&c).expect("still kept");
+    assert!(back < 12 * 3600 + 3600, "{back}");
+
+    pass(&c, DAY);
+    assert_eq!(left(&c), None);
+}
+
+#[test]
+fn lowering_copies_with_stand_ins_kept_is_accepted_and_ends_at_the_new_count() {
+    let c = cluster_with(3, 4, "standin_days = 1");
+    write_files(&c, 24);
+    c.crash(3);
+    pass(&c, 8 * HOUR);
+    c.restart(3);
+    settle(&c);
+    assert!(replicas(&c).iter().sum::<u64>() > 72);
+
+    c.control(0).set_copies(2).unwrap();
+    settle(&c);
+    assert!(!degraded(&c, &[0, 1, 2, 3]));
+    pass(&c, 2 * DAY);
+
+    assert_eq!(replicas(&c).iter().sum::<u64>(), 48, "{:?}", replicas(&c));
+}

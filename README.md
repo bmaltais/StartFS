@@ -257,6 +257,9 @@ Examples, with `--copies 2` on a desktop, a laptop and a server:
 
 Costs and limits:
 
+- `startfs status` shows, under each member whose stand-ins are being kept, how long they
+  stay ("extra copies kept for 2d 4h in case it sleeps again"); `status --json` has it as
+  `standin_secs_left` on the member.
 - Stand-ins use disk on the machines that cover: roughly the share of data the sleeping
   machines hold, for up to `standin_days` after they were last asleep.
 - The first sleep of a machine pays one copy pass, rate limited like other repair
@@ -268,6 +271,8 @@ Costs and limits:
 - While a member's stand-ins are kept, ordinary hand-offs of chunks it shares (after a new
   machine joins, say) are also held back until the retention ends, so those chunks can sit
   above N copies for a while.
+- `startfs config --copies` works while stand-ins are kept: the surplus goes once the
+  retention has passed.
 - A machine that was itself asleep does not take its peers for asleep when it wakes.
 - `standin_days` is set when the filesystem is created, like `repair_grace_secs`. Set it to
   `0` to turn stand-ins off and get the earlier behaviour.

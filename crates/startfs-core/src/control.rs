@@ -109,6 +109,10 @@ pub struct MemberStatus {
     /// version mismatch).
     #[serde(default)]
     pub problem: Option<String>,
+    /// Seconds the extra copies made for this member are still kept, when it
+    /// was seen asleep lately (its chunks stay at N reachable copies meanwhile).
+    #[serde(default)]
+    pub standin_secs_left: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -483,8 +483,25 @@ fn members_table(members: &[control::MemberStatus]) -> String {
         if let Some(why) = &m.problem {
             out.push_str(&format!("  {:<wid$}  cannot reach: {why}\n", ""));
         }
+        if let Some(left) = m.standin_secs_left {
+            out.push_str(&format!(
+                "  {:<wid$}  extra copies kept for {} in case it sleeps again\n",
+                "",
+                time_left(left)
+            ));
+        }
     }
     out
+}
+
+/// "2d 4h", "5h 10m" or "12m": the two largest units of `secs`.
+fn time_left(secs: u64) -> String {
+    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
+    match (d, h) {
+        (0, 0) => format!("{m}m"),
+        (0, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
 }
 
 /// "not fully replicated: N chunks (a at risk, b degraded)", or nothing.

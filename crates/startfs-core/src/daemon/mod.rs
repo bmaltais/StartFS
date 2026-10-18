@@ -488,6 +488,20 @@ impl Daemon {
         (sleeping, kept)
     }
 
+    /// Seconds the extra copies made for `member` are still kept, if it was
+    /// seen asleep within the retention.
+    pub(super) fn standin_secs_left(
+        &self,
+        member: MemberId,
+        standin_days: u64,
+        now: Nanos,
+    ) -> Option<u64> {
+        let retention = Duration::from_secs(standin_days * 24 * 3600).as_nanos() as u64;
+        let at = *self.slept.lock().unwrap().get(&member)?;
+        let left = retention.checked_sub(now.saturating_sub(at))?;
+        Some(Duration::from_nanos(left).as_secs())
+    }
+
     /// Members unseen for `secs`.
     fn unseen_members(
         &self,
