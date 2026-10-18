@@ -129,7 +129,8 @@ impl Cluster {
     }
 
     /// `nodes` nodes (with `config_toml`) in one filesystem of `copies` copies,
-    /// every node offering 10 GiB, synced.
+    /// every node offering 10 GiB, synced. Node 0 keeps its default offer (also
+    /// 10 GiB) instead of setting it, unlike [`Cluster::with_offers`].
     pub fn with_filesystem(copies: u32, nodes: usize, config_toml: &str) -> Self {
         const OFFER: u64 = 10 << 30;
         let c = Self::start_with_config(nodes, config_toml);
