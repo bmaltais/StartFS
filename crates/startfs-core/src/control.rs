@@ -113,6 +113,18 @@ pub struct MemberStatus {
     /// was seen asleep lately (its chunks stay at N reachable copies meanwhile).
     #[serde(default)]
     pub standin_secs_left: Option<u64>,
+    /// When the cluster last saw the member, when it is not up.
+    #[serde(default)]
+    pub last_seen: Option<LastSeen>,
+}
+
+/// How long ago any member last heard from a member that is not up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastSeen {
+    pub secs_ago: u64,
+    /// False when no member remembers a sighting, so the figure is only how
+    /// long this daemon has been running: the real gap is at least that.
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
