@@ -70,7 +70,9 @@ same code with a different membership scope.
 
 11. **Remote reads:** fetch on demand with a bounded local LRU cache (size configurable). The cache
     is separate from replica storage and does not count toward the N copies. Recently used files
-    work offline. Pinning (`startfs pin <path>`) is deferred beyond v1.
+    work offline. A node asks peers for a chunk in order of the round-trip time it has measured to each
+    (a local estimate, not shared; unmeasured peers first, peers that look down last). Placement
+    ignores latency. Pinning (`startfs pin <path>`) is deferred beyond v1.
 
 12. **Write durability:** local first, background replication. A write is durable on the local node's
     disk and returns immediately; replication to the other N-1 nodes follows. There is a window with

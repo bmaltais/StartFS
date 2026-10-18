@@ -4,6 +4,7 @@
 //! transport and sends whatever is due. A real daemon calls it from a
 //! background thread, the test harness calls it to drive simulated time.
 
+mod latency;
 mod membership;
 mod peers;
 mod requests;
@@ -13,6 +14,7 @@ use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::control::NodeStats;
+use crate::daemon::latency::PeerLatency;
 use crate::error::Error;
 use crate::fs::{ChunkSource, GcReport, LocalFs, NodeConfig};
 use crate::members::{Member, MemberId, Membership};
@@ -87,8 +89,11 @@ pub struct Daemon {
     last_compact: Mutex<Option<Nanos>>,
     /// When this daemon started: how long a never-heard member has been unseen.
     started: Nanos,
-    /// Answers to chunk requests, by peer and chunk, for the reader waiting on them.
-    chunk_replies: Mutex<HashMap<(NodeId, ChunkId), ChunkAnswer>>,
+    /// Answers to chunk requests, by peer and chunk, for the reader waiting on
+    /// them, with the time each arrived.
+    chunk_replies: Mutex<HashMap<(NodeId, ChunkId), (Nanos, ChunkAnswer)>>,
+    /// How long each peer takes to answer a chunk request.
+    latency: Mutex<PeerLatency>,
     /// Pushes new chunks to the nodes placement chose and tracks their copies.
     replicator: Replicator,
     scrubber: Scrubber,
@@ -163,6 +168,7 @@ impl Daemon {
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
+                latency: Mutex::new(PeerLatency::default()),
                 transport: Mutex::new(None),
                 syncer: Mutex::new(None),
                 join_reply: Mutex::new(None),
@@ -549,17 +555,41 @@ impl Daemon {
         poll()
     }
 
-    /// Ask peers, most recently heard first, until one supplies the chunk.
+    /// Ask peers until one supplies the chunk: the ones that answer fastest
+    /// first, those not yet timed before those that are not up.
     fn fetch_chunk(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
         let transport = self.transport()?;
         let mut peers = self.membership.lock().unwrap().peers();
         let heard = self.heard.lock().unwrap().clone();
-        peers.sort_by_key(|p| std::cmp::Reverse(heard.get(p).copied()));
+        let now = self.clock.now();
+        let down = |p: &NodeId| {
+            heard
+                .get(p)
+                .is_none_or(|at| now.saturating_sub(*at) >= DOWN_AFTER.as_nanos() as Nanos)
+        };
+        {
+            let latency = self.latency.lock().unwrap();
+            peers.sort_by_key(|p| {
+                (
+                    down(p),
+                    latency.estimate(*p, now),
+                    std::cmp::Reverse(heard.get(p)),
+                )
+            });
+        }
         for peer in peers {
             self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+            let sent = self.clock.now();
             transport.send(peer, Message::ChunkRequest(*id).encode());
             let reply = self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
-            if let Some(Some(data)) = reply
+            let answered = reply
+                .as_ref()
+                .map_or_else(|| self.clock.now(), |(at, _)| *at);
+            self.latency
+                .lock()
+                .unwrap()
+                .record(peer, answered.saturating_sub(sent), answered);
+            if let Some((_, Some(data))) = reply
                 && accept(&data)
             {
                 return Some(data);
