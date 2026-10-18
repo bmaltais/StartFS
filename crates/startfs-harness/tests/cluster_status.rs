@@ -4,22 +4,10 @@ use startfs_core::control::Shortfall;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::sync::HELLO_INTERVAL;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 use std::time::Duration;
 
 const BIG: u64 = 10 << 30;
-
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
 
 /// Two copies wanted but only node 0 offers space: a file written anywhere
 /// can never reach more than one.

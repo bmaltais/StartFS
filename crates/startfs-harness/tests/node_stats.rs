@@ -7,14 +7,7 @@ use std::time::Duration;
 const BIG: u64 = 10 << 30;
 
 fn cluster(nodes: usize, copies: u32) -> Cluster {
-    let c = Cluster::start(nodes);
-    let token = c.control(0).create("home", copies).unwrap();
-    c.control(0).set_offer(BIG).unwrap();
-    for i in 1..nodes {
-        c.control(i).join(&token, Some(BIG)).unwrap();
-    }
-    c.sync();
-    c
+    Cluster::with_offers(copies, &vec![BIG; nodes])
 }
 
 fn settle(c: &Cluster) {

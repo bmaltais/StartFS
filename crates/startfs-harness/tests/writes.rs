@@ -1,21 +1,9 @@
 //! Buffered, chunk-incremental writes, driven only through the filesystem-operations interface.
 
 use startfs_core::ops::*;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 
 const MIB: usize = 1 << 20;
-
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
 
 fn read_all(fs: &impl FsOps, ino: Ino) -> Vec<u8> {
     fs.read(ino, 0, u32::MAX).unwrap()

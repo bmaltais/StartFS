@@ -301,6 +301,8 @@ fn an_offer_of_zero_makes_a_pure_client_that_adds_no_storage() {
 }
 
 /// Incompressible bytes, so a file really needs chunk storage.
+/// Like `startfs_harness::noise`, but takes the top byte of the state, so the
+/// bytes differ; these tests keep the data they were written against.
 fn noise(len: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..len)

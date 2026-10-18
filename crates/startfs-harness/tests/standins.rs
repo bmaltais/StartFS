@@ -2,37 +2,12 @@
 //! keeps the extra copies for a while in case they sleep again.
 
 use startfs_core::ops::*;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 use std::time::Duration;
 
-const BIG: u64 = 10 << 30;
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3600);
 const DAY: Duration = Duration::from_secs(24 * 3600);
-
-/// Incompressible bytes, so a file really needs chunk storage.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
-/// A filesystem of `copies` copies on `nodes` nodes, all offering plenty.
-fn cluster_with(copies: u32, nodes: usize, config: &str) -> Cluster {
-    let c = Cluster::start_with_config(nodes, config);
-    let token = c.control(0).create("home", copies).unwrap();
-    for i in 1..nodes {
-        c.control(i).join(&token, Some(BIG)).unwrap();
-    }
-    c.sync();
-    c
-}
 
 fn write_files(c: &Cluster, count: u64) {
     for i in 0..count {
@@ -66,7 +41,7 @@ fn settle(c: &Cluster) {
 
 #[test]
 fn a_member_asleep_past_the_stand_in_delay_is_covered_for_and_nothing_shows_degraded() {
-    let c = cluster_with(3, 4, "");
+    let c = Cluster::with_filesystem(3, 4, "");
     write_files(&c, 24);
     assert!(replicas(&c)[3] > 0);
     assert!(!degraded(&c, &[0, 1, 2]));
@@ -79,7 +54,7 @@ fn a_member_asleep_past_the_stand_in_delay_is_covered_for_and_nothing_shows_degr
 
 #[test]
 fn the_extra_copies_stay_for_the_retention_period_after_the_sleeper_is_back_then_are_trimmed() {
-    let c = cluster_with(3, 4, "");
+    let c = Cluster::with_filesystem(3, 4, "");
     write_files(&c, 24);
     let before = replicas(&c);
     c.crash(3);
@@ -104,7 +79,7 @@ fn the_extra_copies_stay_for_the_retention_period_after_the_sleeper_is_back_then
 
 #[test]
 fn a_member_that_sleeps_again_within_the_retention_period_costs_no_new_copies() {
-    let c = cluster_with(3, 4, "");
+    let c = Cluster::with_filesystem(3, 4, "");
     write_files(&c, 24);
     c.crash(3);
     c.elapse(8 * HOUR);
@@ -124,7 +99,7 @@ fn a_member_that_sleeps_again_within_the_retention_period_costs_no_new_copies() 
 
 #[test]
 fn a_member_that_never_returns_is_replaced_after_the_grace_period_as_before() {
-    let c = cluster_with(3, 5, "");
+    let c = Cluster::with_filesystem(3, 5, "");
     write_files(&c, 24);
     let before: u64 = replicas(&c).iter().sum();
 
@@ -139,7 +114,7 @@ fn a_member_that_never_returns_is_replaced_after_the_grace_period_as_before() {
 
 #[test]
 fn with_stand_ins_off_a_sleeping_member_leaves_chunks_degraded_and_nothing_is_kept() {
-    let c = cluster_with(3, 4, "standin_days = 0");
+    let c = Cluster::with_filesystem(3, 4, "standin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
 
@@ -155,7 +130,7 @@ fn with_stand_ins_off_a_sleeping_member_leaves_chunks_degraded_and_nothing_is_ke
 
 #[test]
 fn a_node_that_was_asleep_itself_does_not_take_its_peers_for_asleep() {
-    let c = cluster_with(3, 4, "");
+    let c = Cluster::with_filesystem(3, 4, "");
     write_files(&c, 24);
     let before = replicas(&c);
 
@@ -171,7 +146,7 @@ fn a_node_that_was_asleep_itself_does_not_take_its_peers_for_asleep() {
 
 #[test]
 fn status_shows_whose_stand_ins_are_kept_and_for_how_long() {
-    let c = cluster_with(3, 4, "standin_days = 1");
+    let c = Cluster::with_filesystem(3, 4, "standin_days = 1");
     write_files(&c, 24);
     let left = |c: &Cluster| c.control(0).status().unwrap().members[3].standin_secs_left;
     assert_eq!(left(&c), None);
@@ -193,7 +168,7 @@ fn status_shows_whose_stand_ins_are_kept_and_for_how_long() {
 
 #[test]
 fn lowering_copies_with_stand_ins_kept_is_accepted_and_ends_at_the_new_count() {
-    let c = cluster_with(3, 4, "standin_days = 1");
+    let c = Cluster::with_filesystem(3, 4, "standin_days = 1");
     write_files(&c, 24);
     c.crash(3);
     c.elapse(8 * HOUR);

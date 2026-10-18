@@ -128,6 +128,32 @@ impl Cluster {
         Self::start_with_config(n, "")
     }
 
+    /// `nodes` nodes (with `config_toml`) in one filesystem of `copies` copies,
+    /// every node offering 10 GiB, synced.
+    pub fn with_filesystem(copies: u32, nodes: usize, config_toml: &str) -> Self {
+        const OFFER: u64 = 10 << 30;
+        let c = Self::start_with_config(nodes, config_toml);
+        let token = c.control(0).create("home", copies).unwrap();
+        for i in 1..nodes {
+            c.control(i).join(&token, Some(OFFER)).unwrap();
+        }
+        c.sync();
+        c
+    }
+
+    /// One node per entry of `offers`, in one filesystem of `copies` copies, each
+    /// node offering that many bytes (0 makes a pure client), synced.
+    pub fn with_offers(copies: u32, offers: &[u64]) -> Self {
+        let c = Self::start(offers.len());
+        let token = c.control(0).create("home", copies).unwrap();
+        c.control(0).set_offer(offers[0]).unwrap();
+        for (i, offer) in offers.iter().enumerate().skip(1) {
+            c.control(i).join(&token, Some(*offer)).unwrap();
+        }
+        c.sync();
+        c
+    }
+
     /// Like [`Cluster::start`], with every node's `config.toml` content given.
     pub fn start_with_config(n: usize, config_toml: &str) -> Self {
         let mut config_for_nodes = Config::parse(config_toml).expect("valid config");

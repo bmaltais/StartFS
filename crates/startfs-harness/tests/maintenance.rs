@@ -5,38 +5,14 @@
 use startfs_core::control::ScrubState;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 use std::time::Duration;
 
-const BIG: u64 = 10 << 30;
 const HOUR: Duration = Duration::from_secs(3600);
 const DAY: Duration = Duration::from_secs(24 * 3600);
 
-/// Incompressible bytes, so a file really needs chunk storage.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
-fn cluster_with(copies: u32, nodes: usize, config: &str) -> Cluster {
-    let c = Cluster::start_with_config(nodes, config);
-    let token = c.control(0).create("home", copies).unwrap();
-    for i in 1..nodes {
-        c.control(i).join(&token, Some(BIG)).unwrap();
-    }
-    c.sync();
-    c
-}
-
 fn cluster(copies: u32, nodes: usize) -> Cluster {
-    cluster_with(copies, nodes, "")
+    Cluster::with_filesystem(copies, nodes, "")
 }
 
 fn put(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
@@ -141,7 +117,7 @@ fn overwritten_data_is_reclaimed_but_chunks_still_in_use_are_kept() {
 
 #[test]
 fn the_retention_period_is_configurable() {
-    let c = cluster_with(2, 3, "gc_retention_secs = 7200");
+    let c = Cluster::with_filesystem(2, 3, "gc_retention_secs = 7200");
     put(&c.fs(1), "tmp", &noise(8 * 1024, 6));
     c.sync();
     c.fs(1).unlink(ROOT_INO, "tmp").unwrap();
@@ -395,7 +371,7 @@ fn member_id(c: &Cluster, i: usize) -> startfs_core::members::MemberId {
 
 #[test]
 fn gc_waits_for_a_partitioned_member_before_reclaiming() {
-    let c = cluster_with(2, 3, "gc_retention_secs = 7200");
+    let c = Cluster::with_filesystem(2, 3, "gc_retention_secs = 7200");
     put(&c.fs(0), "doomed", &noise(8 * 1024, 11));
     pass(&c, HOUR, Duration::from_secs(1200));
     let on = |c: &Cluster, i| c.control(i).status().unwrap().usage.chunks;
@@ -439,7 +415,7 @@ fn gc_waits_for_a_partitioned_member_before_reclaiming() {
 
 #[test]
 fn content_rewritten_on_the_far_side_of_a_partition_is_not_lost() {
-    let c = cluster_with(2, 3, "gc_retention_secs = 7200");
+    let c = Cluster::with_filesystem(2, 3, "gc_retention_secs = 7200");
     let data = noise(8 * 1024, 12);
     put(&c.fs(0), "old", &data);
     c.sync();

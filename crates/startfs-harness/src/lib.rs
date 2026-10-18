@@ -3,7 +3,9 @@
 //! [`FsOps`](startfs_core::ops::FsOps).
 
 mod cluster;
+mod fixtures;
 mod network;
 
 pub use cluster::{Cluster, NodeFs};
+pub use fixtures::noise;
 pub use network::{SimNetwork, SimTransport};

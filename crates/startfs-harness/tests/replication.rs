@@ -6,36 +6,10 @@ use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::replication::RETRY;
 use startfs_core::sync::HELLO_INTERVAL;
-use startfs_harness::Cluster;
+use startfs_harness::{Cluster, noise};
 use std::time::Duration;
 
 const BIG: u64 = 10 << 30;
-
-/// Incompressible bytes, so a file really needs chunk storage.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
-/// A filesystem of `copies` copies; node `i` joins offering `offers[i]` bytes
-/// (node 0 creates it, then sets its offer).
-fn cluster(copies: u32, offers: &[u64]) -> Cluster {
-    let c = Cluster::start(offers.len());
-    let token = c.control(0).create("home", copies).unwrap();
-    c.control(0).set_offer(offers[0]).unwrap();
-    for (i, offer) in offers.iter().enumerate().skip(1) {
-        c.control(i).join(&token, Some(*offer)).unwrap();
-    }
-    c.sync();
-    c
-}
 
 fn put(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
     let f = fs.create(ROOT_INO, name, 0o644).unwrap();
@@ -45,7 +19,7 @@ fn put(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
 
 #[test]
 fn a_pure_client_write_is_durable_locally_and_counted_as_not_yet_replicated() {
-    let c = cluster(2, &[BIG, BIG, 0]);
+    let c = Cluster::with_offers(2, &[BIG, BIG, 0]);
     let data = noise(60 * 1024, 1);
     let ino = put(&c.fs(2), "a", &data);
 
@@ -63,7 +37,7 @@ fn a_pure_client_write_is_durable_locally_and_counted_as_not_yet_replicated() {
 #[test]
 fn replicas_are_spread_in_proportion_to_each_nodes_offer() {
     let g = 1 << 30;
-    let c = cluster(1, &[g, 3 * g, 0]);
+    let c = Cluster::with_offers(1, &[g, 3 * g, 0]);
     for i in 0..200 {
         put(&c.fs(2), &format!("f{i}"), &noise(8 * 1024, i + 1));
     }
@@ -77,7 +51,7 @@ fn replicas_are_spread_in_proportion_to_each_nodes_offer() {
 
 #[test]
 fn with_too_few_storage_nodes_writes_succeed_best_effort_and_status_says_so() {
-    let c = cluster(3, &[BIG, BIG, 0]);
+    let c = Cluster::with_offers(3, &[BIG, BIG, 0]);
     let data = noise(60 * 1024, 1);
     // The write is not refused although three copies cannot be placed.
     let ino = put(&c.fs(2), "a", &data);
@@ -107,7 +81,7 @@ fn with_too_few_storage_nodes_writes_succeed_best_effort_and_status_says_so() {
 
 #[test]
 fn a_chunks_shortfall_follows_how_many_nodes_hold_it() {
-    let c = cluster(3, &[BIG, BIG, BIG, 0]);
+    let c = Cluster::with_offers(3, &[BIG, BIG, BIG, 0]);
     let ids = |ns: &[u32]| ns.iter().map(|n| NodeId(*n)).collect::<Vec<_>>();
     let copies = |c: &Cluster| {
         c.control(3)
@@ -148,7 +122,7 @@ fn a_chunks_shortfall_follows_how_many_nodes_hold_it() {
 fn full_nodes_are_skipped_in_placement_and_status_warns() {
     // Each node has room for 8 of the 100 KB chunks, 24 in all; 14 files want 28.
     let offer = 8 * 100_100;
-    let c = cluster(2, &[offer, offer, offer, 0]);
+    let c = Cluster::with_offers(2, &[offer, offer, offer, 0]);
     let files: Vec<_> = (0..14)
         .map(|i| {
             // Writes are never refused for want of room elsewhere.
@@ -219,7 +193,7 @@ fn a_storage_node_is_not_refused_just_because_the_staging_cap_is_reached() {
 
 #[test]
 fn a_write_survives_a_crash_before_replication_and_replicates_after_restart() {
-    let c = cluster(2, &[BIG, BIG, 0]);
+    let c = Cluster::with_offers(2, &[BIG, BIG, 0]);
     let data = noise(60 * 1024, 1);
     let ino = put(&c.fs(2), "a", &data);
 
@@ -267,7 +241,7 @@ fn a_new_member_takes_over_only_its_share_and_nothing_moves_between_old_members(
 
 #[test]
 fn a_node_that_drops_its_offer_to_zero_hands_its_replicas_to_the_others() {
-    let c = cluster(1, &[BIG, BIG, 0]);
+    let c = Cluster::with_offers(1, &[BIG, BIG, 0]);
     for i in 0..20 {
         put(&c.fs(2), &format!("f{i}"), &noise(8 * 1024, i + 1));
     }
@@ -293,7 +267,7 @@ fn a_node_that_drops_its_offer_to_zero_hands_its_replicas_to_the_others() {
 
 #[test]
 fn usable_size_is_the_offered_space_divided_by_the_copies_wanted() {
-    let c = cluster(2, &[4000, 2000, 0]);
+    let c = Cluster::with_offers(2, &[4000, 2000, 0]);
     // Pure clients add nothing; 6000 bytes offered, two copies of everything.
     assert_eq!(c.control(2).status().unwrap().usable_bytes, 3000);
 }
@@ -306,7 +280,7 @@ fn replicas(c: &Cluster) -> Vec<u64> {
 
 #[test]
 fn a_pure_clients_data_reaches_n_storage_nodes_and_its_staging_is_released() {
-    let c = cluster(2, &[BIG, BIG, BIG, 0]);
+    let c = Cluster::with_offers(2, &[BIG, BIG, BIG, 0]);
     let data = noise(60 * 1024, 1);
     let ino = put(&c.fs(3), "a", &data);
 
@@ -324,7 +298,7 @@ fn a_pure_clients_data_reaches_n_storage_nodes_and_its_staging_is_released() {
 
 #[test]
 fn a_chunk_on_several_members_is_counted_once_cluster_wide() {
-    let c = cluster(3, &[BIG, BIG, BIG, 0]);
+    let c = Cluster::with_offers(3, &[BIG, BIG, BIG, 0]);
     put(&c.fs(3), "a", &noise(60 * 1024, 1));
     c.sync();
     assert!(c.control(3).status().unwrap().unreplicated.is_empty());
