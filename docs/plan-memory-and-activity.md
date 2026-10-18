@@ -33,7 +33,7 @@ upgraded. Each checkpoint names the data it needs (see "Test data") and what mus
 
 | After | Checkpoint | How | Must hold |
 |---|---|---|---|
-| now (before #63) | Baseline on current `main` | memory runs done 2026-10-18, see `docs/baselines/`; **still to do:** `profile-write.sh` on a quiet machine, right before #63 | numbers exist for `main` with #62 in |
+| now (before #63) | Baseline on current `main` | memory and write-path runs done 2026-10-18, see `docs/baselines/`; rerun `profile-write.sh` on a quiet machine for the #63 overhead comparison | numbers exist for `main` with #62 in |
 | #63 | Instrumented burst on the real cluster | upgrade one node, `make-tree.py` with a new seed into its mount, run `startfs activity` every minute | each reading in the skill section is explained by `status`; overhead under 1% |
 | #66 | Bound holds | `profile-memory.sh` at the baseline load and at 5x (`FILES=20000 BIG=1000`), both modes | receiver peak stays near the bound while the load grows 5x |
 | #66 | Live catch-up | restart a node that was away, with `startfs activity` open on a peer | inbound bytes stay under the bound; RSS does not climb past baseline plus the bound |

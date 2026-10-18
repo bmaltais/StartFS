@@ -36,15 +36,25 @@ Compare later runs against this; see `docs/plan-memory-and-activity.md` for what
 - The peer that caught up after being frozen reaches about 490 MiB for about 350 MiB of data.
 - The trim and stall runs were watched for under a minute, so "settled" there is not established.
 
-## Not run
+## Write path (`profile-write.txt`)
 
-`scripts/profile-write.sh` (write throughput, daemon CPU) was not run: it is the baseline for the
-under-1% overhead check on #63 and needs a quiet machine. Run it right before starting #63 and add
-its output here as `profile-write.txt`.
+`scripts/profile-write.sh`, one node, 1 copy, run on a quiet machine after the memory runs. Wall
+time through the FUSE mount against a plain directory, with the daemon's CPU:
+
+| Load | Local | Through FUSE | Daemon user / sys |
+|---|---|---|---|
+| 128 MiB `dd bs=1M` | 0.038 s | 0.343 s | 0.24 s / 0.18 s |
+| 1000 x 8 B (inline) | 0.032 s | 0.319 s | 0.11 s / 0.07 s |
+| 1000 x 16 KiB (chunks) | 0.031 s | 0.738 s | 0.22 s / 0.41 s |
+| 200 x 1 MiB | 0.008 s | 0.414 s | 0.20 s / 0.39 s |
+
+This is the figure the under-1% overhead check on #63 compares against: rerun it with `activity`
+on and off. One run; the machine was otherwise idle.
 
 ## How this was produced
 
 ```sh
+scripts/profile-write.sh > profile-write.txt                  # write path
 scripts/profile-memory.sh                                   # burst.csv (WATCH=90)
 MODE=stall WATCH=8 RESUME=12 scripts/profile-memory.sh      # stall.csv
 MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=131072 WATCH=8 scripts/profile-memory.sh   # burst-trim.csv
