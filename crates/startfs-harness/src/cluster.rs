@@ -213,8 +213,27 @@ impl Cluster {
         self.clock.now()
     }
 
+    /// Move the clock in one jump. After a jump of minutes every node sees every
+    /// peer as unseen until the hellos arrive, as a machine does after it
+    /// suspended itself; use [`Cluster::elapse`] to let time pass the way it does
+    /// on running machines.
     pub fn advance(&self, by: Duration) {
         self.clock.advance(by);
+    }
+
+    /// Let `by` pass with every live node running: steps of 4 minutes (short
+    /// of the 5 minutes after which a member is taken for asleep), each followed
+    /// by a sync, then a few more rounds so work started at the end completes.
+    pub fn elapse(&self, by: Duration) {
+        const STEP: Duration = Duration::from_secs(240);
+        for _ in 0..by.as_secs() / STEP.as_secs() {
+            self.advance(STEP);
+            self.sync();
+        }
+        for _ in 0..3 {
+            self.advance(Duration::from_secs(10));
+            self.sync();
+        }
     }
 
     /// Plug the node's machine in or unplug it.

@@ -146,6 +146,77 @@ mod tests {
         );
     }
 
+    /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
+    /// when the version was last bumped.
+    const PINNED: (u8, &str) = (
+        8,
+        "1b8a7cbccfe0bb64ab5948d5e649c6d7e7044303e1a8d75cdf2946fbc5410be4",
+    );
+
+    #[test]
+    fn a_change_to_the_wire_shape_comes_with_a_protocol_version_bump() {
+        use crate::control::{FilesystemInfo, Repair, Shortfall};
+        use crate::members::{Admission, IdRange, Member, MemberId, TokenRec};
+        use crate::net::NodeId;
+        let member = Member {
+            id: MemberId(2),
+            endpoint: NodeId(1),
+            addr: "host:7600".into(),
+            offer_bytes: 5,
+            rev: 3,
+            leaving: false,
+            removed: false,
+        };
+        let fs = FilesystemInfo {
+            id: "fs".into(),
+            name: "home".into(),
+            copies: 3,
+            copies_rev: 1,
+            repair_grace_secs: 1800,
+            gc_retention_secs: 604800,
+            standin_days: 3,
+        };
+        let samples = [
+            Message::JoinReply(Ok(Admission {
+                fs,
+                id: MemberId(2),
+                ids: IdRange { start: 1, end: 9 },
+                members: vec![member.clone()],
+            })),
+            Message::JoinReply(Err("no".into())),
+            Message::Members(vec![member]),
+            Message::Tokens(vec![TokenRec {
+                id: "t".into(),
+                expires: 9,
+                revoked: false,
+            }]),
+            Message::Health(Health {
+                unreplicated: vec![Shortfall {
+                    copies: 1,
+                    chunks: 2,
+                }],
+                repair: Some(Repair {
+                    at_risk: 1,
+                    degraded: 2,
+                }),
+            }),
+            Message::Copies { copies: 3, rev: 2 },
+            Message::ChunkAck([1u8; 32], Replica::Missing),
+            Message::StatsRequest,
+        ];
+        // Without the version byte, so only the shape of the messages is pinned.
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|m| m.encode()[1..].to_vec())
+            .collect();
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        assert!(
+            PINNED.0 == PROTOCOL_VERSION && digest == PINNED.1,
+            "the wire shape changed (digest {digest}): bump PROTOCOL_VERSION (ADR 0002) \
+             and set PINNED to ({PROTOCOL_VERSION}, \"{digest}\")",
+        );
+    }
+
     #[test]
     fn only_messages_carrying_chunk_bytes_are_bulk() {
         let id = [1u8; 32];
