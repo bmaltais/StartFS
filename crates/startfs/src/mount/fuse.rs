@@ -565,12 +565,60 @@ pub fn platform_options() -> Vec<MountOption> {
 /// Mounts through FUSE: `fuser` on Linux, FUSE-T or macFUSE on macOS.
 pub struct FuseMounter;
 
-struct FuseMount(fuser::BackgroundSession);
+/// How long a stop waits for the kernel to let the mount go before it detaches
+/// it lazily and gives up on the session thread.
+const UNMOUNT_GRACE: Duration = Duration::from_secs(3);
+
+struct FuseMount {
+    session: fuser::BackgroundSession,
+    mountpoint: std::path::PathBuf,
+}
 
 impl Mount for FuseMount {
+    /// A process with its working directory or an open file on the mount keeps
+    /// the session thread from finishing, so waiting for it can take forever.
+    /// After a grace period the mount is detached lazily and the caller carries
+    /// on; exiting closes `/dev/fuse` and ends the session.
     fn unmount(self: Box<Self>) -> Result<(), Error> {
-        self.0.umount_and_join().map_err(Error::Unmount)
+        let FuseMount {
+            session,
+            mountpoint,
+        } = *self;
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "the receiver is gone once the grace period has passed"
+            )]
+            let _ = done.send(session.umount_and_join());
+        });
+        match finished.recv_timeout(UNMOUNT_GRACE) {
+            Ok(result) => result.map_err(Error::Unmount),
+            Err(_) => {
+                eprintln!(
+                    "startfs: {} is in use; detaching it instead of waiting",
+                    mountpoint.display()
+                );
+                lazy_unmount(&mountpoint);
+                Ok(())
+            }
+        }
     }
+}
+
+/// `fusermount -uz`: detach the mount now, whatever still uses it.
+fn lazy_unmount(mountpoint: &Path) {
+    for tool in ["fusermount3", "fusermount"] {
+        if std::process::Command::new(tool)
+            .arg("-uz")
+            .arg(mountpoint)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return;
+        }
+    }
+    eprintln!("startfs: could not detach {}", mountpoint.display());
 }
 
 impl Mounter for FuseMounter {
@@ -584,7 +632,10 @@ impl Mounter for FuseMounter {
                     source,
                 }
             })?;
-        Ok(Box::new(FuseMount(session)))
+        Ok(Box::new(FuseMount {
+            session,
+            mountpoint: mountpoint.to_path_buf(),
+        }))
     }
 }
 

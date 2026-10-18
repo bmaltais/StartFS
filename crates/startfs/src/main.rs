@@ -393,12 +393,16 @@ fn daemon(
         }
     };
     // Run until asked to stop, then unmount so no dead mount is left behind.
+    // The control socket stays up meanwhile so `status` can say we are stopping.
     wait_for_stop();
-    drop(server);
+    d.set_stopping();
+    eprintln!("startfs: stopping");
     drop(ticker);
     if let Some(m) = mount {
+        eprintln!("startfs: unmounting");
         m.unmount()?;
     }
+    drop(server);
     Ok(())
 }
 
@@ -613,8 +617,15 @@ fn efficiency_lines(s: &Status, copies: u32) -> String {
 }
 
 fn render(s: &Status) -> String {
+    let stopping = if s.stopping {
+        "stopping: the daemon is shutting down\n"
+    } else {
+        ""
+    };
     let Some(fs) = &s.filesystem else {
-        return "no filesystem on this node; run `startfs create --name NAME --copies N`\n".into();
+        return format!(
+            "{stopping}no filesystem on this node; run `startfs create --name NAME --copies N`\n"
+        );
     };
     let state = match s.node_state {
         NodeState::Online => "online",
@@ -622,7 +633,7 @@ fn render(s: &Status) -> String {
         NodeState::Lost => "lost",
         NodeState::Leaving => "leaving",
     };
-    let mut out = String::new();
+    let mut out = String::from(stopping);
     if let Some(v) = s.verdict {
         out.push_str(&format!("data: {}\n", v.describe().to_uppercase()));
     }

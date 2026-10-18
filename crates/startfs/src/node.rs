@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Identify peers with the `tailscaled` the config names (or the default one).
 pub fn tailscale_whois(config: &Config) -> Arc<dyn Whois> {
@@ -75,15 +75,26 @@ impl Ticker {
     }
 }
 
+/// How long a stop waits for a tick that is mid-work (it may be waiting on a
+/// peer) before it gives up on the thread.
+const TICK_GRACE: Duration = Duration::from_secs(3);
+
 impl Drop for Ticker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.thread.take() {
+        let Some(t) = self.thread.take() else { return };
+        let started = Instant::now();
+        while !t.is_finished() && started.elapsed() < TICK_GRACE {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if t.is_finished() {
             #[allow(
                 clippy::let_underscore_must_use,
                 reason = "teardown: a panicked thread has nothing left to report"
             )]
             let _ = t.join();
+        } else {
+            eprintln!("startfs: a tick is still running after {TICK_GRACE:?}; not waiting for it");
         }
     }
 }

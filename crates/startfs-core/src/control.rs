@@ -308,6 +308,9 @@ impl Verdict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
+    /// The daemon was told to stop and is winding down.
+    #[serde(default)]
+    pub stopping: bool,
     /// `None` until a filesystem is created or joined.
     pub verdict: Option<Verdict>,
     /// `None` until a filesystem is created or joined.
