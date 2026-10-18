@@ -64,17 +64,16 @@ impl Drop for Daemon {
     }
 }
 
-#[test]
-fn standard_tools_work_on_a_real_mount() {
+/// A daemon with its filesystem mounted, or `None` where mounting is not possible.
+fn mounted_daemon(dir: &Path) -> Option<Daemon> {
     if !fuse_available() {
         eprintln!("skipping: /dev/fuse or fusermount is not available");
-        return;
+        return None;
     }
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    let mp = dir.path().join("mnt");
+    let data = dir.join("data");
+    let mp = dir.join("mnt");
     std::fs::create_dir(&mp).unwrap();
-    let config = dir.path().join("config.toml");
+    let config = dir.join("config.toml");
     std::fs::write(&config, "port = 0\n").unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_startfs"))
         .arg("--data-dir")
@@ -97,14 +96,14 @@ fn standard_tools_work_on_a_real_mount() {
             // The daemon exits at once when mounting is refused (containers,
             // user namespaces): treat that as "FUSE unavailable".
             eprintln!("skipping: daemon exited early ({status}); mounting not permitted here");
-            return;
+            return None;
         }
         let mounted = std::fs::read_to_string("/proc/self/mountinfo")
             .unwrap()
             .lines()
             .any(|l| l.contains(mp.to_str().unwrap()));
         if mounted {
-            break;
+            return Some(daemon);
         }
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -112,6 +111,32 @@ fn standard_tools_work_on_a_real_mount() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn terminate(daemon: &Daemon) {
+    // SAFETY: plain kill(2) on our own child.
+    unsafe { libc::kill(daemon.child.id() as i32, libc::SIGTERM) };
+}
+
+/// Wait up to `limit` for the daemon to exit.
+fn exits_within(daemon: &mut Daemon, limit: Duration) -> Option<std::process::ExitStatus> {
+    let started = Instant::now();
+    while started.elapsed() < limit {
+        if let Some(status) = daemon.child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+#[test]
+fn standard_tools_work_on_a_real_mount() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut daemon) = mounted_daemon(dir.path()) else {
+        return;
+    };
+    let mp = daemon.mountpoint.clone();
 
     // Plain file I/O and ls.
     std::fs::write(mp.join("hello.txt"), b"hello world").unwrap();
@@ -187,8 +212,7 @@ fn standard_tools_work_on_a_real_mount() {
     assert!(!mp.join("a").exists());
 
     // Stopping the daemon (SIGTERM) unmounts cleanly.
-    // SAFETY: plain kill(2) on our own child.
-    unsafe { libc::kill(daemon.child.id() as i32, libc::SIGTERM) };
+    terminate(&daemon);
     let status = daemon.child.wait().unwrap();
     assert!(status.success(), "daemon exit: {status}");
     let still = std::fs::read_to_string("/proc/self/mountinfo")
@@ -196,4 +220,65 @@ fn standard_tools_work_on_a_real_mount() {
         .lines()
         .any(|l| l.contains(mp.to_str().unwrap()));
     assert!(!still, "mount should be gone after the daemon stops");
+}
+
+/// A process with its working directory on the mount, as a shell would have.
+fn hold(mp: &Path) -> Child {
+    Command::new("sleep")
+        .arg("600")
+        .current_dir(mp)
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn the_daemon_stops_even_when_a_process_is_inside_the_mount() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut daemon) = mounted_daemon(dir.path()) else {
+        return;
+    };
+    let mut holder = hold(&daemon.mountpoint);
+    terminate(&daemon);
+    let status = exits_within(&mut daemon, Duration::from_secs(10));
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the daemon should exit shortly after SIGTERM: {status:?}"
+    );
+}
+
+#[test]
+fn status_says_stopping_while_the_daemon_shuts_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(mut daemon) = mounted_daemon(dir.path()) else {
+        return;
+    };
+    let mut holder = hold(&daemon.mountpoint);
+    terminate(&daemon);
+    let mut said = (false, false);
+    let started = Instant::now();
+    while daemon.child.try_wait().unwrap().is_none() && started.elapsed() < Duration::from_secs(10)
+    {
+        let status = |args: &[&str]| {
+            let out = Command::new(env!("CARGO_BIN_EXE_startfs"))
+                .arg("--data-dir")
+                .arg(dir.path().join("data"))
+                .arg("status")
+                .args(args)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        said.0 |= status(&[]).contains("stopping");
+        said.1 |= status(&["--json"]).contains("\"stopping\":true");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(
+        said,
+        (true, true),
+        "status should report the stop under way"
+    );
 }

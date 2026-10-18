@@ -98,6 +98,8 @@ pub struct Daemon {
     replicator: Replicator,
     scrubber: Scrubber,
     power: Mutex<Arc<dyn PowerSource>>,
+    /// Set once the process has been asked to stop; `status` reports it.
+    stopping: std::sync::atomic::AtomicBool,
 }
 
 /// Garbage collection as `status` reports it.
@@ -167,6 +169,7 @@ impl Daemon {
                 replicator: Replicator::new(fs.clone()),
                 scrubber: Scrubber::new(fs.clone()),
                 power: Mutex::new(Arc::new(MainsPower)),
+                stopping: std::sync::atomic::AtomicBool::new(false),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -201,6 +204,12 @@ impl Daemon {
     /// Where to learn whether the machine is on battery power.
     pub fn set_power_source(&self, power: Arc<dyn PowerSource>) {
         *self.power.lock().unwrap() = power;
+    }
+
+    /// Mark the daemon as shutting down, so `status` says so while it winds down.
+    pub fn set_stopping(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn on_battery(&self) -> bool {

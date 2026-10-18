@@ -112,8 +112,12 @@ On a machine that already has StartFS, this is what it does, in order:
    [protocol version](GLOSSARY.md) from the installed one (`startfs --version` shows
    both), it prints a warning: members on different protocols cannot sync, so upgrade
    every member.
-4. **Stops the service.** The daemon unmounts `~/StartFS` cleanly. Programs with files
-   open on the mount will see it go away; close them first.
+4. **Stops the service.** First it lists the programs with a working directory or open
+   file on `~/StartFS`, since they lose the mount; on a terminal it asks before going on
+   (`STARTFS_FORCE=1` never asks). Then the daemon unmounts the mount, or detaches it
+   after a few seconds if something is still using it. `startfs status` says "stopping"
+   meanwhile. Press Ctrl-C at any point after this and the installer puts the old binary
+   and the running service back.
 5. **Replaces the binary**, keeping the old one next to it as `startfs.prev`, and
    refreshes the systemd unit (Linux) before reloading it.
 6. **Starts the service and checks it.** It waits up to 15 seconds for the new daemon to

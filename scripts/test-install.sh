@@ -30,7 +30,9 @@ make_release v1.0.1 1.0.1 4
 make_release v1.0.2 1.0.2 5
 make_release v1.0.3 1.0.3 5 broken
 
-# Fake systemctl: tracks "active" in a file and logs every call.
+# Fake systemctl: tracks "active" in a file and logs every call. When state/interrupt_on
+# names the subcommand being run, it acts as Ctrl-C (SIGTERM here: a shell started with SIGINT ignored cannot trap it): it signals the installer (its parent)
+# once, then carries on.
 cat >"$work/bin/systemctl" <<SH
 #!/bin/sh
 echo "\$*" >>"$work/state/calls"
@@ -40,6 +42,13 @@ case "\$2" in
   stop) rm -f "$work/state/active" ;;
   enable|start) touch "$work/state/active" ;;
 esac
+rc=\$?
+if [ "\$2" = "\$(cat "$work/state/interrupt_on" 2>/dev/null)" ]; then
+  rm -f "$work/state/interrupt_on"
+  kill -TERM \$PPID
+  sleep 0.2 # the installer handles the signal once this returns, as for a real Ctrl-C
+fi
+exit \$rc
 SH
 printf '#!/bin/sh\necho "loginctl $*" >>"%s/state/calls"\n' "$work" >"$work/bin/loginctl"
 for t in fusermount3 tailscale; do printf '#!/bin/sh\n' >"$work/bin/$t"; done
@@ -72,6 +81,7 @@ expect "stop startfs.service" "$work/state/calls"
 expect "enable --now startfs.service" "$work/state/calls"
 expect "Upgraded 1.0.0 -> 1.0.1" "$work/out"
 refute "WARNING" "$work/out"
+refute "lose ~/StartFS" "$work/out"
 [ "$("$bin" --version)" = "startfs 1.0.1 (protocol 4)" ] || fail "binary not replaced"
 [ "$("$bin.prev" --version)" = "startfs 1.0.0 (protocol 4)" ] || fail "previous binary not kept"
 echo "ok   upgrade stops, replaces, restarts and keeps the previous binary"
@@ -106,3 +116,34 @@ STARTFS_BASE_URL=file://$work/rel STARTFS_VERSION=v1.0.4 STARTFS_NO_SERVICE=1 \
 [ -e "$HOME/.config/systemd/user/startfs.service" ] || fail "unit file not installed"
 refute "stop\|enable\|start " "$work/state/calls"
 echo "ok   STARTFS_NO_SERVICE installs the files and never touches the service"
+
+# An interrupt after the service was stopped puts things back as they were.
+rm -rf "$HOME/.config" "$HOME/.local"
+install_version v1.0.0 || fail "fresh install for the interrupt tests"
+echo stop >"$work/state/interrupt_on"
+if install_version v1.0.1; then fail "an interrupted install must exit non-zero"; fi
+expect "up to 90s" "$work/out"
+expect "interrupted" "$work/out"
+[ "$("$bin" --version)" = "startfs 1.0.0 (protocol 4)" ] || fail "binary changed by an interrupted stop"
+[ -e "$work/state/active" ] || fail "service not running after an interrupt during the stop"
+echo "ok   an interrupt during the stop restarts the service that was running"
+
+echo enable >"$work/state/interrupt_on"
+if install_version v1.0.1; then fail "an interrupted install must exit non-zero"; fi
+[ "$("$bin" --version)" = "startfs 1.0.0 (protocol 4)" ] || fail "previous binary not restored"
+[ -e "$work/state/active" ] || fail "service not running after an interrupt during the start"
+echo "ok   an interrupt after the swap restores the previous binary and the service"
+
+# Processes inside the mount are named before the daemon is stopped, and do not block it.
+mkdir -p "$HOME/StartFS"
+(cd "$HOME/StartFS" && exec sleep 600) &
+holder=$!
+trap 'kill $holder 2>/dev/null; rm -rf "$work"' EXIT
+install_version v1.0.1 || fail "upgrade with a process inside the mount"
+expect "sleep (pid $holder)" "$work/out"
+expect "lose ~/StartFS" "$work/out"
+[ "$("$bin" --version)" = "startfs 1.0.1 (protocol 4)" ] || fail "upgrade did not go ahead"
+echo "ok   processes inside the mount are listed; with no terminal the upgrade goes ahead"
+STARTFS_FORCE=1 install_version v1.0.2 || fail "forced upgrade with a process inside the mount"
+expect "sleep (pid $holder)" "$work/out"
+echo "ok   STARTFS_FORCE=1 lists them and goes ahead"

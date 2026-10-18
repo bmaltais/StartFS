@@ -396,6 +396,7 @@ impl Daemon {
             )
         });
         Ok(Status {
+            stopping: self.stopping.load(std::sync::atomic::Ordering::SeqCst),
             verdict,
             filesystem,
             node_state: NodeState::Online,
