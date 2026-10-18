@@ -1,0 +1,21 @@
+128 MiB dd bs=1M           local wall   0.038s
+1000 x 8 B (inline)        local wall   0.032s
+1000 x 16 KiB (chunks)     local wall   0.031s
+200 x 1 MiB                local wall   0.008s
+128 MiB dd bs=1M           fuse  wall   0.343s  daemon user 0.24s sys 0.18s
+    fsync              55 calls     55.0 per file
+    openat            256 calls    256.0 per file
+    getdents64        106 calls    106.0 per file
+1000 x 8 B (inline)        fuse  wall   0.319s  daemon user 0.11s sys 0.07s
+    openat            138 calls      0.1 per file
+    getdents64        170 calls      0.2 per file
+    fdatasync           1 calls      0.0 per file
+1000 x 16 KiB (chunks)     fuse  wall   0.738s  daemon user 0.22s sys 0.41s
+    fsync             517 calls      0.5 per file
+    openat           2086 calls      2.1 per file
+    fdatasync           2 calls      0.0 per file
+    getdents64        106 calls      0.1 per file
+200 x 1 MiB                fuse  wall   0.414s  daemon user 0.20s sys 0.39s
+    fsync             629 calls      3.1 per file
+    openat           2307 calls     11.5 per file
+    fdatasync           1 calls      0.0 per file
