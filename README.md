@@ -42,7 +42,7 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
    curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
    ```
 
-   Set `STARTFS_VERSION=v1.0.8` to pin a release, `INSTALL_DIR` to change the
+   Set `STARTFS_VERSION=v1.0.9` to pin a release, `INSTALL_DIR` to change the
    target, or `STARTFS_NO_SERVICE=1` to install the unit without starting it. If `~/.local/bin` is not on your `PATH` (it is on Omarchy; on Ubuntu and
    Fedora it is only after you log out and in again), the installer ends by printing the
    `export PATH=...` line to run in the current shell. `startfs --version` shows what is
@@ -102,7 +102,7 @@ curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/insta
 On a machine that already has StartFS, this is what it does, in order:
 
 1. **Picks the release.** The latest published release, or the one named by
-   `STARTFS_VERSION=v1.0.8`. If that is the version already installed it prints
+   `STARTFS_VERSION=v1.0.9`. If that is the version already installed it prints
    "already up to date" and stops without touching anything. If it is older than the
    installed one it refuses, unless you named it with `STARTFS_VERSION`, in which case
    it warns and goes ahead.
@@ -216,11 +216,66 @@ filesystem) keeps N copies of every chunk on N different machines.
 - **The margin shrinks until repair finishes.** If a second machine is lost before the first
   one's data is back to N copies, you are one failure closer to loss. `startfs status`
   shows copies possible versus wanted and the repair progress.
+- **Machines that sleep are covered for.** See [Machines that sleep](#machines-that-sleep).
 - A short outage is not a loss. A machine that is merely offline keeps working locally and
   catches up when it returns; concurrent edits to the same file become conflict copies.
 
 This was validated with real processes (`kill -9` of members, 2 and 3 copies, see
 `docs/validation.md`), not yet on real separate machines.
+
+## Machines that sleep
+
+Laptops and desktops that suspend at night, or from time to time, would otherwise keep the
+filesystem in a degraded state while they are away, and then trigger a round of copying
+(and later trimming) every time. StartFS covers for them instead.
+
+- **After 5 minutes unseen**, a member is taken for asleep. The others make **stand-in
+  copies** of its chunks on machines that are awake, until every chunk is back to N
+  reachable copies. A chunk is not listed as degraded in `startfs status` while stand-ins
+  cover for the machine. (A member unseen for under 5 minutes, such as a reboot, causes no
+  copying beyond the usual floor of 2 reachable copies.)
+- **When the machine wakes**, the stand-ins are **kept** for `standin_days` (3 by default)
+  from the last time it was seen asleep, then trimmed lazily.
+- **If it sleeps again inside that window, nothing is copied**: the stand-ins are already
+  there, so the chunks never go degraded. A machine that sleeps every night therefore pays
+  the copying once, the first night. As long as it keeps sleeping, its stand-ins stay;
+  the cluster holds N+1 copies of the chunks it shares with that machine. When it stops
+  sleeping, the extras go after the retention.
+- **A machine that never returns** is handled as before: after `repair_grace_secs` it is
+  treated as lost and its chunks are re-replicated for good.
+
+Examples, with `--copies 2` on a desktop, a laptop and a server:
+
+- *The laptop sleeps every night from 23:00 to 07:00.* At 23:05 the desktop and server
+  copy the laptop's chunks between themselves. At 07:00 the laptop wakes and catches up.
+  The extra copies stay. Tonight nothing moves and `status` stays healthy; before, each
+  night meant re-replicating everything the laptop holds, then trimming it all again.
+- *The desktop is off for a week's holiday.* It is unseen for more than 30 minutes, so
+  it is declared lost and repaired for good, exactly as before.
+- *A weekend laptop is used once a month.* Its extras are trimmed three days after each
+  use, so the cost is one copy pass per use and no standing extra disk use.
+
+Costs and limits:
+
+- `startfs status` shows, under each member whose stand-ins are being kept, how long they
+  stay ("extra copies kept for 2d 4h in case it sleeps again"); `status --json` has it as
+  `standin_secs_left` on the member.
+- Stand-ins use disk on the machines that cover: roughly the share of data the sleeping
+  machines hold, for up to `standin_days` after they were last asleep.
+- The first sleep of a machine pays one copy pass, rate limited like other repair
+  (`repair_bytes_per_sec`).
+- Stand-ins are stored on members that have room; a member that is full is skipped, and
+  if no member can take them the chunk is listed as degraded as before.
+- The retention is remembered in memory by each daemon, so after a daemon restart the
+  extras it holds are trimmed as soon as the machine they covered for is back.
+- While a member's stand-ins are kept, ordinary hand-offs of chunks it shares (after a new
+  machine joins, say) are also held back until the retention ends, so those chunks can sit
+  above N copies for a while.
+- `startfs config --copies` works while stand-ins are kept: the surplus goes once the
+  retention has passed.
+- A machine that was itself asleep does not take its peers for asleep when it wakes.
+- `standin_days` is set when the filesystem is created, like `repair_grace_secs`. Set it to
+  `0` to turn stand-ins off and get the earlier behaviour.
 
 ## Status
 
@@ -257,6 +312,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `write_buffer_bytes` | 8 MiB | most of one file's writes held in memory before a batch is committed (never below 8 MiB) |
 | `token_ttl_secs` | 86400 | join token lifetime |
 | `repair_grace_secs` | 1800 | on `create`: how long a member may be unseen before re-replication |
+| `standin_days` | 3 | on `create`: days the extra copies made while a member slept are kept after it is back (0 = no stand-ins for sleeping members) |
 | `gc_retention_secs` | 604800 | on `create`: how long deleted chunks are kept |
 | `repair_bytes_per_sec` | 64 MiB | most bytes per second each node sends when repairing (restoring copies after a lost node or a `config --copies` increase); every holder sends its share, so the cluster's speed grows with its size |
 | `scrub_period_secs` | 30 days | full integrity pass period |

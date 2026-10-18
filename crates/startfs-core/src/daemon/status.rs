@@ -157,6 +157,7 @@ impl Daemon {
         let heard = self.heard.lock().unwrap();
         let peer_health = self.peer_health.lock().unwrap();
         let transport = self.transport();
+        let standin_days = filesystem.as_ref().map_or(0, |f| f.standin_days);
         let mut unheard = Vec::new();
         let members: Vec<MemberStatus> = membership
             .members()
@@ -188,6 +189,7 @@ impl Daemon {
                     },
                     offer_bytes: m.offer_bytes,
                     is_self,
+                    standin_secs_left: self.standin_secs_left(m.id, standin_days, now),
                     problem: if up {
                         None
                     } else {

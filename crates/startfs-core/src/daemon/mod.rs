@@ -47,6 +47,14 @@ const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DOWN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
 
+/// A member unseen for this long is taken for asleep, not rebooting: the
+/// others make stand-in copies to cover for it. Also the longest gap between
+/// two looks at the cluster before this node suspects it was asleep itself.
+const STANDIN_AFTER: Duration = Duration::from_secs(5 * 60);
+
+// Asleep implies down, which the replicator's counting relies on.
+const _: () = assert!(DOWN_AFTER.as_secs() <= STANDIN_AFTER.as_secs());
+
 pub struct Daemon {
     fs: Arc<LocalFs>,
     config: Config,
@@ -60,6 +68,12 @@ pub struct Daemon {
     /// The answer to the join request in flight, if it has arrived.
     join_reply: Mutex<Option<Result<crate::members::Admission, Error>>>,
     wait: Mutex<WaitHook>,
+    /// When each member was last seen asleep (unseen past the stand-in delay);
+    /// the extra copies made for it are kept for the stand-in retention after.
+    slept: Mutex<HashMap<MemberId, Nanos>>,
+    /// When the cluster was last looked at, and until when a long gap since
+    /// then (this node was asleep itself) makes every peer look unseen.
+    looked: Mutex<(Option<Nanos>, Nanos)>,
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
     last_gossip: Mutex<Option<Nanos>>,
@@ -152,6 +166,8 @@ impl Daemon {
                 transport: Mutex::new(None),
                 syncer: Mutex::new(None),
                 join_reply: Mutex::new(None),
+                slept: Mutex::new(HashMap::new()),
+                looked: Mutex::new((None, 0)),
                 heard: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
                 peer_health: Mutex::new(HashMap::new()),
@@ -401,13 +417,14 @@ impl Daemon {
     }
 
     fn with_view<T>(&self, f: impl FnOnce(&View<'_>) -> T) -> Option<T> {
-        let (me, copies, grace, members, offer) = {
+        let (me, copies, grace, standin_days, members, offer) = {
             let m = self.membership.lock().unwrap();
             let fs = m.filesystem()?;
             (
                 m.me()?,
                 fs.copies,
                 fs.repair_grace_secs,
+                fs.standin_days,
                 m.members(),
                 m.my_offer(self.config.offer_bytes),
             )
@@ -415,16 +432,74 @@ impl Daemon {
         let now = self.clock.now();
         let lost = self.unseen_members(&members, me, grace, now);
         let down = self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), now);
+        let (sleeping, kept) = self.sleepers(&members, me, grace, standin_days, now);
         Some(f(&View {
             me,
             copies,
             members: &members,
             lost: &lost,
             down: &down,
+            sleeping: &sleeping,
+            kept: &kept,
             offer,
             repair_rate: self.config.repair_bytes_per_sec,
             now,
         }))
+    }
+
+    /// The members asleep now (unseen for the stand-in delay) and those seen
+    /// asleep within the retention, which includes the former.
+    fn sleepers(
+        &self,
+        members: &[Member],
+        me: MemberId,
+        grace: u64,
+        standin_days: u64,
+        now: Nanos,
+    ) -> (HashSet<MemberId>, HashSet<MemberId>) {
+        if standin_days == 0 {
+            return (HashSet::new(), HashSet::new());
+        }
+        // After a long gap this node was likely asleep itself, so every peer
+        // looks unseen until their hellos arrive: nobody is taken for asleep then.
+        let settling = {
+            let mut looked = self.looked.lock().unwrap();
+            let stalled = looked
+                .0
+                .is_some_and(|at| now.saturating_sub(at) >= STANDIN_AFTER.as_nanos() as u64);
+            looked.0 = Some(now);
+            if stalled {
+                looked.1 = now + DOWN_AFTER.as_nanos() as u64;
+            }
+            now < looked.1
+        };
+        let sleeping = if settling {
+            HashSet::new()
+        } else {
+            self.unseen_members(members, me, grace.min(STANDIN_AFTER.as_secs()), now)
+        };
+        let retention = Duration::from_secs(standin_days * 24 * 3600).as_nanos() as u64;
+        let mut slept = self.slept.lock().unwrap();
+        for m in &sleeping {
+            slept.insert(*m, now);
+        }
+        slept.retain(|_, at| now.saturating_sub(*at) < retention);
+        let kept = slept.keys().copied().collect();
+        (sleeping, kept)
+    }
+
+    /// Seconds the extra copies made for `member` are still kept, if it was
+    /// seen asleep within the retention.
+    pub(super) fn standin_secs_left(
+        &self,
+        member: MemberId,
+        standin_days: u64,
+        now: Nanos,
+    ) -> Option<u64> {
+        let retention = Duration::from_secs(standin_days * 24 * 3600).as_nanos() as u64;
+        let at = *self.slept.lock().unwrap().get(&member)?;
+        let left = retention.checked_sub(now.saturating_sub(at))?;
+        Some(Duration::from_nanos(left).as_secs())
     }
 
     /// Members unseen for `secs`.
