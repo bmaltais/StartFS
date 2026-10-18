@@ -47,6 +47,13 @@ same code with a different membership scope.
    its copies count again and surplus copies are trimmed lazily. A chunk with fewer than 2
    reachable copies does not wait for the grace period: once a member counts as down (unseen for
    three hello intervals), stand-in copies on other members bring the chunk back to 2, and stop there.
+   A member unseen for 5 minutes counts as asleep: stand-in copies on awake members bring each of
+   its chunks back to N reachable copies, so sleeping machines do not leave the filesystem degraded.
+   The stand-ins stay for `standin_days` (default 3, fixed for the filesystem, 0 = off) after the
+   member was last seen asleep, so a machine that sleeps again finds them there and nothing is
+   copied twice; a member that keeps sleeping keeps them. Each daemon remembers when it last saw
+   each member asleep in memory only, so a restarted daemon trims the extras it holds at once
+   when the covered member is back. A member unseen past the grace period is lost as before.
 
 9. **Create and join:** explicit join token. `startfs create --name home --copies 3` on the first
    machine prints a token (filesystem ID plus a bootstrap peer's tailnet address: its MagicDNS name when it has one, else its IP).

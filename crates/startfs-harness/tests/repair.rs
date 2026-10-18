@@ -80,7 +80,8 @@ fn after_the_grace_period_every_chunk_is_back_to_n_copies_without_user_action() 
 
 #[test]
 fn an_outage_shorter_than_the_grace_period_triggers_no_repair_while_two_copies_remain() {
-    let c = cluster(3, 4);
+    // Without stand-in copies, which would cover for the member from five minutes on.
+    let c = cluster_with(3, 4, "standin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
 
@@ -132,7 +133,8 @@ fn stand_in_copies_made_during_a_short_outage_are_trimmed_when_the_node_returns(
 
 #[test]
 fn a_returning_nodes_copies_count_again_and_the_surplus_is_trimmed() {
-    let c = cluster(2, 4);
+    // Without stand-in copies, which would keep the surplus for days.
+    let c = cluster_with(2, 4, "standin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
     c.crash(3);
@@ -259,7 +261,7 @@ fn at_risk_chunks_are_repaired_before_degraded_ones() {
 
 #[test]
 fn the_grace_period_is_configurable() {
-    let c = cluster_with(3, 4, "repair_grace_secs = 600");
+    let c = cluster_with(3, 4, "repair_grace_secs = 600\nstandin_days = 0");
     write_files(&c, 24);
     let before = replicas(&c);
 

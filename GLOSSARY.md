@@ -46,3 +46,11 @@ _Avoid_: Wire version, Version skew
 
 **Incompatible member**:
 A member whose protocol version differs from this node's, so the two refuse each other. `status` lists it as unreachable and says which version it speaks.
+
+**Stand-in copy**:
+An extra copy of a chunk made on an awake member to cover for a member that is unseen, so the chunk keeps N reachable copies. Kept for `standin_days` after the covered member was last seen asleep, then trimmed.
+_Avoid_: Temporary replica, backup copy
+
+**Asleep**:
+A member unseen for 5 minutes but not yet lost. Others cover for it with stand-in copies. A member unseen past the repair grace period is lost instead, and its chunks are re-replicated.
+_Avoid_: Offline, down (down means unseen for three hello intervals)

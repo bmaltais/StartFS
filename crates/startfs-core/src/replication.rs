@@ -37,6 +37,13 @@ pub struct View<'a> {
     /// Members unseen long enough to count as down (a superset of `lost`):
     /// they may come back, but their copies cannot be relied on for now.
     pub down: &'a HashSet<MemberId>,
+    /// Members unseen long enough to be taken for asleep (a subset of `down`
+    /// once the stand-in delay is past): other members cover for them with
+    /// stand-in copies, up to N. Empty when stand-ins are off.
+    pub sleeping: &'a HashSet<MemberId>,
+    /// Members seen asleep within the stand-in retention (including those
+    /// asleep now): copies made to cover for them are not trimmed yet.
+    pub kept: &'a HashSet<MemberId>,
     /// Space this node offers for replicas.
     pub offer: u64,
     /// Most bytes per second sent when re-replicating chunks already held.
@@ -77,8 +84,16 @@ struct Track {
     heard: bool,
 }
 
-/// N and each member's (id, offer, revision): what placement depends on.
-type Epoch = (u32, Vec<(MemberId, u64, u64)>, Vec<MemberId>);
+/// N, each member's (id, offer, revision), the members lost or down, the
+/// members asleep and the members whose stand-ins are kept: what placement
+/// and trimming depend on.
+type Epoch = (
+    u32,
+    Vec<(MemberId, u64, u64)>,
+    Vec<MemberId>,
+    Vec<MemberId>,
+    Vec<MemberId>,
+);
 
 #[derive(Default)]
 struct State {
@@ -214,6 +229,18 @@ impl Replicator {
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect(),
+            view.sleeping
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            view.kept
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         );
         if st.epoch.as_ref() != Some(&epoch) {
             // Membership or offers changed: placement may differ, so check
@@ -300,8 +327,27 @@ impl Replicator {
             .copies
             .min(MIN_COPIES)
             .saturating_sub(reachable + coming);
+        // A member that is only asleep is covered for up to N copies, so the
+        // chunk does not go degraded for the night.
+        let awake = track
+            .holders
+            .iter()
+            .filter(|h| !view.sleeping.contains(*h))
+            .count() as u32
+            + u32::from(held);
+        let awake_coming = targets
+            .iter()
+            .filter(|t| {
+                **t != view.me && !view.sleeping.contains(*t) && !track.holders.contains(*t)
+            })
+            .count() as u32;
+        let needed = needed.max(view.copies.saturating_sub(awake + awake_coming));
         if needed > 0 {
-            let out: HashSet<MemberId> = skip.union(view.down).copied().collect();
+            let out: HashSet<MemberId> = skip
+                .union(view.down)
+                .chain(view.sleeping)
+                .copied()
+                .collect();
             let stand_ins: Vec<MemberId> = place(id, view.members, view.members.len() as u32, &out)
                 .into_iter()
                 .filter(|m| *m != view.me && !track.holders.contains(m) && !targets.contains(m))
@@ -359,8 +405,11 @@ impl Replicator {
             // Every node placement allows is accounted for, even if none was asked.
             track.heard = true;
             self.fs.release(id);
-            // Placement no longer asks this node to hold it: hand-off done.
-            if held && !targets.contains(&view.me) {
+            // Placement no longer asks this node to hold it: hand-off done,
+            // unless it is a stand-in for a member that slept lately and may
+            // sleep again.
+            if held && !targets.contains(&view.me) && !targets.iter().any(|t| view.kept.contains(t))
+            {
                 self.fs.drop_replica(id);
             }
             busy = true;

@@ -66,6 +66,14 @@ pub struct FilesystemInfo {
     /// How long a chunk nothing references is kept before GC removes it.
     #[serde(default = "default_retention")]
     pub gc_retention_secs: u64,
+    /// Days the extra copies made for a sleeping member are kept once it is
+    /// back; 0 means no stand-in copies are made for members that are only asleep.
+    #[serde(default = "default_standin_days")]
+    pub standin_days: u64,
+}
+
+fn default_standin_days() -> u64 {
+    3
 }
 
 fn default_grace() -> u64 {

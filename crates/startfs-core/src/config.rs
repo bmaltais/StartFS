@@ -35,6 +35,10 @@ pub struct Config {
     /// references are kept (so deletes stay recoverable) before GC removes
     /// them. Fixed for the filesystem.
     pub gc_retention_secs: u64,
+    /// When this node creates a filesystem: how many days the extra copies
+    /// made to cover for a sleeping member are kept after it is back, in case
+    /// it sleeps again. 0 turns stand-in copies off. Fixed for the filesystem.
+    pub standin_days: u64,
     /// Most bytes per second this node sends when re-replicating chunks it
     /// already holds (repair and rebalancing; new writes are not limited).
     pub repair_bytes_per_sec: u64,
@@ -67,6 +71,7 @@ impl Default for Config {
             token_ttl_secs: 24 * 3600,
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
+            standin_days: 3,
             repair_bytes_per_sec: 64 << 20,
             scrub_period_secs: 30 * 24 * 3600,
             state_chunk_bytes: crate::sync::STATE_CHUNK_BYTES,
