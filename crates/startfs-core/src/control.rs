@@ -116,6 +116,10 @@ pub struct MemberStatus {
     /// When the cluster last saw the member, when it is not up.
     #[serde(default)]
     pub last_seen: Option<LastSeen>,
+    /// Round-trip time from this node to the member, in microseconds, when
+    /// it is up and a measurement exists. Never set for this node itself.
+    #[serde(default)]
+    pub rtt_micros: Option<u64>,
 }
 
 /// How long ago any member last heard from a member that is not up.

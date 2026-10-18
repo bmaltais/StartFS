@@ -79,6 +79,8 @@ struct Shared {
     addrs: Mutex<HashMap<NodeId, SocketAddr>>,
     /// Why the last attempt to talk to a peer failed.
     errors: Mutex<HashMap<NodeId, String>>,
+    /// The live connection we dialed to each peer, for its round-trip time.
+    links: Mutex<HashMap<NodeId, quinn::Connection>>,
     inbox: Mutex<Sender<(NodeId, Vec<u8>)>>,
 }
 
@@ -153,6 +155,7 @@ impl QuicTransport {
             allowed_tags,
             addrs: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
+            links: Mutex::new(HashMap::new()),
             inbox: Mutex::new(tx),
         });
         runtime.spawn(accept_loop(shared.clone(), endpoint.clone()));
@@ -235,6 +238,12 @@ impl Transport for QuicTransport {
 
     fn last_error(&self, node: NodeId) -> Option<String> {
         self.shared.errors.lock().unwrap().get(&node).cloned()
+    }
+
+    fn rtt(&self, node: NodeId) -> Option<Duration> {
+        let links = self.shared.links.lock().unwrap();
+        let conn = links.get(&node)?;
+        conn.close_reason().is_none().then(|| conn.rtt())
     }
 }
 
@@ -412,6 +421,7 @@ async fn peer_sender(
                 Ok(l) => {
                     shared.errors.lock().unwrap().remove(&peer);
                     failed_at = None;
+                    shared.links.lock().unwrap().insert(peer, l.conn.clone());
                     link = Some(l);
                 }
                 Err(why) => {

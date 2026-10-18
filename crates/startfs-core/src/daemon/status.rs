@@ -323,6 +323,19 @@ impl Daemon {
                             now,
                         )
                     }),
+                    rtt_micros: (up && !is_self)
+                        .then(|| {
+                            transport
+                                .as_ref()
+                                .and_then(|t| t.rtt(m.endpoint))
+                                .map(|d| d.as_micros() as u64)
+                                .or_else(|| {
+                                    let nanos =
+                                        self.latency.lock().unwrap().estimate(m.endpoint, now);
+                                    nanos.map(|n| n / 1_000)
+                                })
+                        })
+                        .flatten(),
                     problem: if up {
                         None
                     } else {

@@ -141,3 +141,29 @@ fn repair_progress_is_the_same_cluster_wide_total_on_every_node() {
     assert_eq!(queued(1), total);
     assert_eq!(queued(2), total);
 }
+
+#[test]
+fn status_shows_the_round_trip_time_to_each_member_that_is_up() {
+    let c = one_storage_node();
+    c.network()
+        .set_delay(NodeId(0), NodeId(1), Duration::from_millis(20));
+    c.network()
+        .set_delay(NodeId(0), NodeId(2), Duration::from_millis(5));
+    c.network()
+        .set_delay(NodeId(0), NodeId(3), Duration::from_millis(30));
+    gossip(&c);
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1), NodeId(2)], &[NodeId(3)]]);
+    c.advance(Duration::from_secs(10 * 60));
+    c.sync();
+
+    let rtts: Vec<Option<u64>> = c
+        .control(0)
+        .status()
+        .unwrap()
+        .members
+        .iter()
+        .map(|m| m.rtt_micros)
+        .collect();
+    assert_eq!(rtts, [None, Some(40_000), Some(10_000), None]);
+}
