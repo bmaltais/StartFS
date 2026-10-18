@@ -40,6 +40,9 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 const WAIT_ROUNDS: usize = 300;
 
 /// A member not heard from for this long is shown as down.
+/// The most peer messages one tick handles before moving on to its other work.
+const DRAIN_PER_TICK: usize = 128;
+
 /// How often the operation log is compacted.
 const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -259,7 +262,12 @@ impl Daemon {
             .set_staging_limit(staging_limit(&self.config, offer));
         self.fs
             .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
-        while let Some((from, raw)) = transport.recv() {
+        // A long queue is worked off over several ticks, so the rest of the
+        // background work is not starved behind it.
+        for _ in 0..DRAIN_PER_TICK {
+            let Some((from, raw)) = transport.recv() else {
+                break;
+            };
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());
             match Message::decode(&raw) {
@@ -267,11 +275,48 @@ impl Daemon {
                 Err(e) => eprintln!("startfs: dropped a message from node {}: {e}", from.0),
             }
         }
+        busy |= self.keepalive();
+        if let Some(s) = self.syncer.lock().unwrap().as_mut() {
+            busy |= s.poll();
+        }
+        busy |= self
+            .with_view(|v| self.replicator.poll(v, &*transport))
+            .unwrap_or(false);
+        busy |= self.finish_leaving(&*transport);
+        busy |= self.collect_garbage();
+        busy |= self.compact_log();
+        if !busy {
+            // The scrub only gets the disk when nothing else wants it.
+            busy |= self.scrub();
+        }
+        busy
+    }
+
+    /// Everything that tells the peers this node is alive, and this node which
+    /// peers are: the periodic hello and what the transport has heard lately.
+    /// Cheap and never waits on the disk, so a thread of its own can run it
+    /// while [`tick`](Self::tick) is stuck on slow work.
+    /// Whether a hello went out.
+    pub fn keepalive(&self) -> bool {
+        let Some(transport) = self.transport() else {
+            return false;
+        };
         let (peers, members, tokens) = {
             let m = self.membership.lock().unwrap();
             (m.peers(), m.records(), m.token_records())
         };
         let now = self.clock.now();
+        {
+            // Frames still arriving while the tick is stuck count as heard.
+            let mut heard = self.heard.lock().unwrap();
+            for p in &peers {
+                if let Some(ago) = transport.last_heard(*p) {
+                    let at = now.saturating_sub(ago.as_nanos() as u64);
+                    let seen = heard.entry(*p).or_insert(at);
+                    *seen = (*seen).max(at);
+                }
+            }
+        }
         let mut last = self.last_gossip.lock().unwrap();
         if last.is_none_or(|t| now.saturating_sub(t) >= HELLO_INTERVAL.as_nanos() as u64) {
             *last = Some(now);
@@ -292,23 +337,9 @@ impl Daemon {
                 transport.send(*p, tokens_msg.clone());
                 transport.send(*p, health_msg.clone());
             }
-            busy |= !peers.is_empty();
+            return !peers.is_empty();
         }
-        drop(last);
-        if let Some(s) = self.syncer.lock().unwrap().as_mut() {
-            busy |= s.poll();
-        }
-        busy |= self
-            .with_view(|v| self.replicator.poll(v, &*transport))
-            .unwrap_or(false);
-        busy |= self.finish_leaving(&*transport);
-        busy |= self.collect_garbage();
-        busy |= self.compact_log();
-        if !busy {
-            // The scrub only gets the disk when nothing else wants it.
-            busy |= self.scrub();
-        }
-        busy
+        false
     }
 
     /// Drop log entries that every member still around already holds.

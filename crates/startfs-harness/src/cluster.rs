@@ -215,6 +215,28 @@ impl Cluster {
         pump(&self.nodes)
     }
 
+    /// Like [`Cluster::tick`], but node `stuck` does no background work: its
+    /// tick is stuck behind slow disk or a long queue.
+    pub fn tick_except(&self, stuck: usize) -> bool {
+        let mut busy = false;
+        for (i, n) in self.nodes.iter().enumerate() {
+            let daemon = n.daemon.lock().unwrap().clone();
+            if let Some(d) = daemon.filter(|_| i != stuck) {
+                busy |= d.tick();
+            }
+        }
+        busy
+    }
+
+    /// Run only the liveness work of node `i`, as its own thread does while
+    /// the tick is stuck.
+    pub fn keepalive(&self, i: usize) {
+        let daemon = self.nodes[i].daemon.lock().unwrap().clone();
+        if let Some(d) = daemon {
+            let _hello_sent = d.keepalive();
+        }
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
