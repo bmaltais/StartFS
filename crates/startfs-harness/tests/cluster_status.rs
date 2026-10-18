@@ -1,6 +1,6 @@
 //! Status as a cluster-wide answer to "is my data safe right now?".
 
-use startfs_core::control::{FileHealth, Tier};
+use startfs_core::control::Shortfall;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::sync::HELLO_INTERVAL;
@@ -46,37 +46,19 @@ fn gossip(c: &Cluster) {
 }
 
 #[test]
-fn a_file_unreplicated_on_one_node_shows_in_every_nodes_status() {
+fn a_chunk_unreplicated_on_one_node_shows_in_every_nodes_status() {
     let c = one_storage_node();
     write_on(&c, 2, "a");
     gossip(&c);
 
-    let expected = [FileHealth {
-        path: "/a".into(),
+    let expected = [Shortfall {
         copies: 1,
-        wanted: 2,
-        tier: Tier::AtRisk,
+        chunks: 1,
     }];
     for node in [0, 1, 3] {
         let s = c.control(node).status().unwrap();
         assert_eq!(s.unreplicated, expected, "node {node}");
         assert!(s.unheard.is_empty(), "node {node}");
-    }
-}
-
-#[test]
-fn a_linked_file_unreplicated_on_one_node_shows_in_status_once() {
-    let c = one_storage_node();
-    write_on(&c, 2, "a");
-    let a = c.fs(2).lookup(ROOT_INO, "a").unwrap();
-    c.fs(2).link(a.ino, ROOT_INO, "b").unwrap();
-    c.sync();
-    gossip(&c);
-
-    for node in [0, 1, 3] {
-        let s = c.control(node).status().unwrap();
-        assert_eq!(s.unreplicated.len(), 1, "node {node}: {:?}", s.unreplicated);
-        assert_eq!(s.unreplicated[0].copies, 1);
     }
 }
 
@@ -103,7 +85,13 @@ fn a_partitioned_member_makes_the_view_partial_and_is_named() {
     gossip(&c);
     let s = c.control(3).status().unwrap();
     assert!(s.unheard.is_empty());
-    assert_eq!(s.unreplicated.len(), 1);
+    assert_eq!(
+        s.unreplicated,
+        [Shortfall {
+            copies: 1,
+            chunks: 1
+        }]
+    );
 }
 
 #[test]

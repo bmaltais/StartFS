@@ -2,12 +2,13 @@
 
 use super::{DOWN_AFTER, Daemon};
 use crate::control::{
-    FileHealth, GcStatus, LogStatus, MemberStatus, NodeState, Repair, Staging, Status, Tier, Usage,
+    GcStatus, LogStatus, MemberStatus, NodeState, Repair, Shortfall, Staging, Status, Tier, Usage,
     Verdict,
 };
 use crate::error::Error;
 use crate::ops::FsOps;
 use crate::protocol::Health;
+use crate::replication::tier;
 use std::time::Duration;
 
 /// Is the data safe right now? Copies beyond what the storage nodes allow are
@@ -15,13 +16,13 @@ use std::time::Duration;
 fn verdict(
     wanted: u32,
     possible: u32,
-    unreplicated: &[FileHealth],
+    unreplicated: &[Shortfall],
     repair: Option<&Repair>,
     members: &[MemberStatus],
 ) -> Verdict {
     let target = wanted.min(possible);
     let behind = || unreplicated.iter().filter(|f| f.copies < target);
-    if behind().any(|f| f.tier == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0) {
+    if behind().any(|f| tier(f.copies) == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0) {
         Verdict::AtRisk
     } else if behind().next().is_some()
         || repair.is_some()
@@ -37,14 +38,13 @@ fn verdict(
     }
 }
 
-/// Fold a member's report into the cluster view: a file is as safe as the
-/// least safe copy count any member sees, and repair work adds up.
+/// Fold a member's report into the cluster view: each member counts only its
+/// own share of the chunks, so the counts and the repair work add up.
 fn merge_health(into: &mut Health, from: &Health) {
     for f in &from.unreplicated {
-        match into.unreplicated.iter_mut().find(|g| g.path == f.path) {
-            Some(g) if f.copies < g.copies => *g = f.clone(),
-            Some(_) => {}
-            None => into.unreplicated.push(f.clone()),
+        match into.unreplicated.iter_mut().find(|g| g.copies == f.copies) {
+            Some(g) => g.chunks += f.chunks,
+            None => into.unreplicated.push(*f),
         }
     }
     into.unreplicated.sort_by_key(|f| f.copies);

@@ -8,7 +8,7 @@
 //! these answers, so a node tracks the chunks it is working on and nothing else.
 
 use crate::chunkstore::ChunkId;
-use crate::control::{FileHealth, Repair, Tier};
+use crate::control::{Repair, Shortfall, Tier};
 use crate::fs::LocalFs;
 use crate::members::{Member, MemberId};
 use crate::net::{NodeId, Transport};
@@ -408,43 +408,33 @@ impl Replicator {
         (progress.at_risk + progress.degraded > 0).then_some(progress)
     }
 
-    /// Files with a chunk on fewer than `view.copies` nodes, as far as this node knows.
-    pub fn unreplicated(&self, view: &View<'_>) -> Vec<FileHealth> {
+    /// Chunks on fewer than `view.copies` nodes, as far as this node knows,
+    /// counted by their copies. Each chunk is counted by one member (once its
+    /// holders agree who), so the counts of all members add up.
+    pub fn unreplicated(&self, view: &View<'_>) -> Vec<Shortfall> {
         let mut st = self.state.lock().unwrap();
         self.track_staged(&mut st);
-        let copies: HashMap<ChunkId, u32> = st
-            .tracks
-            .iter()
+        let mut by_copies: BTreeMap<u32, u32> = BTreeMap::new();
+        for (id, t) in &st.tracks {
+            let held = self.fs.has_replica(id);
             // A held chunk is only reported once a peer has said how many copies exist.
-            .filter(|(id, t)| t.heard || self.fs.has_staged(id))
-            .map(|(id, t)| {
-                // A staged copy only counts while it is the sole copy.
-                let replicas = t.holders.len() as u32 + u32::from(self.fs.has_replica(id));
-                let copies = if replicas == 0 && self.fs.has_staged(id) {
-                    1
-                } else {
-                    replicas
-                };
-                (*id, copies)
-            })
-            .collect();
-        let ids: HashSet<ChunkId> = copies.keys().copied().collect();
-        let files = self.fs.files_using(&ids).unwrap_or_default();
-        files
+            if !(t.heard || self.fs.has_staged(id)) {
+                continue;
+            }
+            let replicas = t.holders.len() as u32 + u32::from(held);
+            // A staged copy only counts while it is the sole copy.
+            let copies = if replicas == 0 { 1 } else { replicas };
+            // Holders share the counting by hash. A node that wrote the chunk
+            // and no longer (or not yet) holds it counts it alone: the
+            // holders it reached are not tracking it.
+            let mine = !held || is_steward(id, view.me, t.holders.iter().copied());
+            if copies < view.copies && mine {
+                *by_copies.entry(copies).or_default() += 1;
+            }
+        }
+        by_copies
             .into_iter()
-            .map(|(path, chunks)| {
-                let least = chunks
-                    .iter()
-                    .filter_map(|c| copies.get(c).copied())
-                    .min()
-                    .unwrap_or(view.copies);
-                FileHealth {
-                    path,
-                    copies: least,
-                    wanted: view.copies,
-                    tier: tier(least),
-                }
-            })
+            .map(|(copies, chunks)| Shortfall { copies, chunks })
             .collect()
     }
 }

@@ -1,7 +1,7 @@
 //! The wire protocol peers speak over a [`Transport`](crate::net::Transport).
 
 use crate::chunkstore::ChunkId;
-use crate::control::{FileHealth, Repair};
+use crate::control::{Repair, Shortfall};
 use crate::members::{Admission, JoinRequest, Member, TokenRec};
 use crate::oplog::{Entry, Frontier, StateChunk};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ pub enum Message {
 /// One member's view of its replication, as gossiped to the others.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Health {
-    pub unreplicated: Vec<FileHealth>,
+    pub unreplicated: Vec<Shortfall>,
     pub repair: Option<Repair>,
 }
 
@@ -61,7 +61,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 5;
+pub const PROTOCOL_VERSION: u8 = 6;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {

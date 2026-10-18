@@ -9,6 +9,7 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
+use startfs_core::replication::tier;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -360,6 +361,69 @@ fn tailnet_address() -> IpAddr {
         .unwrap_or(IpAddr::from([127, 0, 0, 1]))
 }
 
+/// One line per member, in columns sized to the longest entry.
+fn members_table(members: &[control::MemberStatus]) -> String {
+    let mut out = String::new();
+    let rows: Vec<[String; 4]> = members
+        .iter()
+        .map(|m| {
+            let state = match m.state {
+                NodeState::Online => "up",
+                NodeState::Down => "down",
+                NodeState::Lost => "lost",
+                NodeState::Leaving => "leaving",
+            };
+            [
+                m.id.to_string(),
+                m.addr.clone(),
+                state.to_string(),
+                format!("{} offered", human(m.offer_bytes)),
+            ]
+        })
+        .collect();
+    let width = |col: usize| rows.iter().map(|r| r[col].len()).max().unwrap_or(0);
+    let (wid, waddr, wstate, woffer) = (width(0), width(1), width(2), width(3));
+    for (m, r) in members.iter().zip(&rows) {
+        out.push_str(&format!(
+            "  {:<wid$}  {:<waddr$}  {:<wstate$}  {:>woffer$}{}\n",
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            if m.is_self { "  (this node)" } else { "" }
+        ));
+        if let Some(why) = &m.problem {
+            out.push_str(&format!("  {:<wid$}  cannot reach: {why}\n", ""));
+        }
+    }
+    out
+}
+
+/// "not fully replicated: N chunks (a at risk, b degraded)", or nothing.
+fn unreplicated_line(unreplicated: &[control::Shortfall]) -> Option<String> {
+    if unreplicated.is_empty() {
+        return None;
+    }
+    let count = |risk: Tier| -> u32 {
+        unreplicated
+            .iter()
+            .filter(|f| tier(f.copies) == risk)
+            .map(|f| f.chunks)
+            .sum()
+    };
+    let n: u32 = unreplicated.iter().map(|f| f.chunks).sum();
+    let tiers: Vec<String> = [(Tier::AtRisk, "at risk"), (Tier::Degraded, "degraded")]
+        .into_iter()
+        .filter(|(t, _)| count(*t) > 0)
+        .map(|(t, name)| format!("{} {name}", count(t)))
+        .collect();
+    Some(format!(
+        "not fully replicated: {n} chunk{} ({})\n",
+        if n == 1 { "" } else { "s" },
+        tiers.join(", ")
+    ))
+}
+
 fn render(s: &Status) -> String {
     let Some(fs) = &s.filesystem else {
         return "no filesystem on this node; run `startfs create --name NAME --copies N`\n".into();
@@ -403,25 +467,7 @@ fn render(s: &Status) -> String {
         human(s.cache.capacity_bytes)
     ));
     out.push_str("members:\n");
-    for m in &s.members {
-        let state = match m.state {
-            NodeState::Online => "up",
-            NodeState::Down => "down",
-            NodeState::Lost => "lost",
-            NodeState::Leaving => "leaving",
-        };
-        out.push_str(&format!(
-            "  {:<3} {:<22} {:<7} {} offered{}\n",
-            m.id,
-            m.addr,
-            state,
-            human(m.offer_bytes),
-            if m.is_self { "  (this node)" } else { "" }
-        ));
-        if let Some(why) = &m.problem {
-            out.push_str(&format!("      cannot reach: {why}\n"));
-        }
-    }
+    out.push_str(&members_table(&s.members));
     if let Some(r) = &s.repair {
         out.push_str(&format!(
             "repair: {} at risk, {} degraded chunks left to re-replicate\n",
@@ -478,19 +524,8 @@ fn render(s: &Status) -> String {
             names.join(", ")
         ));
     }
-    if !s.unreplicated.is_empty() {
-        let n = s.unreplicated.len();
-        let count = |tier: Tier| s.unreplicated.iter().filter(|f| f.tier == tier).count();
-        let tiers: Vec<String> = [(Tier::AtRisk, "at risk"), (Tier::Degraded, "degraded")]
-            .into_iter()
-            .filter(|(t, _)| count(*t) > 0)
-            .map(|(t, name)| format!("{} {name}", count(t)))
-            .collect();
-        out.push_str(&format!(
-            "not fully replicated: {n} file{} ({})\n",
-            if n == 1 { "" } else { "s" },
-            tiers.join(", ")
-        ));
+    if let Some(line) = unreplicated_line(&s.unreplicated) {
+        out.push_str(&line);
     }
     if !s.conflicts.is_empty() {
         out.push_str(&format!(
@@ -516,5 +551,55 @@ fn human(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use control::{MemberStatus, Shortfall};
+
+    fn member(id: u32, addr: &str, offer_bytes: u64, is_self: bool) -> MemberStatus {
+        MemberStatus {
+            id: MemberId(id),
+            addr: addr.into(),
+            state: NodeState::Online,
+            offer_bytes,
+            is_self,
+            problem: None,
+        }
+    }
+
+    #[test]
+    fn member_columns_line_up_whatever_the_widths() {
+        let table = members_table(&[
+            member(1, "100.64.0.1", 10 << 30, true),
+            member(12, "laptop.tailnet.ts.net", 0, false),
+        ]);
+        let lines: Vec<&str> = table.lines().collect();
+        let col = |l: &str, needle: &str| l.find(needle).unwrap();
+        assert_eq!(col(lines[0], "100.64"), col(lines[1], "laptop"));
+        assert_eq!(col(lines[0], "up"), col(lines[1], "up"));
+        assert_eq!(col(lines[0], "offered"), col(lines[1], "offered"));
+        assert_eq!(lines[0].find("(this node)"), Some(lines[0].len() - 11));
+    }
+
+    #[test]
+    fn the_unreplicated_line_counts_chunks_by_tier() {
+        let line = unreplicated_line(&[
+            Shortfall {
+                copies: 1,
+                chunks: 3,
+            },
+            Shortfall {
+                copies: 2,
+                chunks: 12_031,
+            },
+        ]);
+        assert_eq!(
+            line.as_deref(),
+            Some("not fully replicated: 12034 chunks (3 at risk, 12031 degraded)\n")
+        );
+        assert_eq!(unreplicated_line(&[]), None);
     }
 }

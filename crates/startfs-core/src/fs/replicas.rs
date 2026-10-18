@@ -129,40 +129,4 @@ impl LocalFs {
     pub fn staging_stats(&self) -> FsResult<StoreStats> {
         self.staging.stats()
     }
-
-    /// Files (path and chunks) that use any of the given chunks.
-    pub fn files_using(&self, wanted: &HashSet<ChunkId>) -> FsResult<Vec<(String, Vec<ChunkId>)>> {
-        self.run(false, |t| {
-            let mut kids: HashMap<Ino, Vec<(String, Ino)>> = HashMap::new();
-            for row in t.dirents.iter().map_err(db)? {
-                let (k, v) = row.map_err(db)?;
-                let (parent, name) = k.value();
-                kids.entry(parent)
-                    .or_default()
-                    .push((name.to_string(), v.value()));
-            }
-            let mut out = Vec::new();
-            // A file with several names is listed once, under the first.
-            let mut seen = HashSet::new();
-            let mut stack = vec![(ROOT_INO, String::new())];
-            while let Some((dir, path)) = stack.pop() {
-                for (name, ino) in kids.remove(&dir).unwrap_or_default() {
-                    let child = format!("{path}/{name}");
-                    let inode = t.inode(ino)?;
-                    match inode.content {
-                        _ if inode.kind == FileKind::Dir => stack.push((ino, child)),
-                        Content::Chunks(refs) if seen.insert(ino) => {
-                            let ids: Vec<ChunkId> = refs.into_iter().map(|r| r.id).collect();
-                            if ids.iter().any(|id| wanted.contains(id)) {
-                                out.push((child, ids));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            out.sort();
-            Ok(out)
-        })
-    }
 }

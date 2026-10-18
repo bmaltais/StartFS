@@ -1,7 +1,7 @@
 //! Placement, background replication, pure clients and capacity, driven
 //! through FsOps and the control interface on a simulated cluster.
 
-use startfs_core::control::{FileHealth, Tier};
+use startfs_core::control::Shortfall;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::replication::RETRY;
@@ -42,7 +42,7 @@ fn put(fs: &impl FsOps, name: &str, data: &[u8]) -> Ino {
 }
 
 #[test]
-fn a_pure_client_write_is_durable_locally_and_listed_as_not_yet_replicated() {
+fn a_pure_client_write_is_durable_locally_and_counted_as_not_yet_replicated() {
     let c = cluster(2, &[BIG, BIG, 0]);
     let data = noise(60 * 1024, 1);
     let ino = put(&c.fs(2), "a", &data);
@@ -51,11 +51,9 @@ fn a_pure_client_write_is_durable_locally_and_listed_as_not_yet_replicated() {
     assert_eq!(c.control(2).status().unwrap().staging.chunks, 1);
     assert_eq!(
         c.control(2).status().unwrap().unreplicated,
-        [FileHealth {
-            path: "/a".into(),
+        [Shortfall {
             copies: 1,
-            wanted: 2,
-            tier: Tier::AtRisk
+            chunks: 1
         }]
     );
 }
@@ -94,11 +92,10 @@ fn with_too_few_storage_nodes_writes_succeed_best_effort_and_status_says_so() {
     );
     assert_eq!(
         s.unreplicated,
-        [FileHealth {
-            path: "/a".into(),
+        // Held on two nodes, reported by one of them, not by both.
+        [Shortfall {
             copies: 2,
-            wanted: 3,
-            tier: Tier::Degraded
+            chunks: 1
         }]
     );
     assert_eq!(replicas(&c), [1, 1, 0]);
@@ -107,7 +104,7 @@ fn with_too_few_storage_nodes_writes_succeed_best_effort_and_status_says_so() {
 }
 
 #[test]
-fn a_files_tier_follows_how_many_nodes_hold_its_chunks() {
+fn a_chunks_shortfall_follows_how_many_nodes_hold_it() {
     let c = cluster(3, &[BIG, BIG, BIG, 0]);
     let ids = |ns: &[u32]| ns.iter().map(|n| NodeId(*n)).collect::<Vec<_>>();
     let tier = |c: &Cluster| {
@@ -116,25 +113,25 @@ fn a_files_tier_follows_how_many_nodes_hold_its_chunks() {
             .unwrap()
             .unreplicated
             .first()
-            .map(|f| (f.copies, f.tier))
+            .map(|f| f.copies)
     };
 
     // The client reaches nobody: its staged copy is all there is.
     c.network().partition(&[&ids(&[3]), &ids(&[0, 1, 2])]);
     put(&c.fs(3), "a", &noise(60 * 1024, 1));
     c.sync();
-    assert_eq!(tier(&c), Some((1, Tier::AtRisk)));
+    assert_eq!(tier(&c), Some(1));
 
     // One storage node reachable: still a single copy.
     c.network().partition(&[&ids(&[3, 0]), &ids(&[1, 2])]);
     c.advance(RETRY);
     c.sync();
-    assert_eq!(tier(&c), Some((1, Tier::AtRisk)));
+    assert_eq!(tier(&c), Some(1));
 
     c.network().partition(&[&ids(&[3, 0, 1]), &ids(&[2])]);
     c.advance(RETRY);
     c.sync();
-    assert_eq!(tier(&c), Some((2, Tier::Degraded)));
+    assert_eq!(tier(&c), Some(2));
     assert_eq!(c.control(3).status().unwrap().staging.chunks, 1);
 
     c.network().heal();
