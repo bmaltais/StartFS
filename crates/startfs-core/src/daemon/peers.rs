@@ -54,7 +54,11 @@ impl Daemon {
                     .with_view(|v| self.replicator.on_heal_reply(v, &id, data.as_deref()))
                     .unwrap_or(false);
                 if !healed {
-                    self.chunk_replies.lock().unwrap().insert((from, id), data);
+                    let at = self.clock.now();
+                    self.chunk_replies
+                        .lock()
+                        .unwrap()
+                        .insert((from, id), (at, data));
                 }
             }
             Message::ChunkPush(id, data) => {

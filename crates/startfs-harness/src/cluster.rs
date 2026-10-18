@@ -377,17 +377,20 @@ fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<M
         node.dir.path(),
         node.daemon_config.clone(),
         node.config.clone(),
-        clock,
+        clock.clone(),
         host,
     )
     .expect("open node");
     daemon.set_power_source(node.power.clone());
     daemon.attach(Arc::new(network.transport(NodeId(index as u32))));
-    // A request that waits for a peer lets the whole simulated cluster run.
+    // A request that waits for a peer lets the whole simulated cluster run, and
+    // time pass once it has nothing left to do, so that delayed messages arrive.
     let cluster: Weak<Vec<Node>> = Arc::downgrade(nodes);
     daemon.set_wait_hook(Arc::new(move || {
-        if let Some(nodes) = cluster.upgrade() {
-            pump(&nodes);
+        if let Some(nodes) = cluster.upgrade()
+            && !pump(&nodes)
+        {
+            clock.advance(Duration::from_millis(1));
         }
     }));
     *node.fs.slot.lock().unwrap() = Some(daemon.fs());
