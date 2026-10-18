@@ -189,10 +189,7 @@ fn status_shows_whose_stand_ins_are_kept_and_for_how_long() {
     c.crash(3);
     pass(&c, 10 * MINUTE);
     let asleep = left(&c).expect("covered while asleep");
-    assert!(
-        asleep > 2 * 24 * 3600 && asleep <= 3 * 24 * 3600,
-        "{asleep}"
-    );
+    assert!(asleep > 23 * 3600 && asleep <= 24 * 3600, "{asleep}");
 
     c.restart(3);
     settle(&c);
