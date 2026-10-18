@@ -61,3 +61,11 @@ _Avoid_: Hive mind, shared state
 
 **Stranded chunks**:
 Chunks a member that is not up last reported as a single copy. Nobody else knows they exist, so they may exist only on that member. `status` lists them and holds the verdict at risk until the member returns.
+
+**Activity**:
+The daemon's own recent rates and timings: traffic per peer path, how long each tick phase takes, and what waits in the replication queue. It describes how the daemon is working now, where `status` describes the state of the cluster.
+_Avoid_: Metrics, telemetry, stats (`stats` is the storage figures)
+
+**Peer path**:
+The traffic between this node and one other member, counted at each end. Two ends that disagree about the same path show loss or a stall on it.
+_Avoid_: Link (a hardlink), connection, route
