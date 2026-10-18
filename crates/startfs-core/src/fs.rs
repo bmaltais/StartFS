@@ -243,7 +243,7 @@ impl LocalFs {
         let fs = Self {
             db: database,
             chunks: ChunkStore::open(&dir.join("chunks"))?,
-            staging: ChunkStore::open(&dir.join("staging"))?,
+            staging: ChunkStore::open(&dir.join("staging"))?.recording_additions(),
             replicating: AtomicBool::new(false),
             staging_limit: AtomicU64::new(u64::MAX),
             usable_bytes: AtomicU64::new(0),

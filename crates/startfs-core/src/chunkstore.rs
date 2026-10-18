@@ -55,9 +55,6 @@ pub struct ChunkInfo {
 
 pub struct ChunkStore {
     root: PathBuf,
-    /// Counts additions and removals, so a caller can tell cheaply whether
-    /// the contents may have changed since it last looked.
-    generation: AtomicU64,
     /// Chunk count and bytes on disk, kept up to date by `put` and `remove`
     /// so that `stats` never walks the store.
     chunks: AtomicU64,
@@ -67,6 +64,8 @@ pub struct ChunkStore {
     publish: Mutex<()>,
     /// Makes each temporary file name unique.
     tmp: AtomicU64,
+    /// Chunks added since the last [`Self::take_added`], when recording.
+    added: Option<Mutex<Vec<ChunkId>>>,
 }
 
 impl ChunkStore {
@@ -74,11 +73,11 @@ impl ChunkStore {
         fs::create_dir_all(root).map_err(io)?;
         let mut store = Self {
             root: root.to_path_buf(),
-            generation: AtomicU64::new(0),
             chunks: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             publish: Mutex::new(()),
             tmp: AtomicU64::new(0),
+            added: None,
         };
         let found = store.scan()?;
         *store.chunks.get_mut() = found.chunks;
@@ -86,9 +85,19 @@ impl ChunkStore {
         Ok(store)
     }
 
-    /// Changes whenever a chunk is added or removed through this store.
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+    /// Remember each chunk added from now on, for [`Self::take_added`].
+    pub fn recording_additions(mut self) -> Self {
+        self.added = Some(Mutex::new(Vec::new()));
+        self
+    }
+
+    /// The chunks added since the last call, or since the store was opened.
+    /// Always empty unless the store records additions.
+    pub fn take_added(&self) -> Vec<ChunkId> {
+        self.added
+            .as_ref()
+            .map(|a| std::mem::take(&mut *a.lock().unwrap()))
+            .unwrap_or_default()
     }
 
     fn path(&self, id: &ChunkId) -> PathBuf {
@@ -134,7 +143,9 @@ impl ChunkStore {
         self.chunks.fetch_add(1, Ordering::SeqCst);
         self.bytes
             .fetch_add(envelope.len() as u64, Ordering::SeqCst);
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(added) = &self.added {
+            added.lock().unwrap().push(id);
+        }
         Ok(id)
     }
 
@@ -168,7 +179,6 @@ impl ChunkStore {
             self.chunks.fetch_sub(1, Ordering::SeqCst);
             self.bytes.fetch_sub(len, Ordering::SeqCst);
         }
-        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Bytes the chunk occupies on disk, if stored.

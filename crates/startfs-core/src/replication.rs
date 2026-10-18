@@ -107,8 +107,9 @@ struct State {
     /// Bytes of re-replication allowed right now; goes negative after a send.
     allowance: i64,
     allowance_at: Option<Nanos>,
-    /// The staging generation last scanned for new chunks to track.
-    scanned: Option<u64>,
+    /// Whether staging has been listed since the last epoch change. After
+    /// that, new chunks are learned of as they are staged.
+    scanned: bool,
 }
 
 /// A replica this node lost to corruption and is fetching afresh.
@@ -203,12 +204,15 @@ impl Replicator {
 
     /// Start working on every chunk written here that is not yet tracked.
     fn track_staged(&self, st: &mut State) {
-        // Listing the staging area costs disk reads: only look again when it changed.
-        let generation = self.fs.staging_generation();
-        if st.scanned == Some(generation) {
+        // Listing the staging area costs disk reads: list it once, then follow additions.
+        let added = self.fs.newly_staged();
+        if st.scanned {
+            for id in added {
+                st.tracks.entry(id).or_default();
+            }
             return;
         }
-        st.scanned = Some(generation);
+        st.scanned = true;
         for id in self.fs.staged().unwrap_or_default() {
             st.tracks.entry(id).or_default();
         }
@@ -235,7 +239,7 @@ impl Replicator {
             st.epoch = Some(epoch);
             st.full.clear();
             st.tracks.clear();
-            st.scanned = None;
+            st.scanned = false;
             for id in self.fs.held().unwrap_or_default() {
                 st.tracks.entry(id).or_default();
             }
