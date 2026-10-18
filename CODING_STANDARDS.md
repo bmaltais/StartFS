@@ -11,6 +11,8 @@ Read during review, not implementation. Mechanical rules live in CI (`.github/wo
 
 - Commits made with `Durability::None` are visible at once but not on disk. Whatever leaves the node (log entries served to peers, chunk acknowledgements, replies to control requests) is preceded by `LocalFs::sync`, so a power cut cannot reissue log positions peers already hold.
 - A commit that drops references to chunks stays durable, since old chunks may be collected.
+- Only `LocalFs::keep` stores chunks with `put_lazy`; every other writer uses `put`. A durable commit syncs the chunk stores first, so nothing durable refers to a chunk that is not.
+- `Cluster::crash` drops the node, and `LocalFs`'s `Drop` syncs, as a clean shutdown does. A test of what a power cut loses uses `Cluster::power_cut`.
 
 ## Concurrency
 
@@ -18,7 +20,7 @@ Read during review, not implementation. Mechanical rules live in CI (`.github/wo
 
 ## Docs
 
-- A change to behaviour, the wire protocol or config updates what describes it: `DESIGN.md` (including its "Not done" lines), the README config table, and `GLOSSARY.md` for a new domain term.
+- A change to behaviour, the wire protocol or config updates what describes it: `DESIGN.md` (including its "Not done" lines), the README config table, `GLOSSARY.md` for a new domain term, `skills/startfs/SKILL.md` (what users are told) and `docs/validation.md` (measured numbers).
 
 ## Tests
 
