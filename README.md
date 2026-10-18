@@ -330,10 +330,11 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 
 Limits found while validating v1 (details and numbers in `docs/validation.md`):
 
-- **Creates reach disk about a second late.** `create` and closing a small file do not wait for
-  an fsync; the daemon makes them durable after `sync_quiet_ms` without activity, on `fsync`, before
+- **Creates reach disk about a second late.** `create` and closing a file, whatever its size, do
+  not wait for an fsync; the daemon makes them durable after `sync_quiet_ms` without activity, on `fsync`, before
   talking to peers and on clean shutdown. A power cut (not a killed process) can lose the last
-  second of creates unless the file was fsynced.
+  second of creates and new file contents unless the file was fsynced. Overwriting or truncating
+  a file that has chunks still waits for disk, since the old chunks may be collected.
 - **Writes are buffered.** A write is held in memory (up to `write_buffer_bytes` per file) and
   committed on `flush`, `fsync` and close, when the buffer fills, and once the file has been
   quiet for `write_commit_delay_ms`. Other nodes see a new file's content after that point.
@@ -341,7 +342,8 @@ Limits found while validating v1 (details and numbers in `docs/validation.md`):
   buffered writes are lost, as with any POSIX filesystem that has not been synced. A clean
   shutdown commits them. A write can also fail at `flush`/`close` (for example with no space left),
   so check the result of `close()`.
-- Many small files are slow to create (about 2.5 ms each over FUSE).
+- Many small files are slower than on a local disk (about 0.2 to 0.3 ms each over FUSE, against
+  0.03 ms).
 - **Advisory locks are local only.** `fcntl`/`flock` locks work between processes on the same
   machine but are not coordinated between nodes: two machines can both "hold" a lock on the
   same file. Do not rely on them to guard shared files across nodes.

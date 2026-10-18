@@ -296,6 +296,24 @@ impl Cluster {
         corrupt_files(&self.nodes[i].dir.path().join("cache"));
     }
 
+    /// Fault injection: the power goes. Chunk files that were written without a
+    /// sync, which the stores flag with a marker, are cut short as a disk
+    /// might leave them. A crash here syncs on the way down, as a clean
+    /// shutdown does, so the marker is put back afterwards.
+    pub fn power_cut(&self, i: usize) {
+        let dir = self.nodes[i].dir.path();
+        let marker = |store: &str| dir.join(format!("{store}.dirty"));
+        let torn: Vec<&str> = ["chunks", "staging"]
+            .into_iter()
+            .filter(|store| marker(store).exists())
+            .collect();
+        self.crash(i);
+        for store in torn {
+            truncate_files(&dir.join(store));
+            std::fs::write(marker(store), b"").unwrap();
+        }
+    }
+
     /// The machine dies and is replaced by a blank one at the same address.
     pub fn rebuild(&self, i: usize) {
         self.crash(i);
@@ -326,6 +344,23 @@ impl Cluster {
     pub fn restart(&self, i: usize) {
         open(&self.nodes, i, &self.network, self.clock.clone());
         self.network.set_down(NodeId(i as u32), false);
+    }
+}
+
+fn truncate_files(dir: &std::path::Path) {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            truncate_files(&p);
+        } else {
+            let len = std::fs::metadata(&p).unwrap().len();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_len(len / 2)
+                .unwrap();
+        }
     }
 }
 

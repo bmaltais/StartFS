@@ -243,7 +243,7 @@ impl LocalFs {
         let fs = Self {
             db: database,
             chunks: ChunkStore::open(&dir.join("chunks"))?,
-            staging: ChunkStore::open(&dir.join("staging"))?,
+            staging: ChunkStore::open(&dir.join("staging"))?.recording_additions(),
             replicating: AtomicBool::new(false),
             staging_limit: AtomicU64::new(u64::MAX),
             usable_bytes: AtomicU64::new(0),
@@ -341,6 +341,11 @@ impl LocalFs {
         };
         match out {
             Ok(v) if write => {
+                if !matches!(durability, Durability::None) {
+                    // Chunks first: nothing durable may refer to a chunk that is not.
+                    self.chunks.sync()?;
+                    self.staging.sync()?;
+                }
                 txn.commit().map_err(db)?;
                 let lazy = matches!(durability, Durability::None);
                 if lazy {
@@ -359,6 +364,8 @@ impl LocalFs {
 
     /// Make every lazy commit durable. Cheap when there is nothing to make durable.
     pub fn sync(&self) -> FsResult<()> {
+        self.chunks.sync()?;
+        self.staging.sync()?;
         if self.unsynced.load(Ordering::SeqCst) {
             // An empty durable commit persists the ones before it.
             self.run_as(true, Durability::Immediate, |_| Ok(()))?;
@@ -369,6 +376,8 @@ impl LocalFs {
     /// Whether commits are waiting for a durable one.
     pub fn has_unsynced(&self) -> bool {
         self.unsynced.load(Ordering::SeqCst)
+            || self.chunks.has_unsynced()
+            || self.staging.has_unsynced()
     }
 
     /// [`Self::sync_logged`] once no lazy commit has happened for `quiet` nanoseconds.

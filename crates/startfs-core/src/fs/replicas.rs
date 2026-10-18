@@ -19,6 +19,12 @@ impl LocalFs {
         Ok(self.staging.list()?.into_iter().map(|c| c.0).collect())
     }
 
+    /// Chunks staged since the last call. Together with one [`Self::staged`]
+    /// listing, this follows the staging area without listing it again.
+    pub fn newly_staged(&self) -> Vec<ChunkId> {
+        self.staging.take_added()
+    }
+
     /// Most bytes the staging area may hold before writes are refused. Only
     /// nodes that offer no space are held to it (see [`Self::set_staging_limit`]
     /// callers): a storage node is limited by its disk alone.
@@ -54,9 +60,9 @@ impl LocalFs {
     pub(super) fn keep(&self, data: &[u8]) -> FsResult<ChunkId> {
         let id = *blake3::hash(data).as_bytes();
         if !self.replicating.load(Ordering::SeqCst) {
-            self.chunks.put(data)?;
+            self.chunks.put_lazy(data)?;
         } else if !self.has_replica(&id) {
-            self.staging.put(data)?;
+            self.staging.put_lazy(data)?;
         }
         Ok(id)
     }
@@ -118,11 +124,6 @@ impl LocalFs {
     /// Stop holding a replica placement no longer asks of this node.
     pub fn drop_replica(&self, id: &ChunkId) {
         self.chunks.remove(id);
-    }
-
-    /// Changes whenever the staging area gains or loses a chunk.
-    pub fn staging_generation(&self) -> u64 {
-        self.staging.generation()
     }
 
     /// What the staging area holds.

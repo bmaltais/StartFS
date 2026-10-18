@@ -13,7 +13,7 @@ build the release binary and run real `startfs daemon` processes. Rerun them to 
 | 2 | Permanent node loss returns data to N copies, no user action | **Met** (real processes and harness) | `scripts/validate-loss.sh`; `repair.rs::after_the_grace_period_every_chunk_is_back_to_n_copies_without_user_action` |
 | 3 | No data loss when any N-1 nodes fail, once replicated | **Met** (real processes and harness) | `scripts/validate-loss.sh`; `repair.rs::any_n_minus_one_nodes_can_fail_once_replication_completed` |
 | 4 | Idle daemon under about 100 MB and negligible CPU | **Met**, idle CPU no longer grows with stored data | `scripts/validate-idle.sh`, see below |
-| 5 | Cached data at near-local-disk speed | **Partly**: reads and writes scale roughly linearly; writes still 12x to 47x slower than local disk | `scripts/validate-bench.sh`, see below |
+| 5 | Cached data at near-local-disk speed | **Partly**: reads and writes scale roughly linearly; writes still 6x to 9x slower than local disk | `scripts/validate-bench.sh`, see below |
 | 6 | Install docs for Linux and macOS | Done; macOS untested | `README.md`, `dist/README.md` |
 
 Not verifiable here: real multiple machines, a real tailnet (whois was faked; the real
@@ -92,14 +92,15 @@ baseline but FUSE reads here always go through the daemon; `O_DIRECT` removes th
 
 | Size | Op | Local | FUSE | Ratio |
 |---|---|---|---|---|
-| 16 MiB | write | 0.006 s | 0.08 to 0.28 s | 12x to 47x slower |
-| 32 MiB | write | 0.010 s | 0.11 to 0.17 s | 11x to 17x |
-| 64 MiB | write | 0.018 s | 0.23 to 0.57 s | 13x to 31x |
-| 128 MiB | write | 0.038 s | 0.60 to 0.93 s | 16x to 25x |
+| 16 MiB | write | 0.006 s | 0.053 s | 8.8x slower |
+| 32 MiB | write | 0.011 s | 0.067 s | 6.1x |
+| 64 MiB | write | 0.017 s | 0.136 s | 8.0x |
+| 128 MiB | write | 0.038 s | 0.255 s | 6.7x |
 | 128 MiB | read, page cache | 0.011 s | 0.157 s | 14x |
 | 128 MiB | read, `O_DIRECT` | 0.159 s | 0.152 s | 1.0x |
 | 64 MiB | read, `O_DIRECT` | 0.082 s | 0.078 s | 1.0x |
-| 1000 x 8 B | create and write | 0.030 s | 0.19 s | about 6x (0.19 ms per file) |
+| 1000 x 8 B | create and write | 0.030 s | 0.158 s | 5.3x (0.16 ms per file) |
+| 1000 x 16 KiB | `cp -r`, chunk-backed | 0.030 s | 0.34 s | about 11x (0.34 ms per file) |
 | 1000 x 8 B | read | 0.011 s | 0.061 s | 5.5x |
 
 The tiny-file row was 2.5 to 3.7 s before create and close stopped waiting for disk: each file cost
@@ -117,18 +118,27 @@ slower than local disk) and daemon peak RSS was 206 to 222 MiB for a 128 MiB wri
   that re-chunk only the affected region (`crates/startfs-core/src/fs/writebuf.rs`). Across the
   four runs, 128 MiB took 4x to 9x as long as 16 MiB (8x is linear), where before it took 39x.
   Individual doublings vary between 1.3x and 2.6x with machine load, so a single
-  doubling can exceed 2x. The rate is about 150 to 200 MiB/s, still 12x to 47x slower than the
-  local disk's page cache, mostly hashing and compression in the daemon. Daemon peak RSS over the
+  doubling can exceed 2x. The rate was about 150 to 200 MiB/s then and is 300 to 500 MiB/s now, 6x to 9x slower than
+  the local disk's page cache. Daemon peak RSS over the
   whole run, 128 MiB write included, was 57 to 65 MiB, bounded by the buffer cap rather than the
   file size. The harness tests `writes.rs::a_file_written_in_small_pieces_occupies_about_its_own_size`
   and `background_ticks_do_not_commit_a_file_that_is_still_being_written` show a 20 MiB file
   written in 128 KiB pieces storing about 20 MiB (it was 243 MB before), so superseded chunks are
   no longer created or replicated; storage use through a real mount was not measured.
-- Small-file creation costs 2.5 ms each through FUSE; each op is a redb transaction plus an
-  operation-log entry. Not investigated further.
+- **Write-path profile.** A `strace -c` of the daemon during a copy found the time went to the
+  disk, not to hashing or compression. Before the fixes below, 1000 files of 16 KiB took 4.5 s
+  (4.5 ms each, 4.6 s of kernel CPU in the daemon): each file made about 700 `getdents64` and 350
+  `openat` calls, from `ChunkStore::stats` walking the whole store on every write and every chunk
+  promotion, and from the replicator listing the staging directory on every tick; and each file
+  made about 2 chunk `fsync`s and 1 redb `fdatasync` before `close` returned. Now the store
+  counts its chunks as it changes, the replicator follows additions, locally written chunks are
+  synced with the commit that needs them (`LocalFs::sync`, the quiet-period tick, or any durable
+  commit), and a commit that only adds chunks is lazy like any create. The same copy takes
+  0.34 s, and a 128 MiB `dd` 0.26 to 0.50 s (it was 0.6 to 0.98 s). The cost moved to the later
+  sync: data is on disk about `sync_quiet_ms` after `close`, not at `close`.
 
 Criterion 5 ("normal operations on cached data at near-local-disk speed") is met for reading
-cached data. Writes no longer degrade with file size, but remain about 12x to 47x slower than
+cached data. Writes no longer degrade with file size, but remain about 6x to 9x slower than
 the local disk, so the criterion is only partly met.
 
 ## Defects found, not fixed
