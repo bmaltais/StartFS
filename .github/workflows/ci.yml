@@ -1,9 +1,10 @@
 name: ci
 
+# Checked once, on the pull request. Merging, the release commit and the tag do not
+# re-run it; run it by hand from the Actions tab if a direct push to main needs it.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
