@@ -149,6 +149,14 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     ] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
+
+    // The same answer as JSON, for scripts and GUIs.
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&startfs(data, &["status", "--json"]))).unwrap();
+    assert_eq!(json["filesystem"]["name"], "home");
+    assert_eq!(json["filesystem"]["copies"], 3);
+    assert_eq!(json["copies_possible"], 1);
+    assert_eq!(json["members"].as_array().unwrap().len(), 1);
 }
 
 #[test]
