@@ -265,6 +265,10 @@ Costs and limits:
   if no member can take them the chunk is listed as degraded as before.
 - The retention is remembered in memory by each daemon, so after a daemon restart the
   extras it holds are trimmed as soon as the machine they covered for is back.
+- While a member's stand-ins are kept, ordinary hand-offs of chunks it shares (after a new
+  machine joins, say) are also held back until the retention ends, so those chunks can sit
+  above N copies for a while.
+- A machine that was itself asleep does not take its peers for asleep when it wakes.
 - `standin_days` is set when the filesystem is created, like `repair_grace_secs`. Set it to
   `0` to turn stand-ins off and get the earlier behaviour.
 

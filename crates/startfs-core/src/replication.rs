@@ -84,16 +84,18 @@ struct Track {
     heard: bool,
 }
 
-/// N, each member's (id, offer, revision), the members lost or down, the
-/// members asleep and the members whose stand-ins are kept: what placement
-/// and trimming depend on.
-type Epoch = (
-    u32,
-    Vec<(MemberId, u64, u64)>,
-    Vec<MemberId>,
-    Vec<MemberId>,
-    Vec<MemberId>,
-);
+/// What placement and trimming depend on.
+#[derive(PartialEq)]
+struct Epoch {
+    copies: u32,
+    /// Each member's (id, offer, revision).
+    members: Vec<(MemberId, u64, u64)>,
+    /// Members lost or down.
+    unreachable: BTreeSet<MemberId>,
+    asleep: BTreeSet<MemberId>,
+    /// Members whose stand-ins are kept.
+    kept: BTreeSet<MemberId>,
+}
 
 #[derive(Default)]
 struct State {
@@ -216,32 +218,17 @@ impl Replicator {
     pub fn poll(&self, view: &View<'_>, transport: &dyn Transport) -> bool {
         let mut busy = false;
         let mut st = self.state.lock().unwrap();
-        let epoch = (
-            view.copies,
-            view.members
+        let epoch = Epoch {
+            copies: view.copies,
+            members: view
+                .members
                 .iter()
                 .map(|m| (m.id, m.offer_bytes, m.rev))
-                .collect::<Vec<_>>(),
-            view.lost
-                .iter()
-                .chain(view.down)
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
                 .collect(),
-            view.sleeping
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-            view.kept
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        );
+            unreachable: view.lost.iter().chain(view.down).copied().collect(),
+            asleep: view.sleeping.iter().copied().collect(),
+            kept: view.kept.iter().copied().collect(),
+        };
         if st.epoch.as_ref() != Some(&epoch) {
             // Membership or offers changed: placement may differ, so check
             // every chunk held here against it.
@@ -341,7 +328,13 @@ impl Replicator {
                 **t != view.me && !view.sleeping.contains(*t) && !track.holders.contains(*t)
             })
             .count() as u32;
-        let needed = needed.max(view.copies.saturating_sub(awake + awake_coming));
+        let asleep = targets
+            .iter()
+            .chain(&track.holders)
+            .filter(|m| view.sleeping.contains(*m))
+            .collect::<HashSet<_>>()
+            .len() as u32;
+        let needed = needed.max(asleep.min(view.copies.saturating_sub(awake + awake_coming)));
         if needed > 0 {
             let out: HashSet<MemberId> = skip
                 .union(view.down)

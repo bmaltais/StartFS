@@ -3,6 +3,9 @@
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
 
+/// Days the extra copies made for a sleeping member are kept once it is back.
+pub const DEFAULT_STANDIN_DAYS: u64 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -71,7 +74,7 @@ impl Default for Config {
             token_ttl_secs: 24 * 3600,
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
-            standin_days: 3,
+            standin_days: DEFAULT_STANDIN_DAYS,
             repair_bytes_per_sec: 64 << 20,
             scrub_period_secs: 30 * 24 * 3600,
             state_chunk_bytes: crate::sync::STATE_CHUNK_BYTES,

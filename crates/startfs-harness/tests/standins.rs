@@ -56,13 +56,14 @@ fn degraded(c: &Cluster, nodes: &[usize]) -> bool {
         .any(|i| !c.control(*i).status().unwrap().unreplicated.is_empty())
 }
 
-/// Let `by` pass with every member up, in steps short enough that none is
-/// ever taken for asleep.
+/// Let `by` pass in steps short enough that this node never suspects it was
+/// asleep itself (a single jump looks like a suspend and every peer as unseen).
 fn pass(c: &Cluster, by: Duration) {
     for _ in 0..by.as_secs() / 240 {
         c.advance(Duration::from_secs(240));
         c.sync();
     }
+    settle(c);
 }
 
 /// Let the nodes exchange state a few times.
@@ -81,8 +82,7 @@ fn a_member_asleep_past_the_stand_in_delay_is_covered_for_and_nothing_shows_degr
     assert!(!degraded(&c, &[0, 1, 2]));
 
     c.crash(3);
-    c.advance(10 * MINUTE);
-    c.sync();
+    pass(&c, 10 * MINUTE);
 
     assert!(!degraded(&c, &[0, 1, 2]));
 }
@@ -93,8 +93,7 @@ fn the_extra_copies_stay_for_the_retention_period_after_the_sleeper_is_back_then
     write_files(&c, 24);
     let before = replicas(&c);
     c.crash(3);
-    c.advance(8 * HOUR);
-    c.sync();
+    pass(&c, 8 * HOUR);
 
     c.restart(3);
     settle(&c);
@@ -118,19 +117,16 @@ fn a_member_that_sleeps_again_within_the_retention_period_costs_no_new_copies() 
     let c = cluster_with(3, 4, "");
     write_files(&c, 24);
     c.crash(3);
-    c.advance(8 * HOUR);
-    c.sync();
+    pass(&c, 8 * HOUR);
     c.restart(3);
     settle(&c);
     pass(&c, 12 * HOUR);
     let after_first_night = replicas(&c);
 
     c.crash(3);
-    c.advance(10 * MINUTE);
-    c.sync();
+    pass(&c, 10 * MINUTE);
     assert!(!degraded(&c, &[0, 1, 2]));
-    c.advance(8 * HOUR);
-    c.sync();
+    pass(&c, 8 * HOUR);
 
     assert_eq!(replicas(&c)[..3], after_first_night[..3]);
     assert!(!degraded(&c, &[0, 1, 2]));
@@ -143,8 +139,7 @@ fn a_member_that_never_returns_is_replaced_after_the_grace_period_as_before() {
     let before: u64 = replicas(&c).iter().sum();
 
     c.crash(4);
-    c.advance(31 * MINUTE);
-    c.sync();
+    pass(&c, 31 * MINUTE);
     settle(&c);
 
     let after = replicas(&c);
@@ -159,12 +154,27 @@ fn with_stand_ins_off_a_sleeping_member_leaves_chunks_degraded_and_nothing_is_ke
     let before = replicas(&c);
 
     c.crash(3);
-    c.advance(10 * MINUTE);
-    c.sync();
+    pass(&c, 10 * MINUTE);
     assert!(degraded(&c, &[0, 1, 2]));
 
     c.restart(3);
     settle(&c);
     assert!(!degraded(&c, &[0, 1, 2, 3]));
     assert_eq!(replicas(&c), before);
+}
+
+#[test]
+fn a_node_that_was_asleep_itself_does_not_take_its_peers_for_asleep() {
+    let c = cluster_with(3, 4, "");
+    write_files(&c, 24);
+    let before = replicas(&c);
+
+    // Every node's clock jumps a day at once, as after the whole machine slept:
+    // all peers look unseen until their hellos arrive.
+    c.advance(DAY);
+    c.sync();
+    settle(&c);
+
+    assert_eq!(replicas(&c), before);
+    assert!(!degraded(&c, &[0, 1, 2, 3]));
 }

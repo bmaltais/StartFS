@@ -73,7 +73,7 @@ pub struct FilesystemInfo {
 }
 
 fn default_standin_days() -> u64 {
-    3
+    crate::config::DEFAULT_STANDIN_DAYS
 }
 
 fn default_grace() -> u64 {
