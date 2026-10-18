@@ -8,12 +8,12 @@
 //! these answers, so a node tracks the chunks it is working on and nothing else.
 
 use crate::chunkstore::ChunkId;
-use crate::control::{FileHealth, Repair, Tier};
+use crate::control::{Repair, Shortfall, Tier};
 use crate::fs::LocalFs;
 use crate::members::{Member, MemberId};
 use crate::net::{NodeId, Transport};
 use crate::ops::Nanos;
-use crate::placement::place;
+use crate::placement::{is_steward, place};
 use crate::protocol::{Message, Replica};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -275,11 +275,12 @@ impl Replicator {
         }
         let track = st.tracks.get_mut(id).expect("tracked");
         let held = self.fs.has_replica(id);
-        // Of several holders, only the lowest-numbered pushes to targets that
-        // lack the chunk, so a new target is not sent it more than once.
+        // Of several holders, only one (picked per chunk by hash, so the work
+        // spreads) pushes to targets that lack the chunk, so a new target is
+        // not sent it more than once.
         let steward = staged
             || !targets.contains(&view.me)
-            || track.holders.first().is_none_or(|h| view.me < *h);
+            || is_steward(id, view.me, track.holders.iter().copied());
         for t in &targets {
             if *t == view.me || track.holders.contains(t) {
                 continue;
@@ -396,7 +397,7 @@ impl Replicator {
         };
         for (id, t) in &st.tracks {
             let replicas = t.holders.len() as u32 + 1;
-            let mine = t.holders.first().is_none_or(|h| view.me < *h);
+            let mine = is_steward(id, view.me, t.holders.iter().copied());
             if t.heard && !t.settled && mine && replicas < view.copies && self.fs.has_replica(id) {
                 match tier(replicas) {
                     Tier::AtRisk => progress.at_risk += 1,
@@ -407,43 +408,38 @@ impl Replicator {
         (progress.at_risk + progress.degraded > 0).then_some(progress)
     }
 
-    /// Files with a chunk on fewer than `view.copies` nodes, as far as this node knows.
-    pub fn unreplicated(&self, view: &View<'_>) -> Vec<FileHealth> {
+    /// Chunks on fewer than `view.copies` nodes, as far as this node knows,
+    /// counted by their copies. Each chunk is counted by one member (once its
+    /// holders agree who), so the counts of all members add up.
+    pub fn unreplicated(&self, view: &View<'_>) -> Vec<Shortfall> {
         let mut st = self.state.lock().unwrap();
         self.track_staged(&mut st);
-        let copies: HashMap<ChunkId, u32> = st
-            .tracks
-            .iter()
+        let mut by_copies: BTreeMap<u32, u32> = BTreeMap::new();
+        for (id, t) in &st.tracks {
+            let held = self.fs.has_replica(id);
             // A held chunk is only reported once a peer has said how many copies exist.
-            .filter(|(id, t)| t.heard || self.fs.has_staged(id))
-            .map(|(id, t)| {
-                // A staged copy only counts while it is the sole copy.
-                let replicas = t.holders.len() as u32 + u32::from(self.fs.has_replica(id));
-                let copies = if replicas == 0 && self.fs.has_staged(id) {
-                    1
-                } else {
-                    replicas
-                };
-                (*id, copies)
-            })
-            .collect();
-        let ids: HashSet<ChunkId> = copies.keys().copied().collect();
-        let files = self.fs.files_using(&ids).unwrap_or_default();
-        files
+            if !(t.heard || self.fs.has_staged(id)) {
+                continue;
+            }
+            let replicas = t.holders.len() as u32 + u32::from(held);
+            // A staged copy only counts while it is the sole copy.
+            let copies = if replicas == 0 && self.fs.has_staged(id) {
+                1
+            } else {
+                replicas
+            };
+            // Holders share the counting by hash. A node that wrote the chunk
+            // and does not hold it counts it alone, since the holders it
+            // reached may not be tracking it. Around a membership change both
+            // can count it, for a moment.
+            let mine = !held || is_steward(id, view.me, t.holders.iter().copied());
+            if copies < view.copies && mine {
+                *by_copies.entry(copies).or_default() += 1;
+            }
+        }
+        by_copies
             .into_iter()
-            .map(|(path, chunks)| {
-                let least = chunks
-                    .iter()
-                    .filter_map(|c| copies.get(c).copied())
-                    .min()
-                    .unwrap_or(view.copies);
-                FileHealth {
-                    path,
-                    copies: least,
-                    wanted: view.copies,
-                    tier: tier(least),
-                }
-            })
+            .map(|(copies, chunks)| Shortfall { copies, chunks })
             .collect()
     }
 }

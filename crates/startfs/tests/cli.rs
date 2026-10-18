@@ -241,6 +241,16 @@ fn two_daemon_processes_create_join_and_see_each_other_over_quic() {
         let both_up = |t: &str| t.matches(" up ").count() + t.matches("(this node)").count() >= 2;
         if a.contains("(2 nodes)") && b.contains("(2 nodes)") && both_up(&a) && both_up(&b) {
             assert!(b.contains("100.0 MiB"), "{b}");
+            // The member rows line up in columns.
+            for text in [&a, &b] {
+                let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("  ")).collect();
+                assert_eq!(rows.len(), 2, "{text}");
+                for needle in ["offered", " up "] {
+                    let at = |l: &str| l.find(needle);
+                    assert!(at(rows[0]).is_some(), "{text}");
+                    assert_eq!(at(rows[0]), at(rows[1]), "{text}");
+                }
+            }
             break;
         }
         assert!(

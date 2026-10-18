@@ -127,15 +127,17 @@ pub enum Tier {
     AtRisk,
 }
 
-/// A file whose chunks are not all on N distinct nodes yet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileHealth {
-    pub path: String,
-    /// Copies of the file's least replicated chunk.
+/// Chunks held on `copies` distinct nodes, fewer than N.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shortfall {
     pub copies: u32,
-    /// N.
-    pub wanted: u32,
-    pub tier: Tier,
+    pub chunks: u32,
+}
+
+impl Shortfall {
+    pub fn tier(&self) -> Tier {
+        crate::replication::tier(self.copies)
+    }
 }
 
 /// Chunks being re-replicated after a member was lost, still to do.
@@ -239,9 +241,9 @@ pub struct Status {
     pub copies_possible: u32,
     /// Roughly how much data fits: offered space divided by N.
     pub usable_bytes: u64,
-    /// Files not yet on N nodes anywhere in the cluster, as far as the
-    /// reachable members report, worst first.
-    pub unreplicated: Vec<FileHealth>,
+    /// Chunks not yet on N nodes anywhere in the cluster, as far as the
+    /// reachable members report, counted by how many copies they have, fewest first.
+    pub unreplicated: Vec<Shortfall>,
     /// Re-replication under way, summed over this node and the reachable members.
     pub repair: Option<Repair>,
     /// Members whose replication state is missing from `unreplicated` and

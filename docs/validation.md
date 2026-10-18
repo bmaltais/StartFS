@@ -41,7 +41,7 @@ macOS (the adapter has never run), and long-term behaviour (days of uptime).
 
 - Replication of the file completed in 0.5 s.
 - Node C shown as `lost` and the file back to full redundancy on A and B: **14.5 s** with a 3 s
-  grace (grace plus detection plus rate-limited repair at the default 8 MiB/s). B's stored
+  grace (grace plus detection plus rate-limited repair, measured at the former default of 8 MiB/s). B's stored
   data went from 55 MiB to 121 MiB, so data was really copied. The default grace is 30 minutes.
 - Then `kill -9` of A as well, leaving only B: the file read from B's mount matched the original
   (sha256). That is 2 of 3 nodes failed with N = 2, after replication had completed.

@@ -81,7 +81,7 @@ same code with a different membership scope.
     under systemd or launchd) mounts the filesystem and performs replication, repair and GC. The CLI
     (`create`, `join`, `status`, `leave`, `config`) talks to the daemon over a local socket. Config is
     a small TOML file with sensible defaults. `startfs status` is designed to answer "is my data safe
-    right now?" for the whole cluster: members gossip their unreplicated files and repair progress, `status` merges the reports of reachable members, and lists the members it could not hear from (`unheard`) so a partial view is never shown as complete. No web UI or tray app in v1.
+    right now?" for the whole cluster: members gossip counts of their under-replicated chunks (by copies held) and repair progress, `status` merges the reports of reachable members, and lists the members it could not hear from (`unheard`) so a partial view is never shown as complete. No web UI or tray app in v1.
 
 15. **Transport:** QUIC (`quinn`) to peers' tailnet addresses. Streams are multiplexed so bulk
     chunk transfers don't block metadata sync. Tailscale provides encryption and identity, so QUIC

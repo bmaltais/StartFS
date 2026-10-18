@@ -67,7 +67,7 @@ impl Default for Config {
             token_ttl_secs: 24 * 3600,
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
-            repair_bytes_per_sec: 8 << 20,
+            repair_bytes_per_sec: 64 << 20,
             scrub_period_secs: 30 * 24 * 3600,
             state_chunk_bytes: crate::sync::STATE_CHUNK_BYTES,
             mountpoint: None,
