@@ -8,7 +8,6 @@ use crate::control::{
 use crate::error::Error;
 use crate::ops::FsOps;
 use crate::protocol::Health;
-use crate::replication::tier;
 use std::time::Duration;
 
 /// Is the data safe right now? Copies beyond what the storage nodes allow are
@@ -22,7 +21,7 @@ fn verdict(
 ) -> Verdict {
     let target = wanted.min(possible);
     let behind = || unreplicated.iter().filter(|f| f.copies < target);
-    if behind().any(|f| tier(f.copies) == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0) {
+    if behind().any(|f| f.tier() == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0) {
         Verdict::AtRisk
     } else if behind().next().is_some()
         || repair.is_some()

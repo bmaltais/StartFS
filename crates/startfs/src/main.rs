@@ -9,7 +9,6 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
-use startfs_core::replication::tier;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -407,7 +406,7 @@ fn unreplicated_line(unreplicated: &[control::Shortfall]) -> Option<String> {
     let count = |risk: Tier| -> u32 {
         unreplicated
             .iter()
-            .filter(|f| tier(f.copies) == risk)
+            .filter(|f| f.tier() == risk)
             .map(|f| f.chunks)
             .sum()
     };

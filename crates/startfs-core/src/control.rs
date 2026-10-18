@@ -134,6 +134,12 @@ pub struct Shortfall {
     pub chunks: u32,
 }
 
+impl Shortfall {
+    pub fn tier(&self) -> Tier {
+        crate::replication::tier(self.copies)
+    }
+}
+
 /// Chunks being re-replicated after a member was lost, still to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repair {
