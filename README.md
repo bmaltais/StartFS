@@ -265,6 +265,11 @@ Costs and limits:
   freshest sighting anywhere counts, and a restarted daemon still shows the right gap;
   only if no member remembers one does it say "over", counting from its own start.
   `status --json` has it as `last_seen` (`secs_ago`, `exact`).
+- A member that is down or lost may hold chunks no one else has yet. `startfs status`
+  says so ("at risk: 3 chunks may exist only on surface…") from the single-copy count in
+  that member's last report, and keeps the verdict at risk until it returns. The members
+  relay these reports, so a restarted daemon still knows. Chunks written after the last
+  report are not covered. `status --json` has it as `stranded`.
 - Stand-ins use disk on the machines that cover: roughly the share of data the sleeping
   machines hold, for up to `standin_days` after they were last asleep.
 - The first sleep of a machine pays one copy pass, rate limited like other repair

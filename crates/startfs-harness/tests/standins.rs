@@ -183,3 +183,19 @@ fn lowering_copies_with_stand_ins_kept_is_accepted_and_ends_at_the_new_count() {
 
     assert_eq!(replicas(&c).iter().sum::<u64>(), 48, "{:?}", replicas(&c));
 }
+
+#[test]
+fn a_restarted_node_relearns_from_the_others_whose_stand_ins_are_kept() {
+    let c = Cluster::with_filesystem(3, 4, "standin_days = 1");
+    write_files(&c, 24);
+    c.crash(3);
+    c.elapse(10 * MINUTE);
+    c.restart(3);
+    settle(&c);
+    c.crash(0);
+    c.restart(0);
+    settle(&c);
+    let left = c.control(0).status().unwrap().members[3].standin_secs_left;
+    let left = left.expect("the others remember that member 3 slept");
+    assert!(left > 22 * 3600 && left <= 24 * 3600, "{left}");
+}

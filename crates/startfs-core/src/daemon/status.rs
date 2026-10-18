@@ -3,7 +3,7 @@
 use super::{DOWN_AFTER, Daemon};
 use crate::control::{
     GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
-    Shortfall, Staging, Status, Tier, Usage, Verdict,
+    Shortfall, Staging, Status, Stranded, Tier, Usage, Verdict,
 };
 use crate::error::Error;
 use crate::members::{Member, MemberId, Membership};
@@ -11,6 +11,7 @@ use crate::net::NodeId;
 use crate::ops::FsOps;
 use crate::ops::Nanos;
 use crate::protocol::{Health, Message, Sighting};
+use std::collections::HashMap;
 use std::time::Duration;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
@@ -26,10 +27,14 @@ fn verdict(
     unreplicated: &[Shortfall],
     repair: Option<&Repair>,
     members: &[MemberStatus],
+    stranded: &[Stranded],
 ) -> Verdict {
     let target = wanted.min(possible);
     let behind = || unreplicated.iter().filter(|f| f.copies < target);
-    if behind().any(|f| f.tier() == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0) {
+    // A single copy that only an unreachable member is known to hold.
+    let stuck = target > 1 && !stranded.is_empty();
+    if stuck || behind().any(|f| f.tier() == Tier::AtRisk) || repair.is_some_and(|r| r.at_risk > 0)
+    {
         Verdict::AtRisk
     } else if behind().next().is_some()
         || repair.is_some()
@@ -91,6 +96,39 @@ fn last_seen<'a>(
     }
 }
 
+/// What the cluster last heard from `member`, a member that is not up: its
+/// own last report as this node received it, or one a peer relayed, whichever
+/// is fresher. `None` when no one has a report.
+fn last_report(
+    member: MemberId,
+    endpoint: NodeId,
+    peers: &HashMap<NodeId, (Nanos, Health)>,
+    now: Nanos,
+) -> Option<Stranded> {
+    let age = |arrived: &Nanos| now.saturating_sub(*arrived) / NANOS_PER_SEC;
+    let own = peers.get(&endpoint).map(|(arrived, h)| Stranded {
+        member,
+        chunks: h
+            .unreplicated
+            .iter()
+            .filter(|f| f.tier() == Tier::AtRisk)
+            .map(|f| f.chunks)
+            .sum(),
+        secs_ago: age(arrived),
+    });
+    let relayed = peers
+        .iter()
+        .filter(|(e, _)| **e != endpoint)
+        .filter_map(|(_, (arrived, h))| {
+            let r = h.reports.iter().find(|r| r.member == member)?;
+            Some(Stranded {
+                secs_ago: r.secs_ago + age(arrived),
+                ..*r
+            })
+        });
+    own.into_iter().chain(relayed).min_by_key(|r| r.secs_ago)
+}
+
 /// Roughly how much data fits: the space members offer, divided by N.
 pub(super) fn usable_bytes(membership: &Membership) -> u64 {
     let offered: u64 = membership.members().iter().map(|m| m.offer_bytes).sum();
@@ -119,8 +157,37 @@ impl Daemon {
                 })
                 .collect()
         };
+        let reports = {
+            let membership = self.membership.lock().unwrap();
+            let heard = self.heard.lock().unwrap();
+            let peers = self.peer_health.lock().unwrap();
+            let up = |endpoint: &NodeId| {
+                heard
+                    .get(endpoint)
+                    .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64)
+            };
+            membership
+                .members()
+                .iter()
+                .filter(|m| Some(m.id) != membership.me() && !up(&m.endpoint))
+                .filter_map(|m| last_report(m.id, m.endpoint, &peers, now))
+                .collect()
+        };
+        // Rounded up, so a time handed from node to node never creeps later.
+        let slept = self
+            .slept
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(member, at)| Sighting {
+                member: *member,
+                secs_ago: now.saturating_sub(*at).div_ceil(NANOS_PER_SEC),
+            })
+            .collect();
         Health {
             seen,
+            reports,
+            slept,
             unreplicated: self
                 .with_view(|v| self.replicator.unreplicated(v))
                 .unwrap_or_default(),
@@ -209,6 +276,7 @@ impl Daemon {
         let transport = self.transport();
         let standin_days = filesystem.as_ref().map_or(0, |f| f.standin_days);
         let mut unheard = Vec::new();
+        let mut stranded = Vec::new();
         let members: Vec<MemberStatus> = membership
             .members()
             .into_iter()
@@ -223,6 +291,12 @@ impl Daemon {
                     match peer_health.get(&m.endpoint) {
                         Some((_, h)) if up => merge_health(&mut health, h),
                         _ => unheard.push(m.id),
+                    }
+                    if !up
+                        && let Some(r) = last_report(m.id, m.endpoint, &peer_health, now)
+                        && r.chunks > 0
+                    {
+                        stranded.push(r);
                     }
                 }
                 MemberStatus {
@@ -262,6 +336,8 @@ impl Daemon {
             unreplicated,
             repair,
             seen: _,
+            reports: _,
+            slept: _,
         } = health;
         let nodes = members.len() as u32;
         // Only members offering space, and with room left, can hold a copy.
@@ -303,6 +379,7 @@ impl Daemon {
                 &unreplicated,
                 repair.as_ref(),
                 &members,
+                &stranded,
             )
         });
         Ok(Status {
@@ -331,6 +408,7 @@ impl Daemon {
             unreplicated,
             repair,
             unheard,
+            stranded,
             log: LogStatus {
                 entries: self.fs.log_len().unwrap_or(0),
                 objects: self.fs.object_count().unwrap_or(0),

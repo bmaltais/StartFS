@@ -108,3 +108,57 @@ fn too_few_storage_nodes_for_n_copies_is_best_effort_not_a_failure() {
     c.sync();
     assert_eq!(verdict(&c, 0), Some(Verdict::BestEffort));
 }
+
+#[test]
+fn chunks_a_sleeping_member_last_reported_as_a_single_copy_put_the_data_at_risk() {
+    let c = Cluster::with_offers(2, &[BIG, BIG, 0]);
+    write(&c, 2);
+    // Its report reaches the others, then it sleeps before they confirm a copy.
+    c.advance(HELLO_INTERVAL);
+    c.tick();
+    c.tick();
+    c.crash(2);
+    c.elapse(Duration::from_secs(20 * 60));
+    let s = c.control(0).status().unwrap();
+    assert_eq!(s.members[2].state, NodeState::Down);
+    assert_eq!(s.stranded.len(), 1, "{:?}", s.stranded);
+    assert_eq!(s.stranded[0].member, s.members[2].id);
+    assert!(s.stranded[0].secs_ago >= 20 * 60 - 240);
+    assert_eq!(s.verdict, Some(Verdict::AtRisk));
+    c.restart(2);
+    c.elapse(Duration::from_secs(60));
+    let s = c.control(0).status().unwrap();
+    assert!(s.stranded.is_empty(), "{:?}", s.stranded);
+    assert_eq!(s.verdict, Some(Verdict::Safe));
+}
+
+#[test]
+fn a_sleeping_member_that_had_replicated_everything_strands_nothing() {
+    let c = Cluster::with_offers(2, &[BIG, BIG, 0]);
+    write(&c, 2);
+    c.sync();
+    c.crash(2);
+    c.elapse(Duration::from_secs(20 * 60));
+    let s = c.control(0).status().unwrap();
+    assert!(s.stranded.is_empty(), "{:?}", s.stranded);
+    assert_eq!(s.verdict, Some(Verdict::Degraded));
+}
+
+#[test]
+fn a_restarted_node_learns_from_the_others_what_a_sleeping_member_alone_may_hold() {
+    let c = Cluster::with_offers(2, &[BIG, BIG, 0]);
+    write(&c, 2);
+    c.advance(HELLO_INTERVAL);
+    c.tick();
+    c.tick();
+    c.crash(2);
+    c.elapse(Duration::from_secs(20 * 60));
+    c.crash(0);
+    c.restart(0);
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    let s = c.control(0).status().unwrap();
+    assert_eq!(s.stranded.len(), 1, "{:?}", s.stranded);
+    assert!(s.stranded[0].secs_ago >= 20 * 60 - 240);
+    assert_eq!(s.verdict, Some(Verdict::AtRisk));
+}
