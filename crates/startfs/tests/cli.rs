@@ -146,6 +146,7 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
         "1 of 3",
         "3 wanted, 1 possible",
         "usable",
+        "storage: no files yet",
     ] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
@@ -156,7 +157,19 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     assert_eq!(json["filesystem"]["name"], "home");
     assert_eq!(json["filesystem"]["copies"], 3);
     assert_eq!(json["copies_possible"], 1);
+    assert_eq!(json["efficiency"]["logical_bytes"], 0);
     assert_eq!(json["members"].as_array().unwrap().len(), 1);
+
+    // Every member's storage figures, asked for on demand.
+    let text = stdout(&startfs(data, &["stats"]));
+    assert!(
+        text.contains("on disk") && text.contains("(this node)"),
+        "{text}"
+    );
+    let rows: serde_json::Value =
+        serde_json::from_str(&stdout(&startfs(data, &["stats", "--json"]))).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["is_self"], true);
 }
 
 #[test]

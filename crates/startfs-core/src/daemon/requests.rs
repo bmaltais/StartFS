@@ -45,6 +45,7 @@ impl Daemon {
                 self.join(&token, offer_bytes)?;
                 Response::Joined
             }
+            Request::NodeStats => Response::NodeStats(self.node_reports()?),
             Request::Status => Response::Status(Box::new(self.status()?)),
         })
     }

@@ -2,12 +2,14 @@
 
 use super::{DOWN_AFTER, Daemon};
 use crate::control::{
-    GcStatus, LogStatus, MemberStatus, NodeState, Repair, Shortfall, Staging, Status, Tier, Usage,
-    Verdict,
+    GcStatus, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair, Shortfall,
+    Staging, Status, Tier, Usage, Verdict,
 };
 use crate::error::Error;
+use crate::members::{Member, Membership};
+use crate::net::NodeId;
 use crate::ops::FsOps;
-use crate::protocol::Health;
+use crate::protocol::{Health, Message};
 use std::time::Duration;
 
 /// Is the data safe right now? Copies beyond what the storage nodes allow are
@@ -57,6 +59,14 @@ fn merge_health(into: &mut Health, from: &Health) {
     }
 }
 
+/// Roughly how much data fits: the space members offer, divided by N.
+pub(super) fn usable_bytes(membership: &Membership) -> u64 {
+    let offered: u64 = membership.members().iter().map(|m| m.offer_bytes).sum();
+    membership
+        .filesystem()
+        .map_or(0, |f| offered / u64::from(f.copies.max(1)))
+}
+
 impl Daemon {
     /// This node's own replication state: what it gossips and contributes to `status`.
     pub(super) fn local_health(&self) -> Health {
@@ -68,6 +78,71 @@ impl Daemon {
                 .with_view(|v| self.replicator.repair_progress(v))
                 .flatten(),
         }
+    }
+
+    /// This node's storage figures: what it answers peers that ask.
+    pub(super) fn local_node_stats(&self) -> Result<NodeStats, Error> {
+        let stats = self.fs.stats()?;
+        Ok(NodeStats {
+            usage: Usage {
+                chunks: stats.chunks,
+                stored_bytes: stats.stored_bytes,
+                offer_bytes: self
+                    .membership
+                    .lock()
+                    .unwrap()
+                    .my_offer(self.config.offer_bytes),
+            },
+            efficiency: self.fs.efficiency()?,
+            pending_gc_bytes: self.gc.lock().unwrap().last.pending_bytes,
+        })
+    }
+
+    /// Ask every member that is up for its storage figures, and wait for the
+    /// answers together. A member that does not answer is listed without any.
+    pub(super) fn node_reports(&self) -> Result<Vec<NodeReport>, Error> {
+        let now = self.clock.now();
+        let (members, me) = {
+            let m = self.membership.lock().unwrap();
+            (m.members(), m.me())
+        };
+        let heard = self.heard.lock().unwrap().clone();
+        let up = |m: &Member| {
+            heard
+                .get(&m.endpoint)
+                .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64)
+        };
+        let asked: Vec<NodeId> = members
+            .iter()
+            .filter(|m| Some(m.id) != me && up(m))
+            .map(|m| m.endpoint)
+            .collect();
+        self.stats_replies.lock().unwrap().clear();
+        if let Some(transport) = self.transport() {
+            for peer in &asked {
+                transport.send(*peer, Message::StatsRequest.encode());
+            }
+        }
+        self.wait_for(|| {
+            let got = self.stats_replies.lock().unwrap();
+            asked.iter().all(|p| got.contains_key(p)).then_some(())
+        });
+        let mut replies = std::mem::take(&mut *self.stats_replies.lock().unwrap());
+        let mut rows = Vec::new();
+        for m in members {
+            let is_self = Some(m.id) == me;
+            rows.push(NodeReport {
+                member: m.id,
+                addr: m.addr.clone(),
+                is_self,
+                stats: if is_self {
+                    Some(self.local_node_stats()?)
+                } else {
+                    replies.remove(&m.endpoint)
+                },
+            });
+        }
+        Ok(rows)
     }
 
     pub(super) fn status(&self) -> Result<Status, Error> {
@@ -137,10 +212,7 @@ impl Daemon {
         let copies_possible = filesystem
             .as_ref()
             .map_or(0, |f| f.copies.min(storage_nodes));
-        let offered: u64 = members.iter().map(|m| m.offer_bytes).sum();
-        let usable_bytes = filesystem
-            .as_ref()
-            .map_or(0, |f| offered / u64::from(f.copies.max(1)));
+        let usable_bytes = usable_bytes(&membership);
         let mut warnings = Vec::new();
         for m in &members {
             if full.contains(&m.id) {
@@ -175,6 +247,8 @@ impl Daemon {
             verdict,
             filesystem,
             node_state: NodeState::Online,
+            // A failed survey should not hide the rest of the report.
+            efficiency: self.fs.efficiency().unwrap_or_default(),
             usage: Usage {
                 chunks: stats.chunks,
                 stored_bytes: stats.stored_bytes,

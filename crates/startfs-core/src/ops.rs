@@ -57,6 +57,15 @@ pub struct StoreStats {
     pub stored_bytes: u64,
 }
 
+/// The filesystem's size as a whole, as `df` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Space {
+    /// Bytes the files in the tree add up to.
+    pub used_bytes: u64,
+    /// What the cluster can hold, never less than `used_bytes`.
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum FsError {
     #[error("no such file or directory")]
@@ -140,6 +149,8 @@ pub trait FsOps: Send + Sync {
     fn listxattr(&self, ino: Ino) -> FsResult<Vec<String>>;
     fn removexattr(&self, ino: Ino, name: &str) -> FsResult<()>;
     fn stats(&self) -> FsResult<StoreStats>;
+    /// The whole filesystem's size: logical bytes used and cluster capacity.
+    fn space(&self) -> FsResult<Space>;
 }
 
 impl<T: FsOps + ?Sized> FsOps for Arc<T> {
@@ -205,5 +216,8 @@ impl<T: FsOps + ?Sized> FsOps for Arc<T> {
     }
     fn stats(&self) -> FsResult<StoreStats> {
         (**self).stats()
+    }
+    fn space(&self) -> FsResult<Space> {
+        (**self).space()
     }
 }

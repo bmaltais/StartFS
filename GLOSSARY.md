@@ -4,6 +4,16 @@ A filesystem replicated across a group of machines (members) that each hold its 
 
 ## Language
 
+**Logical size**:
+The bytes the files in the visible tree add up to, what the user thinks they stored. `df` reports it as used.
+_Avoid_: Apparent size
+
+**Referenced bytes**:
+The plaintext bytes of the distinct chunks the tree references; logical size against this is the dedup ratio.
+
+**Usable size**:
+What the cluster can hold: the space members offer, divided by the number of copies. `df` reports it as the size.
+
 **State transfer**:
 The sender's whole merge state, sent in bounded pieces to a member whose missing log entries were compacted away.
 _Avoid_: Snapshot, full sync

@@ -1,7 +1,7 @@
 //! The wire protocol peers speak over a [`Transport`](crate::net::Transport).
 
 use crate::chunkstore::ChunkId;
-use crate::control::{Repair, Shortfall};
+use crate::control::{NodeStats, Repair, Shortfall};
 use crate::members::{Admission, JoinRequest, Member, TokenRec};
 use crate::oplog::{Entry, Frontier, StateChunk};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,10 @@ pub enum Message {
     /// The filesystem's number of copies and the revision of that setting;
     /// the higher revision wins.
     Copies { copies: u32, rev: u64 },
+    /// "Tell me your storage figures now."
+    StatsRequest,
+    /// The sender's own storage figures, in answer to a [`Message::StatsRequest`].
+    StatsReply(NodeStats),
 }
 
 /// One member's view of its replication, as gossiped to the others.
@@ -61,7 +65,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 6;
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {

@@ -12,6 +12,7 @@ mod status;
 use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
+use crate::control::NodeStats;
 use crate::error::Error;
 use crate::fs::{ChunkSource, GcReport, LocalFs, NodeConfig};
 use crate::members::{Member, MemberId, Membership};
@@ -64,6 +65,8 @@ pub struct Daemon {
     last_gossip: Mutex<Option<Nanos>>,
     /// The latest replication health each peer gossiped.
     peer_health: Mutex<HashMap<NodeId, Health>>,
+    /// Storage figures peers sent in answer to the query in flight.
+    stats_replies: Mutex<HashMap<NodeId, NodeStats>>,
     last_gc: Mutex<Option<Nanos>>,
     /// What garbage collection has done and is waiting on, for `status`.
     gc: Mutex<GcProgress>,
@@ -152,6 +155,7 @@ impl Daemon {
                 heard: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
                 peer_health: Mutex::new(HashMap::new()),
+                stats_replies: Mutex::new(HashMap::new()),
                 last_gc: Mutex::new(None),
                 gc: Mutex::new(GcProgress::default()),
                 last_compact: Mutex::new(None),
@@ -229,6 +233,8 @@ impl Daemon {
             .my_offer(self.config.offer_bytes);
         self.fs
             .set_staging_limit(staging_limit(&self.config, offer));
+        self.fs
+            .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
         while let Some((from, raw)) = transport.recv() {
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());
