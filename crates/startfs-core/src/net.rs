@@ -28,6 +28,11 @@ pub trait Transport: Send + Sync {
     fn last_error(&self, _node: NodeId) -> Option<String> {
         None
     }
+    /// How long ago a frame from `node` last arrived, whether or not the
+    /// daemon has handled it yet; `None` when none has.
+    fn last_heard(&self, _node: NodeId) -> Option<std::time::Duration> {
+        None
+    }
     /// The transport's own smoothed round-trip time to `node`, when it has a
     /// live path to it and can measure one.
     fn rtt(&self, _node: NodeId) -> Option<std::time::Duration> {

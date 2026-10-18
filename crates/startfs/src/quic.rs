@@ -82,6 +82,8 @@ struct Shared {
     /// The live connection we dialed to each peer, for its round-trip time.
     links: Mutex<HashMap<NodeId, quinn::Connection>>,
     inbox: Mutex<Sender<(NodeId, Vec<u8>)>>,
+    /// When a frame from each peer last arrived, handled by the daemon or not.
+    heard: Mutex<HashMap<NodeId, Instant>>,
 }
 
 impl Shared {
@@ -157,6 +159,7 @@ impl QuicTransport {
             errors: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             inbox: Mutex::new(tx),
+            heard: Mutex::new(HashMap::new()),
         });
         runtime.spawn(accept_loop(shared.clone(), endpoint.clone()));
         Ok(Self {
@@ -218,6 +221,15 @@ impl Transport for QuicTransport {
 
     fn local(&self) -> NodeId {
         self.shared.local
+    }
+
+    fn last_heard(&self, node: NodeId) -> Option<Duration> {
+        self.shared
+            .heard
+            .lock()
+            .unwrap()
+            .get(&node)
+            .map(Instant::elapsed)
     }
 
     fn resolve(&self, addr: &str) -> Option<NodeId> {
@@ -340,6 +352,7 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
             reason = "best-effort: the daemon may have stopped receiving"
         )]
         let _ = shared.inbox.lock().unwrap().send((from, body));
+        shared.heard.lock().unwrap().insert(from, Instant::now());
     }
 }
 
