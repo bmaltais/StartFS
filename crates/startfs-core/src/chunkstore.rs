@@ -17,7 +17,7 @@
 
 use crate::ops::{FsError, FsResult, StoreStats};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -30,12 +30,26 @@ const CODEC_RAW: u8 = 0;
 const CODEC_ZSTD: u8 = 1;
 const ZSTD_LEVEL: i32 = 3;
 
+/// The plaintext length from an envelope's header (at least [`HEADER_LEN`] bytes).
+fn plain_len(envelope: &[u8]) -> u32 {
+    u32::from_le_bytes(envelope[4..8].try_into().unwrap())
+}
+
 fn io(e: std::io::Error) -> FsError {
     // A full disk is the one failure the user can act on: report it as ENOSPC.
     if e.raw_os_error() == Some(libc::ENOSPC) {
         return FsError::NoSpace;
     }
     FsError::Io(e.to_string())
+}
+
+/// A stored chunk as its envelope describes it.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkInfo {
+    pub disk_bytes: u64,
+    pub plain_bytes: u64,
+    /// Compressed with zstd; otherwise stored as is.
+    pub zstd: bool,
 }
 
 pub struct ChunkStore {
@@ -99,7 +113,7 @@ impl ChunkStore {
         if raw.len() < HEADER_LEN || raw[0] != FORMAT_VERSION || raw[1] != CIPHER_NONE {
             return Err(corrupt());
         }
-        let len = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+        let len = plain_len(&raw) as usize;
         let data = match raw[2] {
             CODEC_RAW => raw[HEADER_LEN..].to_vec(),
             CODEC_ZSTD => zstd::bulk::decompress(&raw[HEADER_LEN..], len).map_err(|_| corrupt())?,
@@ -140,6 +154,35 @@ impl ChunkStore {
                 let meta = f.metadata().map_err(io)?;
                 let mtime = meta.modified().map_err(io)?;
                 out.push((*hash.as_bytes(), meta.len(), mtime));
+            }
+        }
+        Ok(out)
+    }
+
+    /// What each stored chunk's envelope says about it. Reads only the
+    /// headers, so nothing is decompressed.
+    pub fn survey(&self) -> FsResult<Vec<(ChunkId, ChunkInfo)>> {
+        let mut out = Vec::new();
+        for shard in fs::read_dir(&self.root).map_err(io)? {
+            let shard = shard.map_err(io)?.path();
+            for f in fs::read_dir(&shard).map_err(io)? {
+                let f = f.map_err(io)?;
+                let name = f.file_name().to_string_lossy().into_owned();
+                let Ok(hash) = blake3::Hash::from_hex(&name) else {
+                    continue; // temporary files
+                };
+                let mut header = [0u8; HEADER_LEN];
+                fs::File::open(f.path())
+                    .and_then(|mut file| file.read_exact(&mut header))
+                    .map_err(io)?;
+                out.push((
+                    *hash.as_bytes(),
+                    ChunkInfo {
+                        disk_bytes: f.metadata().map_err(io)?.len(),
+                        plain_bytes: plain_len(&header).into(),
+                        zstd: header[2] == CODEC_ZSTD,
+                    },
+                ));
             }
         }
         Ok(out)

@@ -26,9 +26,6 @@ use std::time::Duration;
 /// nodes' changes arrive through the daemon, not through the kernel.
 const TTL: Duration = Duration::from_secs(1);
 const BLOCK: u32 = 4096;
-/// `df` has no honest answer for a replicated store; report the space used
-/// plus this much free. `startfs status` has the real figures.
-const VIRTUAL_FREE: u64 = 1 << 40;
 
 /// One entry of a readdir reply: inode, offset of the next entry, kind, name.
 pub type DirRow = (Ino, u64, FileType, String);
@@ -196,9 +193,11 @@ impl FuseAdapter {
 
     /// `(blocks, free blocks)` of [`BLOCK`] bytes.
     pub fn op_statfs(&self) -> Result<(u64, u64), Errno> {
-        let used = ok(self.fs.stats())?.stored_bytes.div_ceil(BLOCK as u64);
-        let free = VIRTUAL_FREE / BLOCK as u64;
-        Ok((used + free, free))
+        let space = ok(self.fs.space())?;
+        let block = u64::from(BLOCK);
+        let blocks = space.total_bytes.div_ceil(block);
+        let free = blocks - space.used_bytes.div_ceil(block).min(blocks);
+        Ok((blocks, free))
     }
 }
 
@@ -741,9 +740,19 @@ mod tests {
     }
 
     #[test]
-    fn statfs_reports_used_and_free_blocks() {
-        let (a, _d) = adapter();
-        let (blocks, free) = a.op_statfs().unwrap();
-        assert!(free > 0 && blocks >= free);
+    fn statfs_reports_logical_used_blocks_within_the_usable_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeConfig {
+            node: MemberId(0),
+            uid: 1000,
+            gid: 1000,
+        };
+        let fs = Arc::new(LocalFs::open(dir.path(), node, 1 << 20, Arc::new(SystemClock)).unwrap());
+        let a = FuseAdapter::new(fs.clone());
+        let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+        fs.write(f.ino, 0, &[1u8; 10_000]).unwrap();
+        assert_eq!(a.op_statfs().unwrap(), (3, 0), "no cluster: used only");
+        fs.set_usable_bytes(1 << 20);
+        assert_eq!(a.op_statfs().unwrap(), (256, 253));
     }
 }

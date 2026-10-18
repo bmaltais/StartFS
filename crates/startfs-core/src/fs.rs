@@ -46,6 +46,7 @@ mod gc;
 mod merge;
 mod replicas;
 mod scrub;
+mod usage;
 mod writebuf;
 pub use gc::GcReport;
 pub use merge::{CatchUp, ConflictCopy};
@@ -192,6 +193,8 @@ pub struct LocalFs {
     /// Whether new chunks go to staging (the node belongs to a filesystem).
     replicating: AtomicBool,
     staging_limit: AtomicU64,
+    /// What the cluster can hold, as the daemon last worked it out.
+    usable_bytes: AtomicU64,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
     source: Mutex<Option<Arc<dyn ChunkSource>>>,
@@ -243,6 +246,7 @@ impl LocalFs {
             staging: ChunkStore::open(&dir.join("staging"))?,
             replicating: AtomicBool::new(false),
             staging_limit: AtomicU64::new(u64::MAX),
+            usable_bytes: AtomicU64::new(0),
             cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
             source: Mutex::new(None),
             clock,
@@ -980,6 +984,14 @@ impl FsOps for LocalFs {
         // Space used counts what has been written so far, buffered or not.
         self.flush_all_logged(false, 0);
         self.chunks.stats()
+    }
+
+    fn space(&self) -> FsResult<Space> {
+        let used_bytes = self.logical_bytes()?;
+        Ok(Space {
+            used_bytes,
+            total_bytes: self.usable_bytes.load(Ordering::SeqCst).max(used_bytes),
+        })
     }
 }
 

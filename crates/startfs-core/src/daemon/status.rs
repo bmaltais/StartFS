@@ -6,6 +6,7 @@ use crate::control::{
     Verdict,
 };
 use crate::error::Error;
+use crate::members::Membership;
 use crate::ops::FsOps;
 use crate::protocol::Health;
 use std::time::Duration;
@@ -55,6 +56,14 @@ fn merge_health(into: &mut Health, from: &Health) {
         mine.at_risk += r.at_risk;
         mine.degraded += r.degraded;
     }
+}
+
+/// Roughly how much data fits: the space members offer, divided by N.
+pub(super) fn usable_bytes(membership: &Membership) -> u64 {
+    let offered: u64 = membership.members().iter().map(|m| m.offer_bytes).sum();
+    membership
+        .filesystem()
+        .map_or(0, |f| offered / u64::from(f.copies.max(1)))
 }
 
 impl Daemon {
@@ -137,10 +146,7 @@ impl Daemon {
         let copies_possible = filesystem
             .as_ref()
             .map_or(0, |f| f.copies.min(storage_nodes));
-        let offered: u64 = members.iter().map(|m| m.offer_bytes).sum();
-        let usable_bytes = filesystem
-            .as_ref()
-            .map_or(0, |f| offered / u64::from(f.copies.max(1)));
+        let usable_bytes = usable_bytes(&membership);
         let mut warnings = Vec::new();
         for m in &members {
             if full.contains(&m.id) {
@@ -175,6 +181,8 @@ impl Daemon {
             verdict,
             filesystem,
             node_state: NodeState::Online,
+            // A failed survey should not hide the rest of the report.
+            efficiency: self.fs.efficiency().unwrap_or_default(),
             usage: Usage {
                 chunks: stats.chunks,
                 stored_bytes: stats.stored_bytes,

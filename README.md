@@ -191,10 +191,13 @@ Identical data is stored once (deduplication) and chunks are compressed, so your
 take less of the space the machines offer than their sizes add up to. The saving depends
 on your data: copies, backups and text shrink a lot, already-compressed media barely at all.
 
-Two numbers can therefore differ. A file manager or `du --apparent-size` shows the logical
-size of the files; `df` on the mount shows what is actually stored. For example, a 2.5 MiB
-folder showed 1.7 MiB used. Per-file sizes never show the saving, only the filesystem-wide
-used figure does.
+`df` on the mount shows the logical size of your files as used, against the usable size of
+the cluster (the space the machines offer, divided by the number of copies). It does not show
+the saving. `startfs status` does, in its `storage:` lines: the size of the files, what is
+left after deduplication, how well this node's chunks compress, and what share of the
+cluster's replicas this node holds. That share is why this node's disk use can be a small
+fraction of your data: each machine stores only its part of every copy. `startfs status --json`
+has the same figures under `efficiency`.
 
 ## Surviving machine loss
 

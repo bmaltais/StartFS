@@ -434,6 +434,58 @@ fn unreplicated_line(unreplicated: &[control::Shortfall]) -> Option<String> {
     ))
 }
 
+/// `a / b` as "1.4x", or nothing when there is no `b` to compare with.
+fn ratio(a: u64, b: u64) -> Option<String> {
+    (b > 0).then(|| format!("{:.1}x", a as f64 / b as f64))
+}
+
+/// Where the space went: the files' size, what dedup and compression leave
+/// of it, and this node's share of the replicas.
+fn efficiency_lines(s: &Status, copies: u32) -> String {
+    let e = &s.efficiency;
+    if e.logical_bytes == 0 {
+        return "storage: no files yet\n".into();
+    }
+    let mut out = format!(
+        "storage: {} in files, {} after dedup",
+        human(e.logical_bytes),
+        human(e.referenced_bytes + e.inline_bytes)
+    );
+    if let Some(r) = ratio(e.logical_bytes, e.referenced_bytes + e.inline_bytes) {
+        out.push_str(&format!(" ({r})"));
+    }
+    out.push('\n');
+    out.push_str(&format!(
+        "  this node: {} on disk for {} of chunks",
+        human(e.local_disk_bytes),
+        human(e.local_plain_bytes)
+    ));
+    if let Some(r) = ratio(e.local_plain_bytes, e.local_disk_bytes) {
+        out.push_str(&format!(" (compression {r})"));
+    }
+    out.push_str(&format!(
+        ", {} compressed and {} stored as is\n",
+        e.zstd_chunks, e.raw_chunks
+    ));
+    let expected = e.referenced_bytes.saturating_mul(u64::from(copies));
+    if expected > 0 {
+        out.push_str(&format!(
+            "  this node holds {:.1}% of the {} expected across the cluster ({} cop{})\n",
+            100.0 * e.local_plain_bytes as f64 / expected as f64,
+            human(expected),
+            copies,
+            if copies == 1 { "y" } else { "ies" }
+        ));
+    }
+    if s.gc.pending_bytes > 0 {
+        out.push_str(&format!(
+            "  plus {} on this node that no file uses, waiting for garbage collection\n",
+            human(s.gc.pending_bytes)
+        ));
+    }
+    out
+}
+
 fn render(s: &Status) -> String {
     let Some(fs) = &s.filesystem else {
         return "no filesystem on this node; run `startfs create --name NAME --copies N`\n".into();
@@ -464,6 +516,7 @@ fn render(s: &Status) -> String {
         if s.nodes == 1 { "" } else { "s" }
     ));
     out.push_str(&format!("usable: about {}\n", human(s.usable_bytes)));
+    out.push_str(&efficiency_lines(s, fs.copies));
     if s.staging.chunks > 0 {
         out.push_str(&format!(
             "staging: {} in {} chunks waiting for replication\n",

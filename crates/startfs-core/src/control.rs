@@ -109,6 +109,27 @@ pub struct Usage {
     pub offer_bytes: u64,
 }
 
+/// Where the space went: what the files add up to, what dedup and
+/// compression make of it, and this node's share of the replicas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Efficiency {
+    /// Bytes the files in the tree add up to (what the user stored).
+    pub logical_bytes: u64,
+    /// Plaintext bytes of the distinct chunks the tree references (inline files not included).
+    pub referenced_bytes: u64,
+    /// Bytes of small files kept in the metadata rather than in chunks.
+    #[serde(default)]
+    pub inline_bytes: u64,
+    /// Plaintext bytes of the referenced chunks this node holds.
+    pub local_plain_bytes: u64,
+    /// What those chunks take on this node's disk.
+    pub local_disk_bytes: u64,
+    /// Of those, stored as is because compression did not help.
+    pub raw_chunks: u64,
+    /// Compressed with zstd.
+    pub zstd_chunks: u64,
+}
+
 /// Chunks written here that are waiting for replication to finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Staging {
@@ -230,6 +251,9 @@ pub struct Status {
     pub node_state: NodeState,
     /// Replica storage on this node.
     pub usage: Usage,
+    /// Dedup, compression and this node's share of the replicas.
+    #[serde(default)]
+    pub efficiency: Efficiency,
     /// Local staging area: written here, not yet released after replication.
     pub staging: Staging,
     /// Chunks fetched from peers; separate from replica storage.

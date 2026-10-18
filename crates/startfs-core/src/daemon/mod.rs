@@ -229,6 +229,8 @@ impl Daemon {
             .my_offer(self.config.offer_bytes);
         self.fs
             .set_staging_limit(staging_limit(&self.config, offer));
+        self.fs
+            .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
         while let Some((from, raw)) = transport.recv() {
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());

@@ -146,6 +146,7 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
         "1 of 3",
         "3 wanted, 1 possible",
         "usable",
+        "storage: no files yet",
     ] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
@@ -156,6 +157,7 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     assert_eq!(json["filesystem"]["name"], "home");
     assert_eq!(json["filesystem"]["copies"], 3);
     assert_eq!(json["copies_possible"], 1);
+    assert_eq!(json["efficiency"]["logical_bytes"], 0);
     assert_eq!(json["members"].as_array().unwrap().len(), 1);
 }
 

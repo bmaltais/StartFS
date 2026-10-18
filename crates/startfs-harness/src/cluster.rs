@@ -94,6 +94,9 @@ impl FsOps for NodeFs {
     fn stats(&self) -> FsResult<StoreStats> {
         self.fs()?.stats()
     }
+    fn space(&self) -> FsResult<Space> {
+        self.fs()?.space()
+    }
 }
 
 struct Node {
