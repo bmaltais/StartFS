@@ -44,7 +44,9 @@ same code with a different membership scope.
 8. **Failure handling:** timeout with automatic repair. A node unseen for a grace period (default
    30 minutes, configurable per filesystem) is treated as down and
    chunks with fewer than N reachable copies are re-replicated, rate-limited. If the node returns,
-   its copies count again and surplus copies are trimmed lazily.
+   its copies count again and surplus copies are trimmed lazily. A chunk with fewer than 2
+   reachable copies does not wait for the grace period: once a member counts as down (unseen for
+   three hello intervals), stand-in copies on other members bring the chunk back to 2, and stop there.
 
 9. **Create and join:** explicit join token. `startfs create --name home --copies 3` on the first
    machine prints a token (filesystem ID plus a bootstrap peer's tailnet address: its MagicDNS name when it has one, else its IP).

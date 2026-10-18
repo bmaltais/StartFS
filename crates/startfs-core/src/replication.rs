@@ -22,6 +22,10 @@ use std::time::Duration;
 /// How long to wait for a peer's answer before asking again.
 pub const RETRY: Duration = Duration::from_secs(5);
 
+/// Fewest reachable copies a chunk is left with: below this, repair does not
+/// wait out the grace period for a member to return.
+const MIN_COPIES: u32 = 2;
+
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
     pub me: MemberId,
@@ -30,6 +34,9 @@ pub struct View<'a> {
     pub members: &'a [Member],
     /// Members unseen past the repair grace period: never chosen to hold copies.
     pub lost: &'a HashSet<MemberId>,
+    /// Members unseen long enough to count as down (a superset of `lost`):
+    /// they may come back, but their copies cannot be relied on for now.
+    pub down: &'a HashSet<MemberId>,
     /// Space this node offers for replicas.
     pub offer: u64,
     /// Most bytes per second sent when re-replicating chunks already held.
@@ -202,6 +209,7 @@ impl Replicator {
                 .collect::<Vec<_>>(),
             view.lost
                 .iter()
+                .chain(view.down)
                 .copied()
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
@@ -263,7 +271,7 @@ impl Replicator {
             return false;
         }
         let skip: HashSet<MemberId> = st.full.union(view.lost).copied().collect();
-        let targets = place(id, view.members, view.copies, &skip);
+        let mut targets = place(id, view.members, view.copies, &skip);
         if staged
             && targets.contains(&view.me)
             && !self.fs.has_replica(id)
@@ -275,6 +283,32 @@ impl Replicator {
         }
         let track = st.tracks.get_mut(id).expect("tracked");
         let held = self.fs.has_replica(id);
+        // Down members may return, so their copies are only replaced once the
+        // grace period ends. Unless that leaves too few reachable copies: then
+        // stand-ins on other members bring it back to the minimum now.
+        let reachable = track
+            .holders
+            .iter()
+            .filter(|h| !view.down.contains(*h))
+            .count() as u32
+            + u32::from(held);
+        let coming = targets
+            .iter()
+            .filter(|t| **t != view.me && !view.down.contains(*t) && !track.holders.contains(*t))
+            .count() as u32;
+        let needed = view
+            .copies
+            .min(MIN_COPIES)
+            .saturating_sub(reachable + coming);
+        if needed > 0 {
+            let out: HashSet<MemberId> = skip.union(view.down).copied().collect();
+            let stand_ins: Vec<MemberId> = place(id, view.members, view.members.len() as u32, &out)
+                .into_iter()
+                .filter(|m| *m != view.me && !track.holders.contains(m) && !targets.contains(m))
+                .take(needed as usize)
+                .collect();
+            targets.extend(stand_ins);
+        }
         // Of several holders, only one (picked per chunk by hash, so the work
         // spreads) pushes to targets that lack the chunk, so a new target is
         // not sent it more than once.
@@ -322,6 +356,8 @@ impl Replicator {
                 .all(|t| *t == view.me && held || track.holders.contains(t));
         // Never let go of a copy while no replica exists elsewhere or here.
         if complete && track.holders.len() + usize::from(held) > 0 {
+            // Every node placement allows is accounted for, even if none was asked.
+            track.heard = true;
             self.fs.release(id);
             // Placement no longer asks this node to hold it: hand-off done.
             if held && !targets.contains(&view.me) {

@@ -207,7 +207,9 @@ filesystem) keeps N copies of every chunk on N different machines.
 - **No action is needed to recover.** A machine unseen for longer than `repair_grace_secs`
   (30 minutes by default) is treated as gone and the others re-replicate its chunks back to N
   copies. If it comes back, its copies count again. Use `startfs remove <member>` to
-  declare a dead machine gone sooner.
+  declare a dead machine gone sooner. A chunk left with fewer than 2 reachable copies is not
+  made to wait: a few seconds after a machine goes down, stand-in copies bring it back to 2
+  (and are trimmed again if the machine returns).
 - **The margin shrinks until repair finishes.** If a second machine is lost before the first
   one's data is back to N copies, you are one failure closer to loss. `startfs status`
   shows copies possible versus wanted and the repair progress.

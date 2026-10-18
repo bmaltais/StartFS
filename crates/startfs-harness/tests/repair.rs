@@ -79,8 +79,8 @@ fn after_the_grace_period_every_chunk_is_back_to_n_copies_without_user_action() 
 }
 
 #[test]
-fn an_outage_shorter_than_the_grace_period_triggers_no_repair() {
-    let c = cluster(2, 4);
+fn an_outage_shorter_than_the_grace_period_triggers_no_repair_while_two_copies_remain() {
+    let c = cluster(3, 4);
     write_files(&c, 24);
     let before = replicas(&c);
 
@@ -90,6 +90,44 @@ fn an_outage_shorter_than_the_grace_period_triggers_no_repair() {
 
     let after = replicas(&c);
     assert_eq!(&after[..3], &before[..3], "{before:?} -> {after:?}");
+}
+
+#[test]
+fn a_chunk_left_with_one_reachable_copy_is_raised_to_two_without_waiting_for_the_grace_period() {
+    let c = cluster(2, 4);
+    write_files(&c, 24);
+    let before = replicas(&c);
+    assert!(before[3] > 0, "{before:?}");
+
+    c.crash(3);
+    // Long enough to count as down, far short of the grace period.
+    c.advance(2 * MINUTE);
+    c.sync();
+
+    let after = replicas(&c);
+    assert_eq!(
+        after[..3].iter().sum::<u64>(),
+        before.iter().sum::<u64>(),
+        "{before:?} -> {after:?}"
+    );
+}
+
+#[test]
+fn stand_in_copies_made_during_a_short_outage_are_trimmed_when_the_node_returns() {
+    let c = cluster(2, 4);
+    write_files(&c, 24);
+    let before = replicas(&c);
+    c.crash(3);
+    c.advance(2 * MINUTE);
+    c.sync();
+
+    c.restart(3);
+    for _ in 0..3 {
+        c.advance(Duration::from_secs(10));
+        c.sync();
+    }
+
+    assert_eq!(replicas(&c), before);
 }
 
 #[test]
@@ -221,7 +259,7 @@ fn at_risk_chunks_are_repaired_before_degraded_ones() {
 
 #[test]
 fn the_grace_period_is_configurable() {
-    let c = cluster_with(2, 4, "repair_grace_secs = 600");
+    let c = cluster_with(3, 4, "repair_grace_secs = 600");
     write_files(&c, 24);
     let before = replicas(&c);
 

@@ -407,20 +407,22 @@ impl Daemon {
             )
         };
         let now = self.clock.now();
-        let lost = self.lost_members(&members, me, grace, now);
+        let lost = self.unseen_members(&members, me, grace, now);
+        let down = self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), now);
         Some(f(&View {
             me,
             copies,
             members: &members,
             lost: &lost,
+            down: &down,
             offer,
             repair_rate: self.config.repair_bytes_per_sec,
             now,
         }))
     }
 
-    /// Members unseen for the repair grace period: repair treats them as gone.
-    fn lost_members(
+    /// Members unseen for `secs`.
+    fn unseen_members(
         &self,
         members: &[Member],
         me: MemberId,
