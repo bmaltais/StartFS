@@ -78,8 +78,15 @@ fn a_partitioned_member_makes_the_view_partial_and_is_named() {
     assert_eq!(s.unheard.len(), 1);
     let named = s.members.iter().find(|m| m.id == s.unheard[0]).unwrap();
     assert_eq!(named.addr, c.control(2).status().unwrap().members[2].addr);
-    // What node 2 reported is not shown as current while it is out of reach.
-    assert!(s.unreplicated.is_empty());
+    // What node 2 reported is not shown as current while it is out of reach;
+    // node 0, which holds the chunk, reports it once.
+    assert_eq!(
+        s.unreplicated,
+        [Shortfall {
+            copies: 1,
+            chunks: 1
+        }]
+    );
 
     c.network().heal();
     gossip(&c);
