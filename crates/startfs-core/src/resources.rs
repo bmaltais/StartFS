@@ -31,6 +31,10 @@ pub struct Resources {
     pub swap_used_bytes: Option<u64>,
     pub memory_pressure: Option<Pressure>,
     pub cpu_pressure: Option<Pressure>,
+    /// Disk pressure of the whole machine, so it also shows another process loading the disk.
+    pub io_pressure: Option<Pressure>,
+    /// Bytes the daemon has caused to be written to storage; compare two readings for a rate.
+    pub written_bytes: Option<u64>,
     pub cgroup: Option<Cgroup>,
 }
 
@@ -97,6 +101,8 @@ mod linux {
                 .map(|(total, free)| total.saturating_sub(free) * 1024),
             memory_pressure: pressure("/proc/pressure/memory"),
             cpu_pressure: pressure("/proc/pressure/cpu"),
+            io_pressure: pressure("/proc/pressure/io"),
+            written_bytes: written_bytes(),
             cgroup: cgroup(),
         }
     }
@@ -112,6 +118,16 @@ mod linux {
         // SAFETY: sysconf has no preconditions.
         let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
         (hz > 0).then(|| (utime + stime) as f64 / hz as f64)
+    }
+
+    fn written_bytes() -> Option<u64> {
+        std::fs::read_to_string("/proc/self/io")
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("write_bytes:"))?
+            .trim()
+            .parse()
+            .ok()
     }
 
     fn pressure(path: &str) -> Option<Pressure> {
