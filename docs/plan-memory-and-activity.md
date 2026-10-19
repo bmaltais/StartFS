@@ -74,6 +74,9 @@ Remaining" is what settles that, and nobody has looked at it yet.
    swap, had one tick of 195.7 s and was `down` for about 3 minutes, and is still at 5.6 GiB with an
    empty inbox. No restart or crash. This is #78 on a receiver, and it is the most dangerous open
    item: it can take any node out.
+   Restarting `mini1` afterwards (user's call) brought it to 91 MiB and quiet in 60 s, with a 29,908
+   entry inbox burst at 45 s costing only 43 MiB: a restart is cheap in memory, so the growth came
+   from the join storm, not from the rescan.
 5. **Retries add load.** A timed-out send is retried at once; peers online showed 9,108 retried
    against 15,180 acknowledged (ocilab1) and 9,174 against 12,230 (mini1).
 6. **Weak nodes hold the most data.** Placement is weighted by `offer`, and the VPSes offered 100 GiB
@@ -105,6 +108,12 @@ then visibility, then the rest.
 
 Operating measure until #84: give the weak nodes a small offer so they hold less, and add a member
 only when the cluster is quiet. Not part of this order: #45, #56, #59.
+
+Keep the weak nodes' large offers for testing the fix, not for production: offer-weighted placement
+is what gives the slowest machines the most data, so 10 GiB desktops against 100 GiB weak nodes (as
+on the live cluster) is the worst case to reproduce. Do that on loopback, with the node capped to 2
+vCPU (`CPUQuota=`), 4 GiB (`MemoryMax=`) and 500 IOPS, and do not use the live cluster as the test
+bed until the fix exists: each failed join cost a node dropout.
 
 ## Releases and upgrades
 
