@@ -4,6 +4,9 @@ Written 2026-10-18, after a large copy left the cluster showing `data: AT RISK` 
 the daemon on 3090 at 2.4 GB of memory. Investigation: #65. This plan says which issues to do, in
 what order, and how to test each when it is ready. Update it as issues land.
 
+Revised the same day after the activity view (1.4.0) and the purge (1.5.0) ran on the real cluster:
+the problem is bigger and different from what the plan assumed. See "What the live runs showed".
+
 ## What we know (from #65, measured on `de69ac3`, before #62)
 
 - Memory is on the **receiving** side and scales with the burst; it is not given back afterwards.
@@ -14,17 +17,48 @@ what order, and how to test each when it is ready. Update it as issues land.
 - Deleting data does not free disk for 7 days (`gc_retention_secs`, fixed at `create`) and only once
   every member's frontier has been seen, so a flapping member holds reclaim back.
 
+## What the live runs showed (2026-10-18)
+
+Samples: `docs/baselines/2026-10-18-live-1.4.0-burst/`. A 374 MB copy into one node of the 7-member
+cluster, then a rolling upgrade of all members, then a purge.
+
+1. **The writer, not only the receiver, grows without bound.** Daemon RSS 111 MiB to 10 GiB, not given
+   back. No counted structure explains it (#78).
+2. **The single tick thread is the limit, with every peer online.** 94 to 98% busy for about 6
+   minutes, ~8,500 timeouts a minute on all six paths: a retry loop on a slow tick (#74).
+3. **A restart makes every node re-check every chunk.** Rolling restarts of 7 nodes meant about 14
+   overlapping full rescans per node and `DEGRADED` for ~7 minutes, with almost no data moved (#82).
+4. **Slow cloud disks are the worst case.** vps1 and vps2 (the 100 GiB nodes that, by offer-weighted
+   placement, hold the most data) hit their IOPS ceiling: ~540 writes/s at ~200 ms, the daemon issuing
+   thousands of small `meta.redb` page writes a second, tick blocked in write throttling, inbox 13k
+   messages and still growing 30 minutes later. They stayed `up` (hellos have their own thread since
+   #62) while minutes behind, which nothing reports (#85, #84, #83).
+5. **The purge works, and the gate works.** Five nodes freed ~50 to 350 MB each in under a minute and
+   stayed `SAFE`; their reclaim waited for vps1 exactly as designed. The two stuck nodes never saw the
+   `Purge` message because it sat in their inbox.
+6. **Operating lessons.** Do not restart a struggling node (another rescan). Do not purge or upgrade
+   the next node until `startfs activity` shows an empty inbox and `data: SAFE`. A node whose disk
+   cannot keep up can be stopped (`systemctl --user stop startfs`) without losing data; the others
+   re-replicate its chunks after the 30 minute grace period.
+
+State of the live cluster at the time of writing: vps2 stopped on purpose, vps1 still stuck; the
+others `SAFE`. Bring them back only after #85 is addressed.
+
 ## Order
 
 | # | Issue | Why here | Depends on |
 |---|---|---|---|
-| 0 | #70 memory profile script | merged; the measuring tool for everything below | none |
-| 1 | #63 activity view, one node | merged (#73, #75), released as 1.4.0; its live checkpoint is still to run; no protocol change; shows the rest on a real node | none |
-| 2 | #78 outbound memory, with #66 bound the inbound path | the actual defect; needs a short grilling round first (byte bound, frame caps per message type, protocol bump or not). #62 only caps messages drained per tick (it is a liveness fix); the inbox is still an unbounded channel, and a smaller drain lets a burst queue up longer, so read #62 before starting | #63 helps measure it |
-| 3 | #67 redb cache size | small, independent, safe to do alongside #2 | none |
-| 4 | #68 drop unclaimed chunk replies | small, independent | none |
-| 5 | #69 return freed memory to the OS | only worth deciding once #66 changes the peak | #66 |
-| 6 | #64 cluster-wide activity | needs a protocol bump (ADR 0002) | #63; ship in the same release as #66 if #66 also bumps the protocol, so members upgrade in lockstep once |
+| 0 | #70 memory profile script | done; the measuring tool for everything below | none |
+| 1 | #63 activity view, one node | done (#73, #75), released as 1.4.0, run live; its remaining skill rows come from the items below | none |
+| 2 | #77 purge | done (#80), released as 1.5.0 (protocol 12); run live | none |
+| 3 | #85 `meta.redb` write flood | **first**: it is what keeps the slow nodes stuck, and it makes every burst and every rescan worse. Diagnose which transaction, then batch it. Needs a throttled-disk reproduction (loopback with an IOPS cap) | none |
+| 4 | #74 tick saturation / retry loop | second: bound the work per tick and stop counting an ask as timed out while the tick itself is late | #85 may change the numbers |
+| 5 | #82 rescan after restart | third: re-check only chunks whose placement changed, debounce membership changes, report "re-checking" apart from real shortfalls | none |
+| 6 | #78 outbound memory, with #66 bound the inbound path | the 10 GiB growth; the outbound queue is the lead and is not in the activity view yet, so add it first. Needs a short grilling round (byte bound, frame caps, protocol bump or not) | #63 |
+| 7 | #83 I/O pressure and write rate in `activity`; #84 report lagging nodes and weight placement | visibility, then use: #83 is small and safe now; #84 changes the hello (protocol bump), so ship it with #66 or #64 | #85 for the numbers; #84 with #64 |
+| 8 | #67 redb cache size, #68 unclaimed chunk replies | small, independent | none |
+| 9 | #69 return freed memory to the OS | only worth deciding once #66/#78 change the peak | #66 |
+| 10 | #64 cluster-wide activity | needs a protocol bump (ADR 0002); would have shown vps1 as minutes behind | #63; same release as #66/#84 |
 
 ## Releases and upgrades
 
@@ -42,7 +76,21 @@ sees every path from both ends.
   restart next to any result, since it resets counters and memory.
 - After upgrading, confirm each member runs the new version (`startfs --version`) before the test.
 
-Releases so far for this plan: 1.4.0 (#63, no protocol change); 1.5.0 (#77 purge, **protocol 12**: upgrade every member together, then `startfs purge` clears the test data).
+Releases so far for this plan: 1.4.0 (#63, no protocol change); 1.5.0 (#77 purge, **protocol 12**:
+upgrade every member together, then `startfs purge` clears the test data).
+
+How to upgrade every member (learned the hard way on 2026-10-18, when seven restarts in a row left
+four nodes minutes behind):
+
+- Upgrade one member at a time. Between members wait until, on the member just upgraded and on one
+  other, `startfs activity` shows an inbox near 0 and a normal tick, and `startfs status` says
+  `data: SAFE`. For a protocol bump the members cannot talk until all match, so upgrade them close
+  together, but still expect a rescan on each (#82) and do not start a burst or a purge until they
+  settle.
+- Check the slow-disk members (the VPSes) with `cat /proc/pressure/io`; if it stays high after their
+  restart, leave them alone and wait, do not restart again.
+- `startfs stats` and `startfs purge` need every member responsive; a member stuck behind a long
+  inbox shows "no answer" and holds the reclaim gate for the others.
 
 ## When to test
 
@@ -52,7 +100,9 @@ upgraded. Each checkpoint names the data it needs (see "Test data") and what mus
 | After | Checkpoint | How | Must hold |
 |---|---|---|---|
 | now (before #63) | Baseline on current `main` | memory and write-path runs done 2026-10-18, see `docs/baselines/`; rerun `profile-write.sh` on a quiet machine for the #63 overhead comparison | numbers exist for `main` with #62 in |
-| #63 | Instrumented burst on the real cluster | release 1.4.0, upgrade every member, `make-tree.py` with a new seed into one node's mount, run `startfs activity` on it and on a receiver every minute | each reading in the skill section is explained by `status`; the skill rows marked "not yet observed" get real output; overhead under 1% (measured on 3 loopback nodes: -0.7%, `docs/validation.md` section 6) |
+| #63 | Instrumented burst on the real cluster | done 2026-10-18: release 1.4.0, a 374 MB copy sampled every 20 s (`docs/baselines/2026-10-18-live-1.4.0-burst/`); overhead -0.7% on 3 loopback nodes (`docs/validation.md` section 6) | met; it found #74, #78, #82, #85 |
+| #85 | Throttled-disk run | loopback cluster with one node's device capped (`systemd-run -p IOWriteIOPSMax=`), apply a `make-tree.py` burst | that node's tick stays under a second and its inbox drains; `pwrite64` calls fall by an order of magnitude |
+| #82 | Rolling restart | restart each node of the loopback or real cluster in turn, sample `status` and `activity` | `data` stays `SAFE` (or says re-checking); question rate bounded by changed placement |
 | #66 | Bound holds | `profile-memory.sh` at the baseline load and at 5x (`FILES=20000 BIG=1000`), both modes | receiver peak stays near the bound while the load grows 5x |
 | #66 | Live catch-up | restart a node that was away, with `startfs activity` open on a peer | inbound bytes stay under the bound; RSS does not climb past baseline plus the bound |
 | #67, #68 | Regression | `profile-write.sh`, harness tests | no slowdown; tests pass |
@@ -160,32 +210,30 @@ cp -r /tmp/burst ~/StartFS/burst-$(date +%s)
 - `scripts/profile-memory.sh` builds its own random files (`FILES`, `BIG`). It is equivalent for
   the isolated runs; switching it to `make-tree.py` is a small follow-up if the shapes should match
   exactly.
-- Delete test trees from the mount when done; space comes back after the 7 day retention.
-- Do not delete and re-copy the same tree to repeat a test: deleting frees nothing for 7 days, and
-  the copy re-references the chunks still there, so almost nothing crosses the network.
+- Delete test trees from the mount when done, then `startfs purge` (1.5.0 or newer, every member up and
+  responsive) frees the space at once. Without a purge it comes back only after the 7 day retention.
+- Do not delete and re-copy the same tree to repeat a test without a purge between: the copy
+  re-references the chunks still there, so almost nothing crosses the network. Use a fresh seed.
 - Restarting a daemon resets its counters and memory; note any restart next to a result.
 - Peers that are down change what you see. Check `startfs status` and `tailscale ping` for the VPSes
   before blaming the software; vps1 and vps2 took turns being unreachable during the original report.
 
-## Found by #63
+## Issues found by the live runs
 
-Live burst on 1.4.0 (`docs/baselines/2026-10-18-live-1.4.0-burst/`): a 374 MB copy took the writer's
-daemon from 111 MiB to 10 GiB, kept the tick 94 to 98% busy for about 6 minutes and took 8 minutes to
-reach `SAFE`.
-
-- #78: the memory growth. It is on the writer and none of the counted structures explain it; the
-  outbound queue is the lead and is not yet in the activity view. Do it with #66: the inbound bound
-  alone will not cap this.
-- #77: purge deleted data on request, so repeat bursts do not fill disks. Do it before the next live
-  burst; until then each live run costs a week of disk on three nodes.
-
-- #74 (updated with the live run: it happens with every peer online, a retry loop on a slow tick): a peer that never answers keeps the tick 80 to 90% busy and slows transfers to the healthy
-  peers (loopback run: `replicate` phase 43 ms per tick, 47,804 timeouts a minute). Likely behind the
-  original slow copy; fix it and recheck with `startfs activity` on the live cluster.
+- #74 tick saturation and retry loop; #78 memory growth to 10 GiB; #82 rescan after restart; #85
+  `meta.redb` write flood; #83 I/O pressure in `activity`; #84 report lagging nodes and weight
+  placement. #77 (purge) is done.
+- The plan's earlier assumption that the writer stays small, and that the inbound path is "the actual
+  defect", did not survive: the writer reached 10 GiB, and the slow-disk nodes were hurt by their own
+  write volume more than by inbound bytes.
 
 ## Open questions
 
 - What did #62 change about the memory behaviour? Baseline rerun: settled receiver memory looks higher (258 to 271 against 149 MiB) and the malloc settings now cut the peak by half; one run each, repeat before relying on either.
 - `quic.rs` `local_api` tests failed once in `scripts/check.sh` and passed on rerun and alone; a flaky test, not investigated.
-- Is a way to purge deleted data on request wanted, given the 7 day retention? Not filed.
-- Is the 3090 daemon's 2.4 GB reproducible with a multi-GB inbound burst? Test once #63 can show it.
+- Answered: purge on request was wanted and exists (#77, 1.5.0). The 3090 growth reproduced on the
+  writer at 10 GiB (#78).
+- Should `offer` stay the placement weight, or should a node have a separate `weight` (#84)? The
+  slowest disks currently hold the most data.
+- Which `meta.redb` transaction produces the write flood (#85)? Nothing in this plan is measured on a
+  throttled disk until that is answered.
