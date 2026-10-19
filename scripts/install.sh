@@ -4,7 +4,7 @@
 # Run it again on every machine to upgrade; the README ("Upgrading") explains each step.
 #
 # Environment:
-#   STARTFS_VERSION=v1.5.0   install this release instead of the latest (may be a downgrade)
+#   STARTFS_VERSION=v1.5.1   install this release instead of the latest (may be a downgrade)
 #   INSTALL_DIR=DIR          where the binary goes (default ~/.local/bin)
 #   STARTFS_NO_SERVICE=1     install files only; never stop, start or enable the service
 #   STARTFS_BASE_URL=URL     download releases from URL/<tag>/ (testing)
