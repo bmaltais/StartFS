@@ -7,6 +7,10 @@ what order, and how to test each when it is ready. Update it as issues land.
 Revised the same day after the activity view (1.4.0) and the purge (1.5.0) ran on the real cluster:
 the problem is bigger and different from what the plan assumed. See "What the live runs showed".
 
+Revised again on 2026-10-19 after #85 was diagnosed and fixed (1.5.1) and vps2 was put back into the
+live cluster: the weak nodes are not limited by their disk alone, and one of them took a healthy node
+down. See "What the 2026-10-19 runs showed" and the new order.
+
 ## What we know (from #65, measured on `de69ac3`, before #62)
 
 - Memory is on the **receiving** side and scales with the burst; it is not given back afterwards.
@@ -41,24 +45,75 @@ cluster, then a rolling upgrade of all members, then a purge.
    cannot keep up can be stopped (`systemctl --user stop startfs`) without losing data; the others
    re-replicate its chunks after the 30 minute grace period.
 
-State of the live cluster at the time of writing: vps2 stopped on purpose, vps1 still stuck; the
-others `SAFE`. Bring them back only after #85 is addressed.
+State of the live cluster on 2026-10-18: vps2 stopped on purpose, vps1 still stuck; the others `SAFE`.
+
+## What the 2026-10-19 runs showed
+
+The live disks (vps1, vps2): Azure `Standard_B2als_v2` (2 burstable vCPU, 4 GiB; the VM allows 3,750
+uncached IOPS, so the VM is not the limit) with an Azure Standard HDD of 256 GiB: a hard 500 IOPS and
+60 MB/s. That is the 540 writes/s at 200 ms of #85, a real ceiling and not drained burst credits. CPU
+steal was 0 on both, but a drained credit bank may not show as steal; the portal metric "CPU Credits
+Remaining" is what settles that, and nobody has looked at it yet.
+
+1. **#85 was `reconcile`.** It rewrote every directory entry, name and inode on each rebuild (and, until
+   #87, once per message), so applying even one entry cost writes proportional to the whole tree: 779
+   write syscalls for one new file on 20,000 files, about 1.5 s on a 500 IOPS disk, on every tick that
+   applied entries. Fixed in 1.5.1 (#87, #89): 22 write syscalls, flat. Not yet seen on the live nodes.
+   The loopback copy and restart runs never reproduced the live flood (the copy is limited by chunk
+   fsyncs, the restart by the rescan), so the proof is the one-entry test, not an end-to-end run.
+2. **Upgrading the five nodes in the cluster on 1.5.1 was calm.** About 22,000 objects on fast disks:
+   quiet in 1 and 2.7 minutes; `mini1` went `DEGRADED`, briefly `AT RISK` (2 chunks), with a burst of
+   54,582 inbox entries, `SAFE` after 80 s.
+3. **Putting vps2 back as a new empty member did not work.** Every node ran 76 to 98% busy; about
+   5,300 chunks waited for a copy; `data: AT RISK` was shown while `repair` said 0 at risk. On vps2
+   the tick was 91 to 99% busy with one thread at 99.9% CPU, the replicate phase 89 ms of a 102 ms
+   tick (its cost grows with the queue), a queue stuck at 4,575 chunks, `cpu pressure` 39%, the daemon
+   at 1.4 GiB of 3.8 GiB. The disk was idle (0 to 40 writes per 5 s), so this is CPU, not the #85
+   flood. It was removed again and stopped; its old data is kept at `~/.local/share/startfs.old-20261019`.
+4. **A healthy node was taken down.** `mini1` (7.8 GiB) grew to 5.6 GiB resident, filled its 4 GiB of
+   swap, had one tick of 195.7 s and was `down` for about 3 minutes, and is still at 5.6 GiB with an
+   empty inbox. No restart or crash. This is #78 on a receiver, and it is the most dangerous open
+   item: it can take any node out.
+   Restarting `mini1` afterwards (user's call) brought it to 91 MiB and quiet in 60 s, with a 29,908
+   entry inbox burst at 45 s costing only 43 MiB: a restart is cheap in memory, so the growth came
+   from the join storm, not from the rescan.
+5. **Retries add load.** A timed-out send is retried at once; peers online showed 9,108 retried
+   against 15,180 acknowledged (ocilab1) and 9,174 against 12,230 (mini1).
+6. **Weak nodes hold the most data.** Placement is weighted by `offer`, and the VPSes offered 100 GiB
+   against 10 GiB for the desktops, so the slowest machines got the largest share. Lowering a weak
+   node's offer (`startfs config --offer`) is an operating measure that needs no code, until #84.
+
+A node cannot tell why it is slow (an empty credit bank and an IOPS cap both look like long ticks),
+so the answer is to react to its own symptoms: #91.
 
 ## Order
+
+Ranked by value on 2026-10-19: what takes a node out comes first, then what makes everything slow,
+then visibility, then the rest.
 
 | # | Issue | Why here | Depends on |
 |---|---|---|---|
 | 0 | #70 memory profile script | done; the measuring tool for everything below | none |
-| 1 | #63 activity view, one node | done (#73, #75), released as 1.4.0, run live; its remaining skill rows come from the items below | none |
+| 1 | #63 activity view, one node | done (#73, #75), released as 1.4.0, run live | none |
 | 2 | #77 purge | done (#80), released as 1.5.0 (protocol 12); run live | none |
-| 3 | #85 `meta.redb` write flood | **first**: it is what keeps the slow nodes stuck, and it makes every burst and every rescan worse. Diagnose which transaction, then batch it. Needs a throttled-disk reproduction (loopback with an IOPS cap) | none |
-| 4 | #74 tick saturation / retry loop | second: bound the work per tick and stop counting an ask as timed out while the tick itself is late | #85 may change the numbers |
-| 5 | #82 rescan after restart | third: re-check only chunks whose placement changed, debounce membership changes, report "re-checking" apart from real shortfalls | none |
-| 6 | #78 outbound memory, with #66 bound the inbound path | the 10 GiB growth; the outbound queue is the lead and is not in the activity view yet, so add it first. Needs a short grilling round (byte bound, frame caps, protocol bump or not) | #63 |
-| 7 | #83 I/O pressure and write rate in `activity`; #84 report lagging nodes and weight placement | visibility, then use: #83 is small and safe now; #84 changes the hello (protocol bump), so ship it with #66 or #64 | #85 for the numbers; #84 with #64 |
-| 8 | #67 redb cache size, #68 unclaimed chunk replies | small, independent | none |
-| 9 | #69 return freed memory to the OS | only worth deciding once #66/#78 change the peak | #66 |
-| 10 | #64 cluster-wide activity | needs a protocol bump (ADR 0002); would have shown vps1 as minutes behind | #63; same release as #66/#84 |
+| 3 | #85 `meta.redb` write flood | the cause (`reconcile` rewriting the tree) is fixed in 1.5.1 (#87, #89, #88); keep it open until a weak node with a large tree is seen live. Still to do: the rebuild still reads the whole tree (CPU), and the local-write rebuilds are unmeasured | none |
+| 4 | #78 memory growth, with #66 bound the inbound path and #91 step 1 | **first now**: `mini1` went to 5.6 GiB and dropped out; this takes healthy nodes down and is unbounded. The memory is outside the structures `activity` lists, so find it (allocator? decoded or transfer buffers? state chunks?) with `profile-memory.sh` while a member joins, then bound it by bytes | #63 |
+| 5 | #74 tick saturation and retry loop, with #91 steps 2 and 3 | second: the replicate phase costs time proportional to the queue and retries add load to a node already behind; give the tick a budget, shed optional work over it, back off per peer on timeouts | none |
+| 6 | #82 rescan after restart, joins and flapping | third: also covers adding a member (every node re-plans placement and rescans); pace it, re-check only what changed, and show "re-checking" instead of `AT RISK` when `repair` says 0 at risk | none |
+| 7 | #91 self-protecting nodes (umbrella) | steps 1 to 3 are the items above, no protocol change; step 4 (advertise load) goes with #84 | #78, #74 |
+| 8 | #83 I/O pressure and write rate in `activity`; #84 report lagging nodes and weight placement | #83 is small and safe now and feeds #91; #84 changes the hello (protocol bump), so ship it with #66 or #64; it is what finally lets a weak node hold less | #85 for the numbers; #84 with #64 |
+| 9 | #67 redb cache size, #68 unclaimed chunk replies | small, independent | none |
+| 10 | #69 return freed memory to the OS | decide once #78/#66 change the peak; may be part of #78 | #66 |
+| 11 | #64 cluster-wide activity | needs a protocol bump (ADR 0002); would have shown vps1 as minutes behind | #63; same release as #66/#84 |
+
+Operating measure until #84: give the weak nodes a small offer so they hold less, and add a member
+only when the cluster is quiet. Not part of this order: #45, #56, #59.
+
+Keep the weak nodes' large offers for testing the fix, not for production: offer-weighted placement
+is what gives the slowest machines the most data, so 10 GiB desktops against 100 GiB weak nodes (as
+on the live cluster) is the worst case to reproduce. Do that on loopback, with the node capped to 2
+vCPU (`CPUQuota=`), 4 GiB (`MemoryMax=`) and 500 IOPS, and do not use the live cluster as the test
+bed until the fix exists: each failed join cost a node dropout.
 
 ## Releases and upgrades
 
@@ -101,7 +156,9 @@ upgraded. Each checkpoint names the data it needs (see "Test data") and what mus
 |---|---|---|---|
 | now (before #63) | Baseline on current `main` | memory and write-path runs done 2026-10-18, see `docs/baselines/`; rerun `profile-write.sh` on a quiet machine for the #63 overhead comparison | numbers exist for `main` with #62 in |
 | #63 | Instrumented burst on the real cluster | done 2026-10-18: release 1.4.0, a 374 MB copy sampled every 20 s (`docs/baselines/2026-10-18-live-1.4.0-burst/`); overhead -0.7% on 3 loopback nodes (`docs/validation.md` section 6) | met; it found #74, #78, #82, #85 |
-| #85 | Throttled-disk run | loopback cluster with one node's device capped (`systemd-run -p IOWriteIOPSMax=`), apply a `make-tree.py` burst | that node's tick stays under a second and its inbox drains; `pwrite64` calls fall by an order of magnitude |
+| #85 | Throttled-disk run | done 2026-10-19 (`docs/validation.md` section 7): loopback with the device capped to 500 IOPS and 60 MB/s; a 1,000-file tree is too small to stall either build, so the proof is the one-entry-on-a-big-tree test (779 -> 22 write syscalls) | met in the test; the live check (a weak node with about 26,000 objects) is open |
+| #78, #66, #91 | A member joins a capped node | `profile-memory.sh` or `profile-restart.sh` with a new empty member joining, node capped to 2 vCPU (`CPUQuota=`), 4 GiB (`MemoryMax=`) and 500 IOPS | no node above its normal memory plus the bound; no member leaves `up`; the tick stays in a normal range after a few seconds |
+| #91 | Live: vps2 back in | after the items above, add vps2 alone, sample with `startfs activity` and `/proc/pressure` | vps2 `up` throughout, `data` returns to `SAFE`, no other node above its baseline |
 | #82 | Rolling restart | restart each node of the loopback or real cluster in turn, sample `status` and `activity` | `data` stays `SAFE` (or says re-checking); question rate bounded by changed placement |
 | #66 | Bound holds | `profile-memory.sh` at the baseline load and at 5x (`FILES=20000 BIG=1000`), both modes | receiver peak stays near the bound while the load grows 5x |
 | #66 | Live catch-up | restart a node that was away, with `startfs activity` open on a peer | inbound bytes stay under the bound; RSS does not climb past baseline plus the bound |
@@ -222,7 +279,7 @@ cp -r /tmp/burst ~/StartFS/burst-$(date +%s)
 
 - #74 tick saturation and retry loop; #78 memory growth to 10 GiB; #82 rescan after restart; #85
   `meta.redb` write flood; #83 I/O pressure in `activity`; #84 report lagging nodes and weight
-  placement. #77 (purge) is done.
+  placement. #77 (purge) is done. From 2026-10-19: #91 (a node that is too slow should protect itself).
 - The plan's earlier assumption that the writer stays small, and that the inbound path is "the actual
   defect", did not survive: the writer reached 10 GiB, and the slow-disk nodes were hurt by their own
   write volume more than by inbound bytes.
@@ -235,5 +292,11 @@ cp -r /tmp/burst ~/StartFS/burst-$(date +%s)
   writer at 10 GiB (#78).
 - Should `offer` stay the placement weight, or should a node have a separate `weight` (#84)? The
   slowest disks currently hold the most data.
-- Which `meta.redb` transaction produces the write flood (#85)? Nothing in this plan is measured on a
-  throttled disk until that is answered.
+- Answered: the `meta.redb` flood was `reconcile` rewriting the whole tree (#85, 1.5.1). Whether that was
+  all of it on the live nodes is not yet seen.
+- Was vps2 CPU-throttled (credits) during the join? Only the Azure metric "CPU Credits Remaining" for
+  vps2 around 11:15 to 11:20 UTC on 2026-10-19 can say; if it is near 0 then that run measured the
+  throttle, and a bigger VM would be the fix.
+- Where do mini1's 5.6 GiB go when no counted structure holds them (#78)?
+- What should a weak node be: a full member with a self-limited load (#91), or a light member holding
+  fewer chunks (#84)? Probably both, in that order.
