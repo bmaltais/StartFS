@@ -357,6 +357,10 @@ pub struct Status {
     pub unreplicated: Vec<Shortfall>,
     /// Re-replication under way, summed over this node and the reachable members.
     pub repair: Option<Repair>,
+    /// Chunks this node holds that it is still asking the other members about, after a restart
+    /// or a change of membership: not counted as short of copies until the answers are in.
+    #[serde(default)]
+    pub rechecking: u64,
     /// Members whose replication state is missing from `unreplicated` and
     /// `repair`: unreachable, or not heard from yet. Empty when the view is complete.
     pub unheard: Vec<MemberId>,

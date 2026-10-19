@@ -118,6 +118,8 @@ struct Epoch {
     members: Vec<(MemberId, u64, u64)>,
     /// Members lost or down.
     unreachable: BTreeSet<MemberId>,
+    /// Members lost: never chosen to hold copies.
+    lost: BTreeSet<MemberId>,
     asleep: BTreeSet<MemberId>,
     /// Members whose stand-ins are kept.
     kept: BTreeSet<MemberId>,
@@ -132,6 +134,8 @@ struct State {
     silent: HashMap<MemberId, Nanos>,
     /// The copies and membership (id, offer, revision) placement last used.
     epoch: Option<Epoch>,
+    /// The members that epoch placed chunks among, to tell which chunks a change moves.
+    placed: Vec<Member>,
     /// Bytes of re-replication allowed right now; goes negative after a send.
     allowance: i64,
     allowance_at: Option<Nanos>,
@@ -164,6 +168,61 @@ fn retry_delay(silent: &HashMap<MemberId, Nanos>, view: &View<'_>, peer: MemberI
     });
     let silence = since.map_or(0, |at| view.now.saturating_sub(at));
     (silence / 2).clamp(RETRY.as_nanos() as u64, MAX_RETRY.as_nanos() as u64)
+}
+
+/// How many stand-in copies a chunk needs on top of its targets, given who is known to hold it
+/// and whether this node does. A down member may return, so its copy is only replaced once the
+/// grace period ends, unless that leaves too few reachable copies; a member that is only asleep
+/// is covered for up to N copies, so the chunk does not go degraded for the night.
+fn standins_needed(
+    view: &View<'_>,
+    targets: &[MemberId],
+    holders: &BTreeSet<MemberId>,
+    held: bool,
+) -> u32 {
+    let reachable =
+        holders.iter().filter(|h| !view.down.contains(*h)).count() as u32 + u32::from(held);
+    let coming = targets
+        .iter()
+        .filter(|t| **t != view.me && !view.down.contains(*t) && !holders.contains(*t))
+        .count() as u32;
+    let needed = view
+        .copies
+        .min(MIN_COPIES)
+        .saturating_sub(reachable + coming);
+    let awake = holders
+        .iter()
+        .filter(|h| !view.sleeping.contains(*h))
+        .count() as u32
+        + u32::from(held);
+    let awake_coming = targets
+        .iter()
+        .filter(|t| **t != view.me && !view.sleeping.contains(*t) && !holders.contains(*t))
+        .count() as u32;
+    let asleep = targets
+        .iter()
+        .chain(holders)
+        .filter(|m| view.sleeping.contains(*m))
+        .collect::<HashSet<_>>()
+        .len() as u32;
+    needed.max(asleep.min(view.copies.saturating_sub(awake + awake_coming)))
+}
+
+/// Whether a chunk held here is only waiting for peers to say who holds it: an ask went out
+/// less than a retry delay ago and has not been answered by a member that could. Such a chunk
+/// is being checked, not short of copies: a restart or a change of membership asks about many
+/// chunks at once and the answers take a while.
+fn awaiting(track: &Track, view: &View<'_>, silent: &HashMap<MemberId, Nanos>) -> bool {
+    track.sent.iter().any(|(m, at)| {
+        // A peer silent for more than a couple of retries is not slow to answer, it is not
+        // answering: the chunk is short of copies, not being checked.
+        retry_delay(silent, view, *m) <= RETRY.as_nanos() as u64
+            && !track.holders.contains(m)
+            && !track.answered.contains(m)
+            && !view.down.contains(m)
+            && !view.lost.contains(m)
+            && view.now.saturating_sub(*at) < RETRY.as_nanos() as u64
+    })
 }
 
 pub fn tier(copies: u32) -> Tier {
@@ -260,6 +319,58 @@ impl Replicator {
         }
     }
 
+    /// Membership, offers or reachability changed: check again the chunks the change touches.
+    /// What was learned about the chunks being worked on is kept; of the others (held and
+    /// complete) only those whose targets moved, or that need stand-ins or a hand-off now, are
+    /// tracked again, so a member that restarts or flaps does not make every node ask about
+    /// every chunk it holds.
+    fn replan(&self, st: &mut State, view: &View<'_>, epoch: Epoch) {
+        let old = st.epoch.replace(epoch);
+        let old_members = std::mem::replace(&mut st.placed, view.members.to_vec());
+        let old_full = std::mem::take(&mut st.full);
+        st.scanned = false;
+        let new = st.epoch.as_ref().expect("just set");
+        let Some(old) = old.filter(|old| old.copies == new.copies) else {
+            // The first look, or N changed: every chunk is checked against placement.
+            st.tracks.clear();
+            for id in self.fs.held().unwrap_or_default() {
+                st.tracks.entry(id).or_default();
+            }
+            return;
+        };
+        // What the old view made of the answers (who would take the chunk, who was asked) does
+        // not carry over: those chunks are asked again. Who holds a chunk does, unless the
+        // member is down or lost, whose copy is not relied on.
+        for track in st.tracks.values_mut() {
+            track.holders.retain(|h| !new.unreachable.contains(h));
+            track.missing.clear();
+            track.answered.clear();
+            track.sent.clear();
+            track.settled = false;
+            track.wake = 0;
+        }
+        let old_skip: HashSet<MemberId> = old_full
+            .into_iter()
+            .chain(old.lost.iter().copied())
+            .collect();
+        let new_skip = view.lost.clone();
+        for id in self.fs.held().unwrap_or_default() {
+            if st.tracks.contains_key(&id) {
+                continue;
+            }
+            let was = place(&id, &old_members, old.copies, &old_skip);
+            let now = place(&id, view.members, view.copies, &new_skip);
+            let holders: BTreeSet<MemberId> =
+                now.iter().copied().filter(|m| *m != view.me).collect();
+            if was != now
+                || !now.contains(&view.me)
+                || standins_needed(view, &now, &holders, true) > 0
+            {
+                st.tracks.insert(id, Track::default());
+            }
+        }
+    }
+
     /// One round: do whatever is due. Returns whether anything was sent.
     pub fn poll(&self, view: &View<'_>, transport: &dyn Transport) -> bool {
         let mut busy = false;
@@ -272,19 +383,12 @@ impl Replicator {
                 .map(|m| (m.id, m.offer_bytes, m.rev))
                 .collect(),
             unreachable: view.lost.iter().chain(view.down).copied().collect(),
+            lost: view.lost.iter().copied().collect(),
             asleep: view.sleeping.iter().copied().collect(),
             kept: view.kept.iter().copied().collect(),
         };
         if st.epoch.as_ref() != Some(&epoch) {
-            // Membership or offers changed: placement may differ, so check
-            // every chunk held here against it.
-            st.epoch = Some(epoch);
-            st.full.clear();
-            st.tracks.clear();
-            st.scanned = false;
-            for id in self.fs.held().unwrap_or_default() {
-                st.tracks.entry(id).or_default();
-            }
+            self.replan(&mut st, view, epoch);
         }
         self.track_staged(&mut st);
         // Earn this round's share of the repair rate (at most one second's worth).
@@ -348,44 +452,7 @@ impl Replicator {
         let track = st.tracks.get_mut(id).expect("tracked");
         track.queued_at.get_or_insert(view.now);
         let held = self.fs.has_replica(id);
-        // Down members may return, so their copies are only replaced once the
-        // grace period ends. Unless that leaves too few reachable copies: then
-        // stand-ins on other members bring it back to the minimum now.
-        let reachable = track
-            .holders
-            .iter()
-            .filter(|h| !view.down.contains(*h))
-            .count() as u32
-            + u32::from(held);
-        let coming = targets
-            .iter()
-            .filter(|t| **t != view.me && !view.down.contains(*t) && !track.holders.contains(*t))
-            .count() as u32;
-        let needed = view
-            .copies
-            .min(MIN_COPIES)
-            .saturating_sub(reachable + coming);
-        // A member that is only asleep is covered for up to N copies, so the
-        // chunk does not go degraded for the night.
-        let awake = track
-            .holders
-            .iter()
-            .filter(|h| !view.sleeping.contains(*h))
-            .count() as u32
-            + u32::from(held);
-        let awake_coming = targets
-            .iter()
-            .filter(|t| {
-                **t != view.me && !view.sleeping.contains(*t) && !track.holders.contains(*t)
-            })
-            .count() as u32;
-        let asleep = targets
-            .iter()
-            .chain(&track.holders)
-            .filter(|m| view.sleeping.contains(*m))
-            .collect::<HashSet<_>>()
-            .len() as u32;
-        let needed = needed.max(asleep.min(view.copies.saturating_sub(awake + awake_coming)));
+        let needed = standins_needed(view, &targets, &track.holders, held);
         if needed > 0 {
             let out: HashSet<MemberId> = skip
                 .union(view.down)
@@ -590,7 +657,13 @@ impl Replicator {
         for (id, t) in &st.tracks {
             let replicas = t.holders.len() as u32 + 1;
             let mine = is_steward(id, view.me, t.holders.iter().copied());
-            if t.heard && !t.settled && mine && replicas < view.copies && self.fs.has_replica(id) {
+            if t.heard
+                && !t.settled
+                && mine
+                && replicas < view.copies
+                && self.fs.has_replica(id)
+                && !awaiting(t, view, &st.silent)
+            {
                 match tier(replicas) {
                     Tier::AtRisk => progress.at_risk += 1,
                     _ => progress.degraded += 1,
@@ -598,6 +671,20 @@ impl Replicator {
             }
         }
         (progress.at_risk + progress.degraded > 0).then_some(progress)
+    }
+
+    /// Chunks held here that are only waiting for answers about who else holds them.
+    pub fn rechecking(&self, view: &View<'_>) -> u64 {
+        let st = self.state.lock().unwrap();
+        st.tracks
+            .iter()
+            .filter(|(id, t)| {
+                !t.settled
+                    && !self.fs.has_staged(id)
+                    && self.fs.has_replica(id)
+                    && awaiting(t, view, &st.silent)
+            })
+            .count() as u64
     }
 
     /// Chunks on fewer than `view.copies` nodes, as far as this node knows,
@@ -611,6 +698,9 @@ impl Replicator {
             let held = self.fs.has_replica(id);
             // A held chunk is only reported once a peer has said how many copies exist.
             if !(t.heard || self.fs.has_staged(id)) {
+                continue;
+            }
+            if !self.fs.has_staged(id) && awaiting(t, view, &st.silent) {
                 continue;
             }
             let replicas = t.holders.len() as u32 + u32::from(held);
