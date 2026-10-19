@@ -88,6 +88,9 @@ struct Track {
     heard: bool,
     /// When the replicator first worked on the chunk.
     queued_at: Option<Nanos>,
+    /// Nothing can happen to the chunk before this time unless a peer answers: every ask is in
+    /// flight, so polling it sooner only costs time. Zero means due now.
+    wake: Nanos,
 }
 
 /// What placement and trimming depend on.
@@ -263,11 +266,12 @@ impl Replicator {
         st.allowance = st.allowance.saturating_add(earned).min(cap);
         st.allowance_at = Some(view.now);
         // The least replicated chunks first, so the most at risk are made safe first.
-        // Chunks that are settled have nothing left to do until placement changes.
+        // Chunks that are settled have nothing left to do until placement changes, and chunks
+        // waiting for answers have nothing to do until a retry is due or an answer arrives.
         let mut ids: Vec<ChunkId> = st
             .tracks
             .iter()
-            .filter(|(_, t)| !t.settled)
+            .filter(|(_, t)| !t.settled && t.wake <= view.now)
             .map(|(id, _)| *id)
             .collect();
         ids.sort_by_key(|id| {
@@ -368,6 +372,8 @@ impl Replicator {
         let steward = staged
             || !targets.contains(&view.me)
             || is_steward(id, view.me, track.holders.iter().copied());
+        // Whether the chunk may do more than wait for answers or retries.
+        let mut blocked = false;
         for t in &targets {
             if *t == view.me || track.holders.contains(t) {
                 continue;
@@ -380,6 +386,7 @@ impl Replicator {
                     .get(t)
                     .is_none_or(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
             let Some(to) = view.endpoint(*t) else {
+                blocked = true;
                 continue;
             };
             if !due {
@@ -393,6 +400,7 @@ impl Replicator {
             let mut data = None;
             if steward && track.missing.contains(t) {
                 if transport.backlog(to) >= BACKLOG_LIMIT {
+                    blocked = true;
                     continue;
                 }
                 data = self.fs.local_chunk(id);
@@ -401,6 +409,7 @@ impl Replicator {
                 {
                     // Chunks already held are re-replicated within the rate limit.
                     if st.allowance < 0 {
+                        blocked = true;
                         continue;
                     }
                     st.allowance -= bytes.len() as i64;
@@ -416,6 +425,17 @@ impl Replicator {
             track.sent.insert(*t, view.now);
             track.answered.remove(t);
             busy = true;
+        }
+        // Everything asked is in flight: sleep until the first retry is due (an answer wakes it).
+        if !blocked {
+            let retry = RETRY.as_nanos() as u64;
+            track.wake = targets
+                .iter()
+                .filter(|t| **t != view.me && !track.holders.contains(*t))
+                .filter_map(|t| track.sent.get(t))
+                .map(|at| at.saturating_add(retry))
+                .min()
+                .unwrap_or(0);
         }
         let complete = !targets.is_empty()
             && targets
@@ -472,6 +492,7 @@ impl Replicator {
             return;
         };
         track.heard = true;
+        track.wake = 0;
         match standing {
             Replica::Stored => {
                 track.sent.remove(&member);
