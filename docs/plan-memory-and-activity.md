@@ -237,6 +237,44 @@ burst, and they drained within 23 s. Single runs of each.
 What is left of #74: the per-peer back-off on timeouts (#91 step 3). The ingest tick and the join
 cost are no longer a problem on a cluster this size.
 
+## Why mini1 ran hot, and the 10G offer (2026-10-19)
+
+In the 1.5.6 ingest mini1 peaked at 97% busy and 6,108 inbox entries, mini2 (the same hardware) at
+41% and 3,409. Compared on the machines:
+
+| | mini1 (Ubuntu 6.8) | mini2 (Omarchy 7.2) |
+|---|---|---|
+| CPU (SHA-256 of 256 MiB) | 0.66 s | 0.68 s |
+| idle tick busy | 6% | 3% |
+| 16 KiB write plus `fdatasync` | 7.0 ms | 3.9 ms |
+| chunks held after the ingest | 6,104 | 2,886 |
+| data directory | ext4 on LVM over a 931 GB HDD, with a 100 GB SSD as a writeback cache (dm-cache, `smq`) | btrfs on the SSD |
+
+The CPUs are the same and no process on mini1 uses more than 1% at idle. The difference is storage
+and share: the cached HDD takes about 1.8 times as long per synchronous write, and the 100 GiB
+offer gave mini1 2.1 times mini2's chunks (ocilab1, also 100 GiB, held 6,055). That is about four
+times the disk-sync work in the same period. It is the same shape as vps1 and vps2: offer-weighted
+placement gives the nodes with the weakest storage the most data (#84).
+
+mini1 was lowered to `--offer 10G` (`startfs config --offer 10G`). Existing data did not move
+much (6,104 chunks to 5,044), so the offer shapes new data, not what is already stored. A second
+ingest (6,000 files) after it:
+
+| 6,000-file ingest | mini1 at 100G | mini1 at 10G |
+|---|---|---|
+| mini1 peak busy / inbox | 97% / 6,108 | 48% / 2,691 |
+| mini1 longest tick | 475 ms | 486 ms |
+| hottest node | mini1 | ocilab1, 67% (419 ms) |
+| all members SAFE and empty after | 71 s | 60 s |
+
+mini1 took about 2,040 new chunks, ocilab1 about 5,796, mini2 about 2,051. ocilab1 (an ARM VM, the
+only large offer left) is now the node to watch; at 67% it is well under the 90% stop rule.
+The cost: usable space fell from about 83 GiB to about 53 GiB, because with 3 copies the large node
+no longer adds capacity the small ones lack. Offers now: 10 GiB everywhere except ocilab1 (100 GiB).
+
+Not tested: a different kernel on mini1, and the data directory on its SSD instead of the cached
+HDD (a bigger change; the cache holds the root filesystem).
+
 ## Order
 
 Ranked by value on 2026-10-19: what takes a node out comes first, then what makes everything slow,
