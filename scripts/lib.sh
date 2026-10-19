@@ -35,12 +35,13 @@ PY
   while [ ! -S "$WORK/whois.sock" ]; do sleep 0.05; done
 }
 
-# start_node NAME [MOUNT] [extra config lines]; sets PID_NAME.
+# start_node NAME [MOUNT] [extra config lines]; sets PID_NAME. PORT_NAME=n fixes its port.
 start_node() {
   local name=$1 mount=${2:-} extra=${3:-}
-  local d="$WORK/$name"
+  local d="$WORK/$name" port
+  eval "port=\${PORT_$name:-0}" # a restarted node must keep its port: peers hold its address
   mkdir -p "$d"
-  printf 'port = 0\nwhois_socket = "%s"\n%s\n' "$WORK/whois.sock" "$extra" > "$d/config.toml"
+  printf 'port = '"$port"'\nwhois_socket = "%s"\n%s\n' "$WORK/whois.sock" "$extra" > "$d/config.toml"
   local args=(--data-dir "$d/data" --config "$d/config.toml" daemon)
   [ -n "$mount" ] && args+=(--mount "$mount")
   "$BIN" "${args[@]}" >"$d/log" 2>&1 &

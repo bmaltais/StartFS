@@ -223,6 +223,22 @@ limited by the chunk files (one write and one fsync each, 4,189 per receiver for
 by `meta.redb`. The live pattern (almost only `meta.redb` writes) followed a rolling restart, so
 #85 stays open until that case is reproduced and fixed.
 
+### The live disks
+
+The live VPSes (vps1, vps2) are Azure Standard_B2als_v2 (2 vCPU, 4 GiB; the VM allows 3,750
+uncached IOPS and 119 MiB/s, so the VM is not the limit) with an Azure Standard HDD (256 GiB): a hard limit of 500 IOPS and
+60 MB/s, so the 540 writes/s at 200 ms seen in #85 is the disk's ceiling, not drained burst credits
+(no CPU steal either). Slow-disk runs cap the device with `IOWriteIOPSMax=... 500` and
+`IOWriteBandwidthMax=... 60M` (see `scripts/profile-restart.sh`).
+
+`scripts/profile-restart.sh` (3 loopback nodes, 1,550 files, node B down for the second half of the
+copy, capped at 500 IOPS, `LAG=1`, three runs per build): `meta.redb` `pwrite64` while B catches up
+829, 861 and 895 before #87 and 426, 439 and 440 after; B still ends `DEGRADED` after 150 s on both
+(CPU 50 to 100 s, tick 78 to 90% busy). The restart cost is the rescan (#82) and the tick (#74), and
+it does not reproduce the live `meta.redb` flood (about 7,500 `pwrite64` in 6 s). One uncapped
+restart of an idle cluster writes almost nothing to `meta.redb` and sends about 400 "do you hold
+this chunk?" messages a second.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU
