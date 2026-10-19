@@ -51,6 +51,8 @@ const DRAIN_PER_TICK: usize = 128;
 
 /// How often the operation log is compacted.
 const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// How often freed heap memory is handed back to the OS.
+const RELEASE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How often the garbage collector looks for orphaned chunks.
 const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -99,6 +101,7 @@ pub struct Daemon {
     /// What garbage collection has done and is waiting on, for `status`.
     gc: Mutex<GcProgress>,
     last_compact: Mutex<Option<Nanos>>,
+    last_release: Mutex<Option<Nanos>>,
     /// When this daemon started: how long a never-heard member has been unseen.
     started: Nanos,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on
@@ -210,6 +213,7 @@ impl Daemon {
                 last_gc: Mutex::new(None),
                 gc: Mutex::new(GcProgress::default()),
                 last_compact: Mutex::new(None),
+                last_release: Mutex::new(None),
                 started,
                 wait: Mutex::new(Arc::new(|| {
                     std::thread::sleep(std::time::Duration::from_millis(10))
@@ -349,8 +353,19 @@ impl Daemon {
             // The scrub only gets the disk when nothing else wants it.
             busy |= self.scrub();
         }
+        self.release_freed_memory();
         timer.finish();
         busy
+    }
+
+    /// A burst leaves the allocator holding most of what it freed; give it back.
+    fn release_freed_memory(&self) {
+        let now = self.clock.now();
+        let mut last = self.last_release.lock().unwrap();
+        if last.is_none_or(|t| now.saturating_sub(t) >= RELEASE_INTERVAL.as_nanos() as u64) {
+            *last = Some(now);
+            crate::allocator::release_freed();
+        }
     }
 
     /// Everything that tells the peers this node is alive, and this node which

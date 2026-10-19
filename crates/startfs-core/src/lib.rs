@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod allocator;
 pub mod cache;
 pub mod chunker;
 pub mod chunkstore;
