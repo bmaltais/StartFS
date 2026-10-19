@@ -1,0 +1,29 @@
+data: SAFE
+filesystem: home (3 copies)
+node: online
+usage: 470.9 MiB stored in 2723 chunks, 10.0 GiB offered
+redundancy: 3 of 3 copies possible (7 nodes)
+usable: about 143.3 GiB
+storage: 1.2 GiB in files, 1.1 GiB after dedup (1.0x)
+  this node: 398.3 MiB on disk for 420.4 MiB of chunks (compression 1.1x), 1340 compressed and 1220 stored as is
+  compression saved 22.1 MiB (9% of this node's chunk bytes were compressed)
+  this node holds 12.0% of the 3.4 GiB expected across the cluster (3 copies)
+  plus 72.6 MiB on this node that no file uses, waiting for garbage collection
+cache: 142.3 MiB used of 1.0 GiB
+members:
+  0         mini2.taild10b64.ts.net:7600    up   10.0 GiB offered   6.7ms
+            extra copies kept for 2d 21h in case it sleeps again
+  1         3090.taild10b64.ts.net:7600     up   10.0 GiB offered          (this node)
+  2         surface.taild10b64.ts.net:7600  up   10.0 GiB offered   7.5ms
+            extra copies kept for 2d 23h in case it sleeps again
+  15728640  vps1.taild10b64.ts.net:7600     up  100.0 GiB offered  13.9ms
+            extra copies kept for 2d 22h in case it sleeps again
+  15728641  vps2.taild10b64.ts.net:7600     up  100.0 GiB offered  12.2ms
+            extra copies kept for 2d 21h in case it sleeps again
+  15728642  ocilab1.taild10b64.ts.net:7600  up  100.0 GiB offered  32.6ms
+            extra copies kept for 2d 21h in case it sleeps again
+  15728643  mini1.taild10b64.ts.net:7600    up  100.0 GiB offered   3.7ms
+            extra copies kept for 2d 21h in case it sleeps again
+scrub: idle
+metadata log: 8801 entries, 26719 objects
+garbage collection: 163 chunks (76165793 bytes) pending, 0 chunks (0 bytes) reclaimed

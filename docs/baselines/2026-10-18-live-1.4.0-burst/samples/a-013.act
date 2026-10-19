@@ -1,0 +1,42 @@
+activity over the last 60 s (counters reset when the daemon restarts)
+peer paths (out | in; chunk data, metadata, gossip, other):
+  mini2.taild10b64.ts.net:7600 (online), 0 in flight
+    out: chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 114 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    in : chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 113 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    sends: 0 acknowledged, 0 timed out, 0 retried
+  surface.taild10b64.ts.net:7600 (online), 0 in flight
+    out: chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 114 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    in : chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 113 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    sends: 0 acknowledged, 0 timed out, 0 retried
+  vps1.taild10b64.ts.net:7600 (online), 418 in flight
+    out: chunks 117.3 MiB/s 1388.1 msg/s, metadata 9.1 KiB/s 0.6 msg/s, gossip 118 B/s 1.2 msg/s, other 0 B/s 0.0 msg/s
+    in : chunks 53.1 KiB/s 1552.9 msg/s, metadata 2.9 KiB/s 0.2 msg/s, gossip 822 B/s 40.5 msg/s, other 0 B/s 0.0 msg/s
+    sends: 93172 acknowledged, 10534 timed out, 10534 retried
+  vps2.taild10b64.ts.net:7600 (online), 0 in flight
+    out: chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 114 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    in : chunks 6.0 KiB/s 175.5 msg/s, metadata 0 B/s 0.0 msg/s, gossip 112 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    sends: 10528 acknowledged, 0 timed out, 0 retried
+  ocilab1.taild10b64.ts.net:7600 (online), 0 in flight
+    out: chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 114 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    in : chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 112 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    sends: 0 acknowledged, 0 timed out, 0 retried
+  mini1.taild10b64.ts.net:7600 (online), 0 in flight
+    out: chunks 0 B/s 0.0 msg/s, metadata 0 B/s 0.0 msg/s, gossip 114 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    in : chunks 1.3 KiB/s 38.6 msg/s, metadata 0 B/s 0.0 msg/s, gossip 112 B/s 1.0 msg/s, other 0 B/s 0.0 msg/s
+    sends: 2318 acknowledged, 0 timed out, 0 retried
+tick: 2577 in the window, average 21.6 ms, longest 83.6 ms, busy 93% of the time
+  phases (average ms): flush 0.00, sync 1.24, receive 0.16, gossip 0.01, replicate 20.20, other 0.02
+replication queue: 418 chunks, the oldest waiting 279 s
+chunks replicated by size: 0 B-4.0 KiB: 0, 4.0 KiB-16.0 KiB: 10501, 16.0 KiB-64.0 KiB: 58952, 64.0 KiB-256.0 KiB: 9898, 256.0 KiB-1.0 MiB: 3936, over 1.0 MiB: 0
+in memory:
+  inbox: 15 entries, 525 B, no limit
+  unclaimed chunk replies: 0 entries, 0 B, no limit
+  decoded-chunk cache: 0 entries, 0 B of 32.0 MiB
+  replication index: 418 entries, no limit
+  staging index: 418 entries, no limit
+resources:
+  daemon: 10.0 GiB resident, cpu 484.5 s, 9 threads
+  machine: 57.0 GiB memory available, 0 B swap used
+  memory pressure: 0.0% (10 s), 0.0% (60 s)
+  cpu pressure: 0.0% (10 s), 0.0% (60 s)
+  cgroup memory: 10.1 GiB used of no limit

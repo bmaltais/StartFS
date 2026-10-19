@@ -20,7 +20,7 @@ what order, and how to test each when it is ready. Update it as issues land.
 |---|---|---|---|
 | 0 | #70 memory profile script | merged; the measuring tool for everything below | none |
 | 1 | #63 activity view, one node | merged (#73, #75), released as 1.4.0; its live checkpoint is still to run; no protocol change; shows the rest on a real node | none |
-| 2 | #66 bound the inbound path | the actual defect; needs a short grilling round first (byte bound, frame caps per message type, protocol bump or not). #62 only caps messages drained per tick (it is a liveness fix); the inbox is still an unbounded channel, and a smaller drain lets a burst queue up longer, so read #62 before starting | #63 helps measure it |
+| 2 | #78 outbound memory, with #66 bound the inbound path | the actual defect; needs a short grilling round first (byte bound, frame caps per message type, protocol bump or not). #62 only caps messages drained per tick (it is a liveness fix); the inbox is still an unbounded channel, and a smaller drain lets a burst queue up longer, so read #62 before starting | #63 helps measure it |
 | 3 | #67 redb cache size | small, independent, safe to do alongside #2 | none |
 | 4 | #68 drop unclaimed chunk replies | small, independent | none |
 | 5 | #69 return freed memory to the OS | only worth deciding once #66 changes the peak | #66 |
@@ -169,7 +169,17 @@ cp -r /tmp/burst ~/StartFS/burst-$(date +%s)
 
 ## Found by #63
 
-- #74: a peer that never answers keeps the tick 80 to 90% busy and slows transfers to the healthy
+Live burst on 1.4.0 (`docs/baselines/2026-10-18-live-1.4.0-burst/`): a 374 MB copy took the writer's
+daemon from 111 MiB to 10 GiB, kept the tick 94 to 98% busy for about 6 minutes and took 8 minutes to
+reach `SAFE`.
+
+- #78: the memory growth. It is on the writer and none of the counted structures explain it; the
+  outbound queue is the lead and is not yet in the activity view. Do it with #66: the inbound bound
+  alone will not cap this.
+- #77: purge deleted data on request, so repeat bursts do not fill disks. Do it before the next live
+  burst; until then each live run costs a week of disk on three nodes.
+
+- #74 (updated with the live run: it happens with every peer online, a retry loop on a slow tick): a peer that never answers keeps the tick 80 to 90% busy and slows transfers to the healthy
   peers (loopback run: `replicate` phase 43 ms per tick, 47,804 timeouts a minute). Likely behind the
   original slow copy; fix it and recheck with `startfs activity` on the live cluster.
 
