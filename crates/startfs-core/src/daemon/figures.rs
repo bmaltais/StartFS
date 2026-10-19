@@ -1,6 +1,6 @@
 //! The activity view: this node's recent rates, queues and resource use.
 
-use super::{DOWN_AFTER, Daemon};
+use super::{DOWN_AFTER, Daemon, UNCLAIMED_REPLY_BYTES};
 use crate::activity::{ActivityReport, PeerActivity, QueueActivity, Structure, Structures};
 use crate::control::NodeState;
 use crate::error::Error;
@@ -85,7 +85,7 @@ impl Daemon {
             chunk_replies: Some(Structure {
                 entries: reply_entries,
                 bytes: Some(reply_bytes),
-                limit_bytes: None,
+                limit_bytes: Some(UNCLAIMED_REPLY_BYTES),
             }),
             decoded_cache: Some(Structure {
                 entries: decoded_entries,
