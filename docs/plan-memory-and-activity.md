@@ -150,7 +150,19 @@ ready after 102 s.
 | vps2 | 10,657 | 96% | 1,493 ms | 291 MiB |
 
 Before (1.5.2, same offer): healthy inboxes 94,091 and 155,959, busy 98 to 99%, the stop rule tripped
-after about 2 minutes. Not yet run live: a 100G offer on vps2 (the worst case).
+after about 2 minutes.
+
+The worst case followed: vps1 (the same VM size as vps2: 2 vCPU, 4 GiB) joined with `--offer 100G`,
+with vps2 already a member (7 members). No rule tripped; every member was `SAFE` with empty inboxes
+and vps1 was ready after 117 s.
+
+| peaks during the 100G join | inbox (entries) | busy (60 s average) | longest tick | resident |
+|---|---|---|---|---|
+| `mini1`, `ocilab1` (100 GiB) | 730, 1,353 | 61%, 40% | 123, 93 ms | 141, 125 MiB |
+| `mini2`, `local`, `surface`, vps2 | 4 to 1,188 | 15 to 33% | 36 to 110 ms | 118 to 158 MiB |
+| vps1 (the joiner) | 8,767 | 97% | 1,151 ms | 269 MiB |
+
+Open: single runs of each; the offer-weighted share a weak node holds is still not capped (#84).
 
 ## Order
 
