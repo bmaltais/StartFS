@@ -8,6 +8,7 @@ use startfs_core::members::MemberId;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::power::ManualPower;
+use startfs_core::resources::{ManualResources, Resources};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -108,6 +109,8 @@ struct Node {
     daemon: Mutex<Option<Arc<Daemon>>>,
     daemon_config: Config,
     power: Arc<ManualPower>,
+    /// What the node's OS reports about it: nothing until a test says so.
+    resources: Arc<ManualResources>,
     /// The host this node advertises from its next start; `None` is its tailnet IP.
     host: Mutex<Option<String>>,
 }
@@ -184,6 +187,7 @@ impl Cluster {
                 daemon: Mutex::new(None),
                 daemon_config: config_for_nodes.clone(),
                 power: Arc::new(ManualPower::default()),
+                resources: Arc::new(ManualResources::default()),
                 host: Mutex::new(None),
             })
             .collect();
@@ -283,6 +287,11 @@ impl Cluster {
             self.advance(Duration::from_secs(10));
             self.sync();
         }
+    }
+
+    /// What the node's operating system reports about its resources.
+    pub fn set_resources(&self, i: usize, resources: Resources) {
+        self.nodes[i].resources.set(resources);
     }
 
     /// Plug the node's machine in or unplug it.
@@ -439,6 +448,7 @@ fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<M
     )
     .expect("open node");
     daemon.set_power_source(node.power.clone());
+    daemon.set_resource_source(node.resources.clone());
     daemon.attach(Arc::new(network.transport(NodeId(index as u32))));
     // A request that waits for a peer lets the whole simulated cluster run, and
     // time pass once it has nothing left to do, so that delayed messages arrive.

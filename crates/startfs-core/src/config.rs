@@ -60,6 +60,10 @@ pub struct Config {
     /// Most bytes (encoded, roughly) in one piece when this node sends its
     /// whole merge state to a member that missed a log compaction.
     pub state_chunk_bytes: usize,
+    /// Whether the daemon keeps the counters and timers behind `startfs
+    /// activity` (a rolling minute, in memory). `startfs config --activity
+    /// on|off` changes it until the daemon restarts.
+    pub activity: bool,
     /// Where the daemon mounts the filesystem (`startfs daemon --mount DIR`
     /// overrides it). Unset: the daemon runs without a mount.
     pub mountpoint: Option<String>,
@@ -90,6 +94,7 @@ impl Default for Config {
             repair_bytes_per_sec: 64 << 20,
             scrub_period_secs: 30 * 24 * 3600,
             state_chunk_bytes: crate::sync::STATE_CHUNK_BYTES,
+            activity: true,
             mountpoint: None,
             allowed_tags: Vec::new(),
             whois_socket: None,

@@ -71,6 +71,38 @@ For anything but `SAFE`, quote the `redundancy:` line, the `members:` states, an
 `cannot reach:` reason under a member and any `repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
 call for a new machine to join, or `remove` once the machine is gone for good.
 
+## Explain a slow transfer or high memory
+
+```sh
+startfs activity          # --json for scripts
+```
+
+Figures are this machine's own, over the last minute (the header says how many seconds it has
+collected; a daemon restart resets it, and a window of a few seconds says little). Run it on the
+machine that is slow, and again a minute later to see what changed. Read, in this order:
+
+| What you see | It points to | Next |
+|---|---|---|
+| `tick:` busy above ~80% (`status` then shows a `busy:` line), the `replication queue:` not shrinking, and one `phases` figure carrying the time | the single background tick thread is the limit, not the network; the phase says where (observed with a peer down: `replicate` 44 ms of a 45 ms tick, busy 85%, while traffic to the dead peer was only 30 KiB/s) | tell the user it is working as fast as one thread can; nothing on the network to fix |
+| many `timed out` and `retried` on one peer path, that member `down` or `in flight` high, nothing `in` from it | that peer, or its Tailscale route, is the problem (observed: 47,804 timeouts in a minute to a frozen peer, 4,200 asks in flight, 0 acknowledged) | `startfs status` for the member's state and `cannot reach:` reason, then `tailscale ping` that machine |
+| little traffic on every path, a long `replication queue:`, `busy` low | the daemon is waiting: on a slow peer or the 5 s retry delay | look at `in flight` and the oldest waiting age; a peer that answers late or not at all is the usual cause |
+| `memory pressure`, `swap used` above zero, or `cgroup memory` close to its limit | the machine is starved of memory, which slows everything | free memory on that machine before blaming StartFS |
+| `daemon:` resident size far above what `in memory:` accounts for (inbox, unclaimed chunk replies, decoded-chunk cache, indexes) | memory the allocator keeps or that is not counted yet, not queues | report the figures; do not tell the user a queue is the cause |
+| a figure reads `unavailable` | this machine's OS gave no source for it (no `/proc` pressure files, macOS, no cgroup) | not that all is well: say it could not be measured |
+
+Observed on a node under load: the first two rows (a frozen peer during a copy of many small
+files). The waiting, memory-pressure and resident-size rows follow from what the figures measure but
+have not yet been seen in a real run; say so if asked how sure the reading is.
+
+`inbox` and `unclaimed chunk replies` show `no limit` when nothing bounds them: a large figure
+there is real memory held. `cgroup memory` can be the whole login session, not just StartFS.
+
+What not to conclude: nothing here says what another machine sees (each end of a path counts
+its own side); counters only cover the current daemon run; and `startfs config --activity off`
+(default on, or `activity = false` in `config.toml`) stops the counting, after which only the
+resource figures and queue are live. Report the figures and the reading; do not claim a cause
+the table does not support.
+
 ## Retire or remove a machine
 
 - Planned exit: `startfs leave` on that machine hands its data to the others first.

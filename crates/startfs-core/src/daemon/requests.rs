@@ -25,8 +25,9 @@ impl Daemon {
             Request::Config {
                 offer_bytes,
                 copies,
+                activity,
             } => {
-                self.configure(offer_bytes, copies)?;
+                self.configure(offer_bytes, copies, activity)?;
                 Response::Done
             }
             Request::Revoke { token } => {
@@ -46,6 +47,7 @@ impl Daemon {
                 Response::Joined
             }
             Request::NodeStats => Response::NodeStats(self.node_reports()?),
+            Request::Activity => Response::Activity(Box::new(self.activity_report()?)),
             Request::Status => Response::Status(Box::new(self.status()?)),
         })
     }

@@ -166,6 +166,33 @@ Criterion 5 ("normal operations on cached data at near-local-disk speed") is met
 cached data. Writes no longer degrade with file size, but remain about 6x to 9x slower than
 the local disk, so the criterion is only partly met.
 
+## 6. Cost of the activity counters
+
+`startfs activity` counts every message and times every tick (`activity = true`, the default).
+`scripts/profile-write.sh` with `NODE_CONFIG='activity = false'` against the default, 8 runs each
+alternating on and off, one node, 1 copy, median wall time of the FUSE side:
+
+| Write | `activity` on | `activity` off | on vs off |
+|---|---|---|---|
+| 128 MiB `dd bs=1M` | 0.321 s | 0.313 s | +2.6% |
+| 1000 x 8 B (inline) | 0.319 s | 0.321 s | -0.8% |
+| 1000 x 16 KiB (chunks) | 0.649 s | 0.649 s | -0.2% |
+| 200 x 1 MiB | 0.409 s | 0.429 s | -4.7% |
+| sum of the four | 1.698 s | 1.712 s | -0.8% |
+
+The runs differ by more than 1% in both directions (the fastest `dd` run was with the counters
+on), so this benchmark cannot resolve the cost: the sum is within noise (-0.8%), not proven under
+1%. One node has no peers, so this covers the tick timers and the window, not the per-message
+counting, which was not measured separately. The default stays on on that basis; if a quieter
+measurement (several nodes, `make-tree.py` copy, on vs off) shows 1% or more, the issue's rule is
+to make the default off.
+
+Observed on three loopback nodes (3 copies, one frozen with SIGSTOP, `make-tree.py` default tree
+copied into another): the tick averaged 43 ms with 42.8 ms in the replicate phase and was busy
+82 to 88% of the minute, while the frozen peer's path carried only 30 KiB/s out and every one of the
+4,200 queued chunks timed out about every 5 s (47,804 timeouts in 60 s). The live peer took 20 MiB/s
+at first and 2 MiB/s once the tick was saturated. This is a finding to follow up, not fixed here.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

@@ -3,7 +3,7 @@
 use super::{DOWN_AFTER, Daemon};
 use crate::control::{
     GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
-    Shortfall, Staging, Status, Stranded, Tier, Usage, Verdict,
+    Shortfall, Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
 };
 use crate::error::Error;
 use crate::members::{Member, MemberId, Membership};
@@ -446,6 +446,13 @@ impl Daemon {
             },
             warnings,
             conflicts: self.fs.conflicts()?,
+            tick_busy: self
+                .tick_busy()
+                .filter(|(busy, _)| *busy > 0.8)
+                .map(|(busy, avg_ms)| TickBusy {
+                    percent: (busy * 100.0).round() as u32,
+                    avg_ms: avg_ms.round() as u64,
+                }),
         })
     }
 }
