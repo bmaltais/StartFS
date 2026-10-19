@@ -36,6 +36,8 @@ PY
 }
 
 # start_node NAME [MOUNT] [extra config lines]; sets PID_NAME. PORT_NAME=n fixes its port.
+# WRAP_NAME="cmd words" runs the daemon under that command (for example a sudo systemd-run --scope
+# that caps its CPU, memory and disk); PID_NAME is then the daemon's, found by its data dir.
 start_node() {
   local name=$1 mount=${2:-} extra=${3:-}
   local d="$WORK/$name" port
@@ -44,8 +46,22 @@ start_node() {
   printf 'port = '"$port"'\nwhois_socket = "%s"\n%s\n' "$WORK/whois.sock" "$extra" > "$d/config.toml"
   local args=(--data-dir "$d/data" --config "$d/config.toml" daemon)
   [ -n "$mount" ] && args+=(--mount "$mount")
-  "$BIN" "${args[@]}" >"$d/log" 2>&1 &
+  local wrap
+  eval "wrap=\${WRAP_$name:-}"
+  # shellcheck disable=SC2086
+  $wrap "$BIN" "${args[@]}" >"$d/log" 2>&1 &
   local pid=$!
+  if [ -n "$wrap" ]; then
+    PIDS+=($pid)
+    # the wrapper's own command line names the data dir too: take the process that is the daemon
+    pid=
+    local tries=0
+    until [ -n "$pid" ]; do
+      [ $((tries++)) -lt 300 ] || { echo "daemon $name did not start under: $wrap"; exit 1; }
+      for p in $(pgrep -f "[d]ata-dir $d/data"); do [ "$(cat "/proc/$p/comm")" = "$(basename "$BIN" | cut -c1-15)" ] && pid=$p; done
+      sleep 0.05
+    done
+  fi
   PIDS+=($pid)
   eval "PID_$name=$pid"
   while [ ! -S "$d/data/control.sock" ]; do

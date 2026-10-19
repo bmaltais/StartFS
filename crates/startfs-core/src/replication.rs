@@ -26,6 +26,9 @@ pub const RETRY: Duration = Duration::from_secs(5);
 /// Fewest reachable copies a chunk is left with: below this, repair does not
 /// wait out the grace period for a member to return.
 const MIN_COPIES: u32 = 2;
+/// Chunk bytes the transport may hold for one peer before more are withheld (#91): the chunk
+/// is pushed on a later tick, once the peer has taken what is queued.
+pub const BACKLOG_LIMIT: u64 = 32 << 20;
 
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
@@ -389,6 +392,9 @@ impl Replicator {
                     .is_some_and(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
             let mut data = None;
             if steward && track.missing.contains(t) {
+                if transport.backlog(to) >= BACKLOG_LIMIT {
+                    continue;
+                }
                 data = self.fs.local_chunk(id);
                 if let Some(bytes) = &data
                     && !staged

@@ -1,6 +1,7 @@
 use startfs_core::clock::Clock;
 use startfs_core::net::{Inbox, NodeId, Transport};
 use startfs_core::ops::Nanos;
+use startfs_core::protocol::Message;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -182,6 +183,15 @@ impl Transport for SimTransport {
 
     fn resolve(&self, addr: &str) -> Option<NodeId> {
         self.net.state.lock().unwrap().addrs.get(addr).copied()
+    }
+
+    fn backlog(&self, to: NodeId) -> u64 {
+        let s = self.net.state.lock().unwrap();
+        s.in_flight
+            .iter()
+            .filter(|m| m.from == self.node && m.to == to && Message::is_bulk(&m.msg))
+            .map(|m| m.msg.len() as u64)
+            .sum()
     }
 
     fn inbox(&self) -> Option<Inbox> {

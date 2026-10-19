@@ -50,4 +50,10 @@ pub trait Transport: Send + Sync {
     fn inbox(&self) -> Option<Inbox> {
         None
     }
+    /// Chunk bytes sent to `to` that the transport still holds, queued or not yet
+    /// taken by the peer. The replicator stops pushing to a peer past a limit, so a
+    /// slow link costs time and not memory.
+    fn backlog(&self, _to: NodeId) -> u64 {
+        0
+    }
 }
