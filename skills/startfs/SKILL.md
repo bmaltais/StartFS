@@ -103,6 +103,16 @@ its own side); counters only cover the current daemon run; and `startfs config -
 resource figures and queue are live. Report the figures and the reading; do not claim a cause
 the table does not support.
 
+## Free space after deleting files
+
+Deleted files keep their data for 7 days. If the user is short of disk now, or has just deleted a
+test tree, `startfs purge` frees it on every member. It cannot be undone, so run it only when the
+user has said the deleted files are not needed. It refuses while any member is down (it names them;
+bring them back, or `startfs remove` one that is gone for good). Afterwards `startfs status` shows
+`garbage collection: purge in progress` while it works, and names a member holding it back. Only
+files deleted before the purge are freed; run it again if a daemon restarted meanwhile. Every member
+must run protocol 12 (release 1.5.0 or newer).
+
 ## Retire or remove a machine
 
 - Planned exit: `startfs leave` on that machine hands its data to the others first.

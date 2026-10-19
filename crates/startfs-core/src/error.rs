@@ -28,6 +28,10 @@ pub enum Error {
         "cannot lower the number of copies until every file has all its copies and every member is reachable (see `startfs status`)"
     )]
     NotHealthyToLowerCopies,
+    #[error(
+        "cannot purge while a member is unreachable ({0}): it would keep its copies and hand them back to the others when it returns; bring it back, or `startfs remove` it if it is gone for good"
+    )]
+    PurgeNeedsEveryMember(String),
     #[error("no such token")]
     NoSuchToken,
     #[error("token not recognised")]

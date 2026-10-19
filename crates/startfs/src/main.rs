@@ -27,6 +27,8 @@ commands:
                                       for scripts and GUIs)
   activity [--json]                   show this node's recent traffic, tick timings, queues and
                                       memory over the last minute (--json: as JSON)
+  purge                               free the data of deleted files on every member now, instead
+                                      of after the retention period (not undoable)
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
   join TOKEN [--offer SIZE]           join the filesystem a token names
   token [--example]                   print a new join token (--example: the full join
@@ -231,6 +233,16 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             } else {
                 print!("{}", render_activity(&report));
             }
+            Ok(())
+        }
+        "purge" => {
+            let client = Client::new(socket);
+            let report = client.purge()?;
+            println!(
+                "purge started on {} member{}; deleted files' data is freed as each member allows (see `startfs status`)",
+                report.asked.len(),
+                if report.asked.len() == 1 { "" } else { "s" }
+            );
             Ok(())
         }
         "stats" => {
@@ -723,6 +735,9 @@ fn render(s: &Status) -> String {
             "garbage collection: {} chunks ({} bytes) pending, {} chunks ({} bytes) reclaimed\n",
             s.gc.pending_chunks, s.gc.pending_bytes, s.gc.reclaimed_chunks, s.gc.reclaimed_bytes
         ));
+    }
+    if s.gc.purging {
+        out.push_str("garbage collection: purge in progress (deleted data is freed as soon as the gate allows)\n");
     }
     if !s.gc.waiting_on.is_empty() {
         let names: Vec<&str> = s

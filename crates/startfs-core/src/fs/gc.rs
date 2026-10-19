@@ -29,10 +29,12 @@ pub struct GcReport {
 impl LocalFs {
     /// Remove chunks (replicas and staged) that have been unreferenced for
     /// at least `retention`, as observed by this node, and for which
-    /// `gate_open(eligible_at)` holds.
+    /// `gate_open(eligible_at)` holds. Orphans first seen at or before
+    /// `purge_cutoff` need no retention at all (a purge); later ones still do.
     pub fn collect_garbage(
         &self,
         retention: Duration,
+        purge_cutoff: Option<u64>,
         gate_open: impl Fn(u64) -> bool,
     ) -> FsResult<GcReport> {
         let now = self.clock.now();
@@ -69,7 +71,11 @@ impl LocalFs {
                     continue;
                 }
                 let first = *since.entry(id.to_vec()).or_insert(now);
-                let eligible_at = first.saturating_add(retention);
+                let eligible_at = if purge_cutoff.is_some_and(|cutoff| first <= cutoff) {
+                    first
+                } else {
+                    first.saturating_add(retention)
+                };
                 let held = now >= eligible_at && !gate_open(eligible_at);
                 if held {
                     report.held_since = report.held_since.max(Some(eligible_at));

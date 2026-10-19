@@ -66,6 +66,10 @@ Chunks a member that is not up last reported as a single copy. Nobody else knows
 The daemon's own recent rates and timings: traffic per peer path, how long each tick phase takes, and what waits in the replication queue. It describes how the daemon is working now, where `status` describes the state of the cluster.
 _Avoid_: Metrics, telemetry, stats (`stats` is the storage figures)
 
+**Purge**:
+Asking every member to reclaim the chunks no file uses now instead of after the retention period. The reclaim gate still applies, so a member that has not caught up holds it back until it has. Not undoable.
+_Avoid_: Cleanup, force GC
+
 **Peer path**:
 The traffic between this node and one other member, counted at each end. Two ends that disagree about the same path show loss or a stall on it.
 _Avoid_: Link (a hardlink), connection, route

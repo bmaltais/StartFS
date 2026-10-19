@@ -28,6 +28,9 @@ pub enum Request {
     Activity,
     /// Ask every reachable member for its storage figures.
     NodeStats,
+    /// Reclaim the chunks no file uses on every member now, instead of after
+    /// the retention period. The reclaim gate still applies.
+    Purge,
     /// Mint another join token (valid for the configured time).
     NewToken,
     /// Change settings of this node; unset fields stay as they are.
@@ -274,6 +277,13 @@ pub struct LogStatus {
     pub objects: u64,
 }
 
+/// Who a purge was sent to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeReport {
+    /// Members told to purge, this one included: all of them.
+    pub asked: Vec<MemberId>,
+}
+
 /// Garbage collection of chunks no file references any more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcStatus {
@@ -286,6 +296,10 @@ pub struct GcStatus {
     /// Members the reclaim gate is waiting to catch up with before it lets
     /// eligible orphans go. Empty when it holds nothing back.
     pub waiting_on: Vec<MemberId>,
+    /// A purge is under way on this node: orphans are reclaimed as soon as
+    /// the gate allows, whatever the retention period.
+    #[serde(default)]
+    pub purging: bool,
 }
 
 /// The overall answer to "is my data safe right now?", worst condition first.
@@ -377,6 +391,7 @@ pub enum Response {
     Done,
     Status(Box<Status>),
     Activity(Box<ActivityReport>),
+    Purged(PurgeReport),
     NodeStats(Vec<NodeReport>),
     Error(String),
 }
@@ -580,6 +595,14 @@ impl Client {
             activity: Some(on),
         })? {
             Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Reclaim unused chunks on every member now.
+    pub fn purge(&self) -> Result<PurgeReport, Error> {
+        match self.call(&Request::Purge)? {
+            Response::Purged(report) => Ok(report),
             other => Err(unexpected(other)),
         }
     }

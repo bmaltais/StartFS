@@ -46,6 +46,7 @@ impl Daemon {
                 self.join(&token, offer_bytes)?;
                 Response::Joined
             }
+            Request::Purge => Response::Purged(self.purge()?),
             Request::NodeStats => Response::NodeStats(self.node_reports()?),
             Request::Activity => Response::Activity(Box::new(self.activity_report()?)),
             Request::Status => Response::Status(Box::new(self.status()?)),

@@ -8,6 +8,7 @@ mod figures;
 mod latency;
 mod membership;
 mod peers;
+mod purge;
 mod requests;
 mod status;
 
@@ -52,6 +53,9 @@ const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// How often the garbage collector looks for orphaned chunks.
 const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How often it looks while a purge is still taking in recent deletes.
+const PURGE_INTERVAL: Duration = Duration::from_secs(5);
 
 const DOWN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
@@ -111,6 +115,10 @@ pub struct Daemon {
     activity: Arc<Activity>,
     /// Set once the process has been asked to stop; `status` reports it.
     stopping: AtomicBool,
+    /// A purge was asked for: orphans this node knew of by that time (the
+    /// cutoff) are reclaimed without waiting out the retention, as the reclaim
+    /// gate allows, until a pass holds none back. Later deletes keep their retention.
+    purging: Mutex<Option<Nanos>>,
 }
 
 /// Garbage collection as `status` reports it.
@@ -184,6 +192,7 @@ impl Daemon {
                 scrubber: Scrubber::new(fs.clone()),
                 power: Mutex::new(Arc::new(MainsPower)),
                 stopping: AtomicBool::new(false),
+                purging: Mutex::new(None),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -436,6 +445,7 @@ impl Daemon {
         else {
             return false;
         };
+        let purge_cutoff = *self.purging.lock().unwrap();
         let now = self.clock.now();
         let synced = self.synced_with_peers();
         let mut last = self.last_gc.lock().unwrap();
@@ -448,17 +458,34 @@ impl Daemon {
             .last
             .held_since
             .is_some_and(|since| peers.iter().all(|p| caught_up(&synced, p, since)));
-        let due = last.is_none_or(|t| now.saturating_sub(t) >= GC_INTERVAL.as_nanos() as u64);
+        // A purge looks often while deletes may still be arriving, and once more
+        // after that window; if the gate then holds something back it reruns
+        // when the gate opens, like any pass.
+        let since_last = |t: Nanos| now.saturating_sub(t);
+        let purge_due = purge_cutoff.is_some_and(|cutoff| {
+            last.is_some_and(|t| {
+                if now < cutoff {
+                    since_last(t) >= PURGE_INTERVAL.as_nanos() as u64
+                } else {
+                    t < cutoff
+                }
+            })
+        });
+        let due = purge_due || last.is_none_or(|t| since_last(t) >= GC_INTERVAL.as_nanos() as u64);
         if !due && !gate_now_open {
             return false;
         }
         *last = Some(now);
-        let Ok(report) = self.fs.collect_garbage(retention, |since| {
+        let Ok(report) = self.fs.collect_garbage(retention, purge_cutoff, |since| {
             peers.iter().all(|p| caught_up(&synced, p, since))
         }) else {
             eprintln!("startfs: garbage collection failed");
             return false;
         };
+        // A pass that holds nothing back has freed everything there was to free.
+        if purge_cutoff.is_some_and(|cutoff| now >= cutoff) && report.held_since.is_none() {
+            *self.purging.lock().unwrap() = None;
+        }
         let mut gc = self.gc.lock().unwrap();
         gc.reclaimed_chunks += report.reclaimed_chunks;
         gc.reclaimed_bytes += report.reclaimed_bytes;

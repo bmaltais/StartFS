@@ -44,6 +44,9 @@ pub enum Message {
     StatsRequest,
     /// The sender's own storage figures, in answer to a [`Message::StatsRequest`].
     StatsReply(NodeStats),
+    /// "Reclaim the chunks no file uses now, without waiting out the retention
+    /// period." The reclaim gate still applies.
+    Purge,
 }
 
 /// The kinds of traffic the activity view tells apart.
@@ -98,7 +101,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 11;
+pub const PROTOCOL_VERSION: u8 = 12;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -193,8 +196,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        11,
-        "67924192397a86dc550bae3e6dfd5b4df7f93ecf849879858510cdb6218e8a0c",
+        12,
+        "e7f713ca1abc2b31de1b1cb114e236d9fa264d7df29db8e562845fda523e21f6",
     );
 
     #[test]
@@ -260,6 +263,7 @@ mod tests {
             Message::Copies { copies: 3, rev: 2 },
             Message::ChunkAck([1u8; 32], Replica::Missing),
             Message::StatsRequest,
+            Message::Purge,
             Message::StatsReply(NodeStats {
                 usage: Usage {
                     chunks: 1,

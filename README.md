@@ -338,6 +338,17 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `allowed_tags` | `[]` | Tailscale ACL tags a peer must carry (empty: any tailnet machine) |
 | `whois_socket` | platform default | `tailscaled` socket |
 
+### Freeing the space of deleted files
+
+Deleting a file keeps its data for `gc_retention_secs` (7 days by default), so a mistake can be
+undone. `startfs purge` ends that wait for what is deleted by now: every member frees the data as
+soon as it has caught up with all the others (`startfs status` shows `purge in progress`, and names
+a member that holds it back). It **cannot be undone**: the deleted files are gone. It needs every
+member up, and refuses otherwise (naming the ones away; `startfs remove` a member that is gone for
+good): a member that missed it would keep its copies and hand them back to the others when it
+returns. Files deleted after the purge keep their usual 7 days. If a daemon restarts mid-purge, run
+it again. Every member must run protocol 12 (release 1.5.0 or newer).
+
 ### Why is a transfer slow?
 
 `startfs activity` (`--json` for scripts) shows this machine's own last minute: bytes and
