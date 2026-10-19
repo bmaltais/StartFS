@@ -39,6 +39,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// After a failed connection attempt, messages for that peer are dropped for this long.
 const RETRY_AFTER: Duration = Duration::from_secs(2);
 const CLOSE_REFUSED: u32 = 1;
+/// Chunk bytes waiting in the inbox past which a stream stops being read, so QUIC flow control
+/// slows the sender instead of this node's memory growing (#91). Metadata and gossip are exempt.
+pub const INBOX_BULK_LIMIT: u64 = 64 << 20;
+const INBOX_POLL: Duration = Duration::from_millis(5);
 
 /// Resolve a `host:port` string, preferring IPv4: nodes listen on their tailnet
 /// IPv4 only, while a MagicDNS name also carries an IPv6 address.
@@ -86,8 +90,41 @@ struct Shared {
     /// Messages and bytes sent into the inbox and not yet taken out.
     inbox_messages: AtomicU64,
     inbox_bytes: AtomicU64,
+    /// Chunk bytes queued or in flight to each peer.
+    backlog: Mutex<HashMap<NodeId, u64>>,
     /// When a frame from each peer last arrived, handled by the daemon or not.
     heard: Mutex<HashMap<NodeId, Instant>>,
+}
+
+/// A message queued for a peer, with its claim on the backlog when it carries chunk bytes.
+type Outgoing = (Vec<u8>, Option<Held>);
+
+/// Counts a chunk message against a peer's backlog until it is dropped.
+struct Held {
+    shared: Arc<Shared>,
+    to: NodeId,
+    bytes: u64,
+}
+
+impl Held {
+    fn new(shared: &Arc<Shared>, to: NodeId, bytes: usize) -> Self {
+        let bytes = bytes as u64;
+        *shared.backlog.lock().unwrap().entry(to).or_default() += bytes;
+        Self {
+            shared: shared.clone(),
+            to,
+            bytes,
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut backlog = self.shared.backlog.lock().unwrap();
+        if let Some(n) = backlog.get_mut(&self.to) {
+            *n = n.saturating_sub(self.bytes);
+        }
+    }
 }
 
 impl Shared {
@@ -111,7 +148,7 @@ pub struct QuicTransport {
     shared: Arc<Shared>,
     local_addr: SocketAddr,
     inbox: Mutex<Receiver<(NodeId, Vec<u8>)>>,
-    senders: Mutex<HashMap<NodeId, UnboundedSender<Vec<u8>>>>,
+    senders: Mutex<HashMap<NodeId, UnboundedSender<Outgoing>>>,
     endpoint: quinn::Endpoint,
     runtime: Option<tokio::runtime::Runtime>,
 }
@@ -165,6 +202,7 @@ impl QuicTransport {
             inbox: Mutex::new(tx),
             inbox_messages: AtomicU64::new(0),
             inbox_bytes: AtomicU64::new(0),
+            backlog: Mutex::new(HashMap::new()),
             heard: Mutex::new(HashMap::new()),
         });
         runtime.spawn(accept_loop(shared.clone(), endpoint.clone()));
@@ -214,11 +252,12 @@ impl Transport for QuicTransport {
             ));
             senders.insert(to, tx);
         }
+        let held = Message::is_bulk(&msg).then(|| Held::new(&self.shared, to, msg.len()));
         #[allow(
             clippy::let_underscore_must_use,
             reason = "best-effort send to a peer that may be gone"
         )]
-        let _ = senders[&to].send(msg);
+        let _ = senders[&to].send((msg, held));
     }
 
     fn recv(&self) -> Option<(NodeId, Vec<u8>)> {
@@ -228,6 +267,16 @@ impl Transport for QuicTransport {
             .inbox_bytes
             .fetch_sub(body.len() as u64, Ordering::Relaxed);
         Some((from, body))
+    }
+
+    fn backlog(&self, to: NodeId) -> u64 {
+        self.shared
+            .backlog
+            .lock()
+            .unwrap()
+            .get(&to)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn inbox(&self) -> Option<Inbox> {
@@ -361,8 +410,21 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
             shared.fail(from, Error::MessageTooLarge(len));
             return;
         }
-        let mut body = vec![0u8; len];
-        if stream.read_exact(&mut body).await.is_err() {
+        // The variant is in the first two bytes: read them, and hold a chunk message back while
+        // the inbox is over its limit, before its body takes any memory. Each chunk is a stream
+        // of its own, so the check cannot wait until after the read.
+        let mut head = [0u8; 2];
+        let head = &mut head[..len.min(2)];
+        if stream.read_exact(head).await.is_err() {
+            return;
+        }
+        let bulk = Message::is_bulk(head);
+        while bulk && shared.inbox_bytes.load(Ordering::Relaxed) > INBOX_BULK_LIMIT {
+            tokio::time::sleep(INBOX_POLL).await;
+        }
+        let mut body = head.to_vec();
+        body.resize(len, 0);
+        if stream.read_exact(&mut body[head.len()..]).await.is_err() {
             return;
         }
         shared.inbox_messages.fetch_add(1, Ordering::Relaxed);
@@ -433,11 +495,11 @@ async fn peer_sender(
     endpoint: quinn::Endpoint,
     peer: NodeId,
     addr: SocketAddr,
-    mut queue: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    mut queue: tokio::sync::mpsc::UnboundedReceiver<Outgoing>,
 ) {
     let mut link: Option<Link> = None;
     let mut failed_at: Option<Instant> = None;
-    while let Some(msg) = queue.recv().await {
+    while let Some((msg, held)) = queue.recv().await {
         if msg.len() > MAX_MESSAGE {
             shared.fail(peer, Error::MessageTooLarge(msg.len()));
             continue;
@@ -470,6 +532,7 @@ async fn peer_sender(
         if Message::is_bulk(&msg) {
             let conn = l.conn.clone();
             tokio::spawn(async move {
+                let _held = held;
                 if let Ok(mut stream) = conn.open_uni().await {
                     #[allow(
                         clippy::let_underscore_must_use,

@@ -2,9 +2,9 @@
 //! through FsOps and the control interface on a simulated cluster.
 
 use startfs_core::control::Shortfall;
-use startfs_core::net::NodeId;
+use startfs_core::net::{NodeId, Transport};
 use startfs_core::ops::*;
-use startfs_core::replication::RETRY;
+use startfs_core::replication::{BACKLOG_LIMIT, RETRY};
 use startfs_core::sync::HELLO_INTERVAL;
 use startfs_harness::{Cluster, noise};
 use std::time::Duration;
@@ -319,4 +319,37 @@ fn a_chunk_on_several_members_is_counted_once_cluster_wide() {
             "node {node}"
         );
     }
+}
+
+#[test]
+fn a_slow_link_holds_no_more_chunk_bytes_than_the_backlog_limit() {
+    let c = Cluster::with_offers(1, &[BIG, BIG, 0]);
+    let (client, a, b) = (c.transport(2).local(), NodeId(0), NodeId(1));
+    for peer in [a, b] {
+        c.network().set_delay(client, peer, Duration::from_secs(3));
+    }
+    let writer = c.fs(2);
+    // 120 MiB the client must push, about half to each storage node.
+    for i in 0..40 {
+        put(&writer, &format!("f{i}"), &noise(3 << 20, i + 1));
+    }
+
+    let mut most = 0;
+    for _ in 0..30 {
+        c.advance(Duration::from_secs(1));
+        c.tick();
+        for peer in [a, b] {
+            most = most.max(c.transport(2).backlog(peer));
+        }
+    }
+    // One message may take a peer just over the limit.
+    assert!(most > 0, "nothing was pushed");
+    assert!(
+        most <= BACKLOG_LIMIT + (4 << 20),
+        "{most} bytes queued to one peer"
+    );
+
+    // The limit slows the push; it does not stop it.
+    c.elapse(Duration::from_secs(600));
+    assert_eq!(c.control(2).status().unwrap().staging.chunks, 0);
 }

@@ -22,7 +22,15 @@ base=$((20000 + RANDOM % 20000)); i=0
 for n in $names J; do eval "PORT_$n=$((base + i))"; i=$((i + 1)); done
 for n in $names J; do mkdir -p "$WORK/$n/mnt"; done
 if [ -n "${CAP:-}" ]; then
-  WRAP_J="sudo -n systemd-run --scope -q --uid=$(id -u) --gid=$(id -g) -p CPUQuota=200% -p MemoryMax=4G -p MemorySwapMax=0 -p IOWriteIOPSMax=$DEV\ 500 -p IOWriteBandwidthMax=$DEV\ 60M env HOME=$HOME PATH=$PATH"
+  # one script, so the property values keep their spaces when start_node word-splits WRAP_J
+  cat > "$WORK/capped" <<CAPPED
+#!/bin/sh
+exec sudo -n systemd-run --scope -q --uid=$(id -u) --gid=$(id -g) -p CPUQuota=200% -p MemoryMax=4G \\
+  -p MemorySwapMax=0 -p "IOWriteIOPSMax=$DEV 500" -p "IOWriteBandwidthMax=$DEV 60M" \\
+  env HOME=$HOME PATH=$PATH "\$@"
+CAPPED
+  chmod +x "$WORK/capped"
+  WRAP_J="$WORK/capped"
 fi
 say "starting $NODES nodes"
 start_node A "$WORK/A/mnt"

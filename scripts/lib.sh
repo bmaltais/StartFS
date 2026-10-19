@@ -55,8 +55,10 @@ start_node() {
     PIDS+=($pid)
     # the wrapper's own command line names the data dir too: take the process that is the daemon
     pid=
+    local tries=0
     until [ -n "$pid" ]; do
-      for p in $(pgrep -f "[d]ata-dir $d/data"); do [ "$(cat "/proc/$p/comm")" = startfs ] && pid=$p; done
+      [ $((tries++)) -lt 300 ] || { echo "daemon $name did not start under: $wrap"; exit 1; }
+      for p in $(pgrep -f "[d]ata-dir $d/data"); do [ "$(cat "/proc/$p/comm")" = "$(basename "$BIN" | cut -c1-15)" ] && pid=$p; done
       sleep 0.05
     done
   fi

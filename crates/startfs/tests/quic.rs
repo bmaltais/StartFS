@@ -193,6 +193,50 @@ fn a_bulk_chunk_transfer_does_not_stall_metadata() {
     assert!(second == bulk);
 }
 
+#[test]
+fn a_receiver_that_falls_behind_holds_a_bounded_inbox_and_still_hears_metadata() {
+    use startfs::quic::INBOX_BULK_LIMIT;
+    use startfs_core::protocol::Message;
+    let whois = tailnet();
+    let a = node(1, &whois, &[]);
+    let b = node(2, &whois, &[]);
+    let b_at_a = a.resolve(&b.local_addr().to_string()).unwrap();
+    let small = Message::Members(vec![]).encode();
+    a.send(b_at_a, small.clone());
+    recv_within(&b, Duration::from_secs(5)).expect("connected");
+
+    // Twice the limit in chunk messages, none of which `b` takes off its inbox yet.
+    let each = 16 << 20;
+    let count = 2 * INBOX_BULK_LIMIT as usize / each;
+    for i in 0..count {
+        a.send(
+            b_at_a,
+            Message::ChunkPush([i as u8; 32], Some(vec![0xAB; each])).encode(),
+        );
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let held = b.inbox().unwrap().bytes;
+    assert!(
+        held <= INBOX_BULK_LIMIT + each as u64 + 1024,
+        "{held} bytes in the inbox"
+    );
+
+    // Metadata is not held up behind the chunks.
+    a.send(b_at_a, small.clone());
+    let mut chunks = 0;
+    let mut saw_small = false;
+    let start = Instant::now();
+    while chunks < count && start.elapsed() < Duration::from_secs(60) {
+        match recv_within(&b, Duration::from_secs(5)) {
+            Some((_, m)) if m == small => saw_small = true,
+            Some(_) => chunks += 1,
+            None => {}
+        }
+    }
+    assert!(saw_small, "metadata never arrived");
+    assert_eq!(chunks, count, "chunks were dropped, not slowed");
+}
+
 // ---- the real whois client, against a stand-in for tailscaled's local API ----
 
 mod local_api {

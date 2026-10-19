@@ -262,6 +262,34 @@ it does not reproduce the live `meta.redb` flood (about 7,500 `pwrite64` in 6 s)
 restart of an idle cluster writes almost nothing to `meta.redb` and sends about 400 "do you hold
 this chunk?" messages a second.
 
+## 8. A new empty member joins (#78, #91 step 1)
+
+`scripts/profile-join.sh`: four loopback nodes (10 GiB offers, 3 copies) hold 4,000 small files plus
+100 files of 1 MiB; a fifth node joins with a 100 GiB offer. `CAP=1` runs the joiner like the live
+vps2 (2 vCPU, 4 GiB, 500 IOPS, 60 MB/s). Resident memory of the joiner, single runs:
+
+| | main (1.5.1) | trim | trim + bounds |
+|---|---|---|---|
+| joiner peak (`VmHWM`) | 811 to 976 MiB | 1,023 MiB | **149 to 187 MiB** |
+| joiner after it settled | 780 to 840 MiB | 44 MiB | 30 to 44 MiB |
+| the four existing nodes, peak | about 40 MiB | about 40 MiB | 79 to 93 MiB |
+| seconds until `SAFE` | 19 | 19 | 21 |
+
+Where the memory was: `mallinfo2` every 100 ms on the joiner showed *live* bytes climbing to about
+800 MiB in 3 s and draining in 2.5 s (the inbox: nothing bounded it), and after that the allocator
+holding 840 MiB of free pages with 24 MiB in use (`gdb` `malloc_stats()`: 363 MB in ten arenas;
+`malloc_trim(0)` took the resident size from 343 to 44 MiB). Three changes:
+
+- `malloc_trim(0)` from the tick every 2 s returns freed pages (`allocator.rs`).
+- A receiver stops reading a chunk message while the inbox holds more than 64 MiB; QUIC flow
+  control slows the sender.
+- The replicator withholds a chunk push while the transport holds 32 MiB for that peer
+  (`Transport::backlog`); without it the memory only moved to the senders (peak 191 to 410 MiB).
+
+Tests: `a_slow_link_holds_no_more_chunk_bytes_than_the_backlog_limit` (harness; 69 MB queued to one
+peer without the limit) and `a_receiver_that_falls_behind_holds_a_bounded_inbox_and_still_hears_metadata`
+(real QUIC over loopback).
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

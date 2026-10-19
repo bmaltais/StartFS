@@ -475,4 +475,8 @@ impl Transport for CountingTransport {
     fn inbox(&self) -> Option<crate::net::Inbox> {
         self.inner.inbox()
     }
+
+    fn backlog(&self, to: NodeId) -> u64 {
+        self.inner.backlog(to)
+    }
 }
