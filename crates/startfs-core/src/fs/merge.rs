@@ -390,6 +390,85 @@ struct Placed {
     conflict: bool,
 }
 
+/// What the tree tables should hold after a rebuild.
+#[derive(Default)]
+struct Shown {
+    inodes: HashMap<Ino, Vec<u8>>,
+    dirents: HashMap<(Ino, String), Ino>,
+    names: HashMap<(Ino, String), Vec<u8>>,
+    conflicts: HashMap<Ino, Vec<u8>>,
+}
+
+impl Shown {
+    /// Bring the tables to exactly this, writing only the rows that differ: a
+    /// rebuild costs disk writes in proportion to what changed, not to the tree.
+    fn write(&self, t: &mut Tables<'_>) -> FsResult<()> {
+        let mut kept = HashSet::new();
+        t.inodes
+            .retain(|k, v| {
+                let keep = k == ROOT_INO || self.inodes.get(&k).is_some_and(|w| w == v);
+                if keep {
+                    kept.insert(k);
+                }
+                keep
+            })
+            .map_err(db)?;
+        for (ino, raw) in self.inodes.iter().filter(|(ino, _)| !kept.contains(*ino)) {
+            t.inodes.insert(*ino, raw.as_slice()).map_err(db)?;
+        }
+        let mut kept = HashSet::new();
+        t.dirents
+            .retain(|(dir, name), ino| {
+                let key = (dir, name.to_string());
+                let keep = self.dirents.get(&key) == Some(&ino);
+                if keep {
+                    kept.insert(key);
+                }
+                keep
+            })
+            .map_err(db)?;
+        for (key, ino) in self.dirents.iter().filter(|(key, _)| !kept.contains(*key)) {
+            t.dirents
+                .insert((key.0, key.1.as_str()), *ino)
+                .map_err(db)?;
+        }
+        let mut kept = HashSet::new();
+        t.names
+            .retain(|(dir, name), raw| {
+                let key = (dir, name.to_string());
+                let keep = self.names.get(&key).is_some_and(|w| w == raw);
+                if keep {
+                    kept.insert(key);
+                }
+                keep
+            })
+            .map_err(db)?;
+        for (key, raw) in self.names.iter().filter(|(key, _)| !kept.contains(*key)) {
+            t.names
+                .insert((key.0, key.1.as_str()), raw.as_slice())
+                .map_err(db)?;
+        }
+        let mut kept = HashSet::new();
+        t.conflicts
+            .retain(|k, v| {
+                let keep = self.conflicts.get(&k).is_some_and(|w| w == v);
+                if keep {
+                    kept.insert(k);
+                }
+                keep
+            })
+            .map_err(db)?;
+        for (ino, raw) in self
+            .conflicts
+            .iter()
+            .filter(|(ino, _)| !kept.contains(*ino))
+        {
+            t.conflicts.insert(*ino, raw.as_slice()).map_err(db)?;
+        }
+        Ok(())
+    }
+}
+
 impl LocalFs {
     /// The content and attributes of an inode as a log snapshot.
     pub(super) fn snapshot(&self, i: &Inode) -> Snapshot {
@@ -931,10 +1010,7 @@ impl LocalFs {
             by_parent.entry(p.parent).or_default().push(idx);
         }
 
-        t.dirents.retain(|_, _| false).map_err(db)?;
-        t.names.retain(|_, _| false).map_err(db)?;
-        t.conflicts.retain(|_, _| false).map_err(db)?;
-        t.inodes.retain(|k, _| k == ROOT_INO).map_err(db)?;
+        let mut want = Shown::default();
         let mut queue = VecDeque::from([ROOT_INO]);
         let mut paths: HashMap<Ino, String> = HashMap::from([(ROOT_INO, String::new())]);
         // Directories that lost a name collision to another directory: their
@@ -1018,12 +1094,12 @@ impl LocalFs {
                     content: v.content.clone(),
                     xattrs: v.xattrs.clone(),
                 };
-                t.put(p.ino, &inode)?;
-                t.dirents.insert((dir, name.as_str()), p.ino).map_err(db)?;
+                want.inodes.insert(p.ino, encode(&inode));
+                want.dirents.insert((dir, name.clone()), p.ino);
                 let slots: Vec<(Ino, Hlc)> = std::iter::once((p.ino, p.slot))
                     .chain(also.get(&idx).into_iter().flatten().copied())
                     .collect();
-                t.set_slots(dir, &name, &slots)?;
+                want.names.insert((dir, name.clone()), enc(&slots));
                 if p.kind != FileKind::Dir {
                     *links.entry(p.ino).or_insert(0u32) += 1;
                 }
@@ -1044,13 +1120,14 @@ impl LocalFs {
             }
         }
         for (ino, recs) in recs {
-            t.conflicts.insert(ino, enc(&recs).as_slice()).map_err(db)?;
+            want.conflicts.insert(ino, enc(&recs));
         }
         for (ino, n) in links.into_iter().filter(|&(_, n)| n > 1) {
-            let mut inode = t.inode(ino)?;
+            let mut inode = decode(&want.inodes[&ino])?;
             inode.nlink = n;
-            t.put(ino, &inode)?;
+            want.inodes.insert(ino, encode(&inode));
         }
+        want.write(t)?;
         t.counters.remove(STALE).map_err(db)?;
         Ok(())
     }

@@ -223,6 +223,29 @@ limited by the chunk files (one write and one fsync each, 4,189 per receiver for
 by `meta.redb`. The live pattern (almost only `meta.redb` writes) followed a rolling restart, so
 #85 stays open until that case is reproduced and fixed.
 
+Still, `reconcile` rewrote every directory entry, name and inode on each rebuild, so even one
+rebuild per tick cost writes in proportion to the tree. Applying one new file on a node that holds
+N files, write syscalls (a throwaway test around `catch_up` and `apply_remote`):
+
+| files held | 2,000 | 8,000 | 20,000 |
+|---|---|---|---|
+| rewrite everything | 87 | 316 | 779 |
+| write only what differs | 17 | 20 | 22 |
+
+On the 500 IOPS live disk 779 writes is about 1.5 s for one entry per tick, and the live tree held
+26,719 objects. That is the likely source of the live flood: a tick that applies entries always pays
+the whole tree. The rebuild still reads the whole tree (CPU), but the disk writes follow the change.
+Receiver `meta.redb` `pwrite64` for the 4,200-file copy on three loopback nodes (single runs under
+`strace`): 5,788 before #87, 3,355 after it, 1,724 and 1,538 with this change.
+
+With the disk capped to 500 IOPS and 60 MB/s (`scripts/profile-apply.sh`, `TRACE=1`, 1,000 small and
+20 large files, one run per build): `meta.redb` `pwrite64` 3,913 on the build before #87 and 2,392
+now; copy time 85 s and 91 s; tick average 48 and 51 ms; inbox 7 and 0 entries at the end. A tree
+that small does not stall either build, and the copy is limited by the chunk fsyncs, so the
+issue's acceptance check (tick under a second, inbox near 0 on a 4,000-file burst) cannot tell the
+builds apart on loopback. The evidence for the fix is the table above; the live check needs a
+node with a tree of about 26,000 objects.
+
 ### The live disks
 
 The live VPSes (vps1, vps2) are Azure Standard_B2als_v2 (2 vCPU, 4 GiB; the VM allows 3,750
