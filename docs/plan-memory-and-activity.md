@@ -131,6 +131,39 @@ the machine (`startfs`, `startfs.attempt-*`, `startfs.old-20261019`); nothing wa
 watcher and recovery scripts were throwaway (in the session scratchpad); the pattern to keep is a
 watcher with explicit stop rules, which could become `scripts/watch-join.sh`.
 
+## What the 2026-10-19 live join showed (1.5.4)
+
+#97 (skip chunks that only wait for answers, drain peer messages by time) and #99 (work at most
+1024 chunks per poll) were released as 1.5.3 and 1.5.4 and rolled out with `scripts/rolling-upgrade.sh`.
+On loopback (`scripts/profile-storm.sh`, 22,351 objects, two 100 GiB nodes on one CPU each, a 100G
+joiner) the big nodes' inbox peak fell from 103,000 to 153,000 entries to 16,000 to 20,000 and their
+longest tick from 1.4 to 1.7 s to about 0.5 s.
+
+Then vps2 was added live as a new empty member with `--offer 10G` (`scripts/watch-join.sh v1.5.4`,
+stop rules: a healthy node over 90% busy for 3 minutes, a tick over 10 s, a member not `up` for 45 s,
+memory). No rule tripped; every member was `SAFE` with empty inboxes 67 s after the join and vps2 was
+ready after 102 s.
+
+| peaks during the join | inbox (entries) | busy (60 s average) | longest tick | resident |
+|---|---|---|---|---|
+| healthy members (5) | 311 to 1,742 | 11 to 51% | 68 to 89 ms | 86 to 131 MiB |
+| vps2 | 10,657 | 96% | 1,493 ms | 291 MiB |
+
+Before (1.5.2, same offer): healthy inboxes 94,091 and 155,959, busy 98 to 99%, the stop rule tripped
+after about 2 minutes.
+
+The worst case followed: vps1 (the same VM size as vps2: 2 vCPU, 4 GiB) joined with `--offer 100G`,
+with vps2 already a member (7 members). No rule tripped; every member was `SAFE` with empty inboxes
+and vps1 was ready after 117 s.
+
+| peaks during the 100G join | inbox (entries) | busy (60 s average) | longest tick | resident |
+|---|---|---|---|---|
+| `mini1`, `ocilab1` (100 GiB) | 730, 1,353 | 61%, 40% | 123, 93 ms | 141, 125 MiB |
+| `mini2`, `local`, `surface`, vps2 | 4 to 1,188 | 15 to 33% | 36 to 110 ms | 118 to 158 MiB |
+| vps1 (the joiner) | 8,767 | 97% | 1,151 ms | 269 MiB |
+
+Open: single runs of each; the offer-weighted share a weak node holds is still not capped (#84).
+
 ## Order
 
 Ranked by value on 2026-10-19: what takes a node out comes first, then what makes everything slow,
