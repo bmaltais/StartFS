@@ -181,11 +181,21 @@ alternating on and off, one node, 1 copy, median wall time of the FUSE side:
 | sum of the four | 1.698 s | 1.712 s | -0.8% |
 
 The runs differ by more than 1% in both directions (the fastest `dd` run was with the counters
-on), so this benchmark cannot resolve the cost: the sum is within noise (-0.8%), not proven under
-1%. One node has no peers, so this covers the tick timers and the window, not the per-message
-counting, which was not measured separately. The default stays on on that basis; if a quieter
-measurement (several nodes, `make-tree.py` copy, on vs off) shows 1% or more, the issue's rule is
-to make the default off.
+on), so this single-node benchmark cannot resolve the cost: the sum is within noise (-0.8%). It has
+no peers, so it does not cover the per-message counting. That was measured on three loopback nodes
+(3 copies, a fixed-seed `make-tree.py` tree of 3000 small and 150 x 1 MiB files, 6 runs each,
+alternating, `activity` on or off on all three nodes, CPU from `/proc/PID/stat` over the copy until
+staging drained, 274 MiB per run):
+
+| Median over 6 runs | `activity` on | `activity` off |
+|---|---|---|
+| CPU of the writer's daemon | 9.47 s | 9.60 s |
+| CPU of a receiving daemon | 3.15 s | 3.11 s |
+| both together | 12.62 s | 12.71 s (on is -0.7%) |
+| time until staging drained | 9.0 s | 10.3 s |
+
+Single runs vary by 3 to 6% either way, so the counters cost less than the benchmark can see;
+that meets the "under 1%" criterion as far as it can be measured, and the default stays on.
 
 Observed on three loopback nodes (3 copies, one frozen with SIGSTOP, `make-tree.py` default tree
 copied into another): the tick averaged 43 ms with 42.8 ms in the replicate phase and was busy
