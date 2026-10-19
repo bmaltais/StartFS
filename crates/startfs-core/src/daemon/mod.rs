@@ -583,6 +583,13 @@ impl Daemon {
         let lost = self.unseen_members(&members, me, grace, now);
         let down = self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), now);
         let (sleeping, kept) = self.sleepers(&members, me, grace, standin_days, now);
+        let heard: HashMap<MemberId, Nanos> = {
+            let heard = self.heard.lock().unwrap();
+            members
+                .iter()
+                .filter_map(|m| Some((m.id, *heard.get(&m.endpoint)?)))
+                .collect()
+        };
         Some(f(&View {
             me,
             copies,
@@ -591,6 +598,7 @@ impl Daemon {
             down: &down,
             sleeping: &sleeping,
             kept: &kept,
+            heard: &heard,
             offer,
             repair_rate: self.config.repair_bytes_per_sec,
             now,
