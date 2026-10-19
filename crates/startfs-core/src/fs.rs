@@ -260,6 +260,10 @@ pub struct LocalFs {
     unsynced: AtomicBool,
     /// When the last lazy commit happened.
     last_lazy: AtomicU64,
+    /// Whether applying a peer's entries leaves the tree to [`Self::end_batch`].
+    batching: AtomicBool,
+    /// Whether a batch left the tree to rebuild.
+    stale: AtomicBool,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -279,6 +283,9 @@ fn check_name(name: &str) -> FsResult<()> {
 fn is_acl(name: &str) -> bool {
     name.starts_with("system.posix_acl_")
 }
+
+/// Counter set while applied entries have not yet been reconciled into the tree.
+const STALE: &str = "tree_stale";
 
 impl LocalFs {
     pub fn open(
@@ -307,6 +314,8 @@ impl LocalFs {
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
             last_lazy: AtomicU64::new(0),
+            batching: AtomicBool::new(false),
+            stale: AtomicBool::new(false),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
@@ -340,6 +349,10 @@ impl LocalFs {
                     xattrs: BTreeMap::new(),
                 };
                 t.put(ROOT_INO, &root)?;
+            }
+            // A crash between a batch of applied entries and its reconcile.
+            if t.counters.get(STALE).map_err(db)?.is_some() {
+                fs.reconcile(t)?;
             }
             Ok(())
         })?;

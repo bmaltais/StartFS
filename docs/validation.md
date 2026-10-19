@@ -203,6 +203,26 @@ copied into another): the tick averaged 43 ms with 42.8 ms in the replicate phas
 4,200 queued chunks timed out about every 5 s (47,804 timeouts in 60 s). The live peer took 20 MiB/s
 at first and 2 MiB/s once the tick was saturated. This is a finding to follow up, not fixed here.
 
+## 7. Applying a peer's burst of metadata (#85, partly)
+
+`reconcile` rebuilt the whole tree (every directory entry, name and inode) for each applied
+message, so a message cost writes in proportion to the tree, not to its entries. Replaying 4,000
+created files into a second node in 5-entry messages (a throwaway test around `catch_up` and
+`apply_remote`): 63,321 write syscalls and 9.0 s with one rebuild per message, 9,452 and 0.17 s with
+one rebuild per 128 messages.
+
+The daemon now rebuilds once per receive drain and applies each peer's entries as one message.
+On three loopback nodes (`scripts/profile-apply.sh`, 4,200 files, 3 copies, `sudo strace -f -y -e
+trace=pwrite64,fdatasync` on one receiver, single runs), `pwrite64` calls to `meta.redb`: 5,788 on
+main, 3,355 now (`fdatasync` 331, 207). That is 1.7x fewer, short of the order of magnitude #85
+asks for, and the copy time did not change.
+
+With the disk capped (`sudo systemd-run --scope -p IOWriteIOPSMax=/dev/mapper/root2 500`, 1,550
+files) the copy took 97 s on main and 99 s now, against about 5 s uncapped. A plain copy is then
+limited by the chunk files (one write and one fsync each, 4,189 per receiver for 4,200 files), not
+by `meta.redb`. The live pattern (almost only `meta.redb` writes) followed a rolling restart, so
+#85 stays open until that case is reproduced and fixed.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

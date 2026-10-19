@@ -649,7 +649,7 @@ impl LocalFs {
                     .insert("hlc_counter", u64::from(h.counter))
                     .map_err(db)?;
             }
-            self.reconcile(t)?;
+            self.settle(t)?;
             Ok(ahead)
         })
     }
@@ -702,10 +702,45 @@ impl LocalFs {
                 applied += 1;
             }
             if applied > 0 {
-                self.reconcile(t)?;
+                self.settle(t)?;
             }
             Ok(applied)
         })
+    }
+
+    /// Start a batch of peer messages: applying their entries records them but
+    /// leaves rebuilding the tree to [`Self::end_batch`], which does it once.
+    /// Peers only see the log, so nothing leaves the node on a stale tree.
+    pub fn begin_batch(&self) {
+        self.batching.store(true, Ordering::SeqCst);
+    }
+
+    /// End a batch: rebuild the tree if entries were applied during it.
+    pub fn end_batch(&self) -> FsResult<()> {
+        self.batching.store(false, Ordering::SeqCst);
+        if !self.stale.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.run(true, |t| {
+            if t.counters.get(STALE).map_err(db)?.is_some() {
+                self.reconcile(t)?;
+            }
+            Ok(())
+        })?;
+        self.stale.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Bring the tree up to date with the objects, or note that it is stale
+    /// (durably, so a crash before [`Self::end_batch`] is repaired at open).
+    fn settle(&self, t: &mut Tables<'_>) -> FsResult<()> {
+        if self.batching.load(Ordering::SeqCst) {
+            t.counters.insert(STALE, 1).map_err(db)?;
+            self.stale.store(true, Ordering::SeqCst);
+            Ok(())
+        } else {
+            self.reconcile(t)
+        }
     }
 
     /// Conflict copies currently in the tree.
@@ -1016,6 +1051,7 @@ impl LocalFs {
             inode.nlink = n;
             t.put(ino, &inode)?;
         }
+        t.counters.remove(STALE).map_err(db)?;
         Ok(())
     }
 }

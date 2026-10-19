@@ -22,6 +22,7 @@ use crate::error::Error;
 use crate::fs::{ChunkSource, GcReport, LocalFs, NodeConfig};
 use crate::members::{Member, MemberId, Membership};
 use crate::net::{NodeId, Transport};
+use crate::oplog::Entry;
 use crate::ops::FsResult;
 use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
@@ -302,6 +303,11 @@ impl Daemon {
         timer.phase(Phase::Sync);
         // A long queue is worked off over several ticks, so the rest of the
         // background work is not starved behind it.
+        // One tree rebuild for the whole drain, not one per message.
+        self.fs.begin_batch();
+        // A peer's entries wait here to be applied in one write transaction;
+        // anything else from that peer applies them first, to keep its order.
+        let mut entries: BTreeMap<NodeId, Vec<Entry>> = BTreeMap::new();
         for _ in 0..DRAIN_PER_TICK {
             let Some((from, raw)) = transport.recv() else {
                 break;
@@ -309,9 +315,21 @@ impl Daemon {
             busy = true;
             self.heard.lock().unwrap().insert(from, self.clock.now());
             match Message::decode(&raw) {
-                Ok(msg) => self.handle_peer_message(&*transport, from, msg),
+                Ok(Message::Entries(more)) => entries.entry(from).or_default().extend(more),
+                Ok(msg) => {
+                    if let Some(held) = entries.remove(&from) {
+                        self.handle_peer_message(&*transport, from, Message::Entries(held));
+                    }
+                    self.handle_peer_message(&*transport, from, msg);
+                }
                 Err(e) => eprintln!("startfs: dropped a message from node {}: {e}", from.0),
             }
+        }
+        for (from, held) in entries {
+            self.handle_peer_message(&*transport, from, Message::Entries(held));
+        }
+        if let Err(e) = self.fs.end_batch() {
+            eprintln!("startfs: cannot rebuild the tree: {e}");
         }
         timer.phase(Phase::Receive);
         busy |= self.keepalive();
