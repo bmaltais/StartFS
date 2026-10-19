@@ -175,6 +175,7 @@ fn resource_figures_the_os_does_not_give_are_unavailable_not_zero() {
     let none = activity(&c, 0).resources;
     assert_eq!(none, Resources::default());
     assert!(none.rss_bytes.is_none() && none.memory_pressure.is_none() && none.cgroup.is_none());
+    assert!(none.io_pressure.is_none() && none.written_bytes.is_none());
 
     c.set_resources(
         0,
@@ -187,6 +188,11 @@ fn resource_figures_the_os_does_not_give_are_unavailable_not_zero() {
                 avg10: 1.5,
                 avg60: 0.5,
             }),
+            io_pressure: Some(Pressure {
+                avg10: 70.0,
+                avg60: 40.0,
+            }),
+            written_bytes: Some(0),
             cgroup: Some(Cgroup {
                 memory_current_bytes: 3 << 30,
                 memory_limit_bytes: None,
@@ -199,6 +205,8 @@ fn resource_figures_the_os_does_not_give_are_unavailable_not_zero() {
     // Present, and zero is a real reading; the ones never given stay absent.
     assert_eq!(seen.swap_used_bytes, Some(0));
     assert!(seen.cpu_secs.is_none() && seen.cpu_pressure.is_none());
+    assert_eq!(seen.io_pressure.unwrap().avg10, 70.0);
+    assert_eq!(seen.written_bytes, Some(0));
     assert_eq!(seen.cgroup.unwrap().memory_limit_bytes, None);
 }
 
