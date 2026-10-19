@@ -28,6 +28,8 @@ struct State {
     errors: HashMap<(NodeId, NodeId), String>,
     /// Every message that was sent over a working link, oldest first.
     traffic: Vec<(NodeId, NodeId, Vec<u8>)>,
+    /// How many times a node told its transport where a member listens.
+    address_lookups: u64,
 }
 
 impl State {
@@ -117,6 +119,12 @@ impl SimNetwork {
     }
 
     /// Make `node` reachable at a `host:port` address, as join tokens name it.
+    /// How many times the nodes told their transports where a member listens; on the real
+    /// network each one is a name lookup.
+    pub fn address_lookups(&self) -> u64 {
+        self.state.lock().unwrap().address_lookups
+    }
+
     pub fn register(&self, addr: &str, node: NodeId) {
         self.state.lock().unwrap().addrs.insert(addr.into(), node);
     }
@@ -156,6 +164,10 @@ impl Transport for SimTransport {
 
     fn local(&self) -> NodeId {
         self.node
+    }
+
+    fn learn(&self, _node: NodeId, _addr: &str) {
+        self.net.state.lock().unwrap().address_lookups += 1;
     }
 
     fn last_error(&self, node: NodeId) -> Option<String> {
