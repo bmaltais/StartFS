@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Called while a control request waits for a peer's answer. A real daemon
 /// sleeps (its background thread makes progress meanwhile); the test harness
@@ -46,8 +46,14 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 const WAIT_ROUNDS: usize = 300;
 
 /// A member not heard from for this long is shown as down.
-/// The most peer messages one tick handles before moving on to its other work.
-const DRAIN_PER_TICK: usize = 128;
+/// A tick handles peer messages until this much time has passed, then moves on to its other
+/// work: a count cannot tell a cheap acknowledgement from a chunk to hash and store (about
+/// 0.7 ms), so a count was too small for acks (the inbox only grew) and too loose for chunks.
+const DRAIN_BUDGET: Duration = Duration::from_millis(20);
+/// The fewest messages a tick handles however long each takes, so it always makes progress.
+const DRAIN_MIN: usize = 16;
+/// The most a tick handles, so the entries it batches stay bounded when every message is cheap.
+const DRAIN_MAX: usize = 2048;
 
 /// How often the operation log is compacted.
 const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -312,7 +318,11 @@ impl Daemon {
         // A peer's entries wait here to be applied in one write transaction;
         // anything else from that peer applies them first, to keep its order.
         let mut entries: BTreeMap<NodeId, Vec<Entry>> = BTreeMap::new();
-        for _ in 0..DRAIN_PER_TICK {
+        let drain_started = Instant::now();
+        for handled in 0..DRAIN_MAX {
+            if handled >= DRAIN_MIN && drain_started.elapsed() >= DRAIN_BUDGET {
+                break;
+            }
             let Some((from, raw)) = transport.recv() else {
                 break;
             };
