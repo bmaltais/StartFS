@@ -54,6 +54,13 @@ same code with a different membership scope.
    copied twice; a member that keeps sleeping keeps them. Each daemon remembers when it last saw
    each member asleep in memory only, so a restarted daemon trims the extras it holds at once
    when the covered member is back. A member unseen past the grace period is lost as before.
+   A change in who is reachable, asleep or lost, or in the members' offers, makes each node check
+   again only the chunks it is still working on and those it holds that the change touches (their
+   targets moved, they need stand-ins, or this node is not a target), not every chunk it holds;
+   a restarted daemon, which has learned nothing yet, checks all of them. A held chunk that is
+   only waiting for peers to say who else holds it is *re-checking*, not short of copies: it is
+   left out of the shortfall and repair counts and `status` shows how many (this node's own
+   figure, not gossiped), unless the peer asked has been silent for more than two retries.
 
 9. **Create and join:** explicit join token. `startfs create --name home --copies 3` on the first
    machine prints a token (filesystem ID plus a bootstrap peer's tailnet address: its MagicDNS name when it has one, else its IP).

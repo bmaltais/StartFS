@@ -212,9 +212,12 @@ fn standins_needed(
 /// less than a retry delay ago and has not been answered by a member that could. Such a chunk
 /// is being checked, not short of copies: a restart or a change of membership asks about many
 /// chunks at once and the answers take a while.
-fn awaiting(track: &Track, view: &View<'_>) -> bool {
+fn awaiting(track: &Track, view: &View<'_>, silent: &HashMap<MemberId, Nanos>) -> bool {
     track.sent.iter().any(|(m, at)| {
-        !track.holders.contains(m)
+        // A peer silent for more than a couple of retries is not slow to answer, it is not
+        // answering: the chunk is short of copies, not being checked.
+        retry_delay(silent, view, *m) <= RETRY.as_nanos() as u64
+            && !track.holders.contains(m)
             && !track.answered.contains(m)
             && !view.down.contains(m)
             && !view.lost.contains(m)
@@ -659,7 +662,7 @@ impl Replicator {
                 && mine
                 && replicas < view.copies
                 && self.fs.has_replica(id)
-                && !awaiting(t, view)
+                && !awaiting(t, view, &st.silent)
             {
                 match tier(replicas) {
                     Tier::AtRisk => progress.at_risk += 1,
@@ -679,7 +682,7 @@ impl Replicator {
                 !t.settled
                     && !self.fs.has_staged(id)
                     && self.fs.has_replica(id)
-                    && awaiting(t, view)
+                    && awaiting(t, view, &st.silent)
             })
             .count() as u64
     }
@@ -697,7 +700,7 @@ impl Replicator {
             if !(t.heard || self.fs.has_staged(id)) {
                 continue;
             }
-            if !self.fs.has_staged(id) && awaiting(t, view) {
+            if !self.fs.has_staged(id) && awaiting(t, view, &st.silent) {
                 continue;
             }
             let replicas = t.holders.len() as u32 + u32::from(held);

@@ -87,3 +87,49 @@ fn chunks_still_being_asked_about_after_a_restart_are_not_reported_as_short_of_c
         "short of copies while only asking: {seen:?}"
     );
 }
+
+fn total_replicas(c: &Cluster) -> u64 {
+    (0..c.node_count())
+        .map(|i| c.control(i).status().map_or(0, |s| s.usage.chunks))
+        .sum()
+}
+
+#[test]
+fn a_member_lost_for_good_has_its_chunks_made_again_on_the_others() {
+    let c = healthy_cluster(3, 5);
+    let before = total_replicas(&c);
+    c.crash(4);
+    // Past the repair grace period (30 minutes), with every node hearing the others.
+    pass(&c, 35 * 60);
+    let after = total_replicas(&c);
+    assert_eq!(after, before, "{after} replicas, were {before}");
+    for i in 0..4 {
+        let s = c.control(i).status().unwrap();
+        assert!(s.unreplicated.is_empty(), "node {i}: {:?}", s.unreplicated);
+    }
+}
+
+#[test]
+fn a_member_that_joins_is_given_the_chunks_placement_now_sends_it() {
+    let c = Cluster::start(5);
+    let token = c.control(0).create("home", 3).unwrap();
+    for i in 1..4 {
+        c.control(i).join(&token, Some(10 << 30)).unwrap();
+    }
+    c.control(0).set_offer(10 << 30).unwrap();
+    c.sync();
+    for i in 0..FILES {
+        let f = c.fs(0).create(ROOT_INO, &format!("f{i}"), 0o644).unwrap();
+        c.fs(0).write(f.ino, 0, &noise(8 * 1024, i + 1)).unwrap();
+    }
+    c.sync();
+    pass(&c, 60);
+    c.control(4).join(&token, Some(10 << 30)).unwrap();
+    pass(&c, 120);
+    let held = c.control(4).status().unwrap().usage.chunks;
+    assert!(held > 0, "the new member holds nothing");
+    for i in 0..5 {
+        let s = c.control(i).status().unwrap();
+        assert!(s.unreplicated.is_empty(), "node {i}: {:?}", s.unreplicated);
+    }
+}
