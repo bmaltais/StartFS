@@ -442,6 +442,7 @@ impl Daemon {
                     reclaimed_chunks: gc.reclaimed_chunks,
                     reclaimed_bytes: gc.reclaimed_bytes,
                     waiting_on: gc_waiting_on,
+                    purging: self.purging.lock().unwrap().is_some(),
                 }
             },
             warnings,

@@ -66,7 +66,12 @@ same code with a different membership scope.
     metadata. A background GC removes chunks that are unreferenced and have been orphaned longer than
     a retention period (default 7 days, configurable). This protects
     against accidental deletes and against nodes returning from offline with stale references. No
-    reference counting. Versioned snapshots are a possible future addition.
+    reference counting. Versioned snapshots are a possible future addition. `startfs purge` ends the
+    wait on request, for what is deleted by then: it refuses unless every member is up (a member that
+    missed it would keep its copies and re-spread them when it returns), sends `Purge` to all, and
+    each member records the orphans it knows and collects with a retention of zero for those first
+    seen up to 30 s after the request (so a delete still arriving is included); later deletes keep
+    their retention. The reclaim gate is kept. A purge cannot be undone.
 
 11. **Remote reads:** fetch on demand with a bounded local LRU cache (size configurable). The cache
     is separate from replica storage and does not count toward the N copies. Recently used files

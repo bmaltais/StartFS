@@ -24,6 +24,7 @@ impl Daemon {
                 | Message::ChunkAck(..)
                 | Message::StatsRequest
                 | Message::StatsReply(_)
+                | Message::Purge
         ) && !self.membership.lock().unwrap().is_member_endpoint(from)
         {
             return;
@@ -75,6 +76,7 @@ impl Daemon {
                     transport.send(from, Message::StatsReply(stats).encode());
                 }
             }
+            Message::Purge => self.begin_purge(),
             Message::StatsReply(stats) => {
                 self.stats_replies.lock().unwrap().insert(from, stats);
             }

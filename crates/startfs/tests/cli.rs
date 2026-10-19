@@ -393,3 +393,20 @@ fn the_activity_setting_in_the_config_file_turns_the_counters_off_from_the_start
         serde_json::from_str(&stdout(&startfs(data, &["activity", "--json"]))).unwrap();
     assert_eq!(json["enabled"], false);
 }
+
+#[test]
+fn cli_purges_deleted_data_without_waiting_for_the_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "1"],
+    ));
+    let text = stdout(&startfs(data, &["purge"]));
+    assert!(text.contains("purge started on 1 member"), "{text}");
+    assert!(!text.contains("not reached"), "{text}");
+    // It is under way, which `status` says; the harness tests cover how it ends.
+    let status = stdout(&startfs(data, &["status"]));
+    assert!(status.contains("purge in progress"), "{status}");
+}
