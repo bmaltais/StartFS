@@ -198,6 +198,45 @@ Not answered: vps2's Azure "CPU Credits Remaining" metric (11:15 to 11:20 UTC 20
 user never gave it, and it is not needed now. vps1 was lowered to `--offer 10G` the same day (a
 stopgap until #84), so both weak nodes now offer 10 GiB.
 
+## What the 1.5.6 live runs showed (2026-10-19)
+
+All seven members on 1.5.6 (`scripts/rolling-upgrade.sh`), vps1 and vps2 both at `--offer 10G`.
+The cluster held about 890 MiB (22,118 objects), far less than the earlier joins, so these runs are
+easier than the 100G join; they show the lookup fix, not the worst case.
+
+**Ingest** (`scripts/watch-ingest.sh`, 6,000 files, 244 MB copied into this node's mount, stop rules
+as in `watch-join.sh`): GREEN. The copy took 8 s; every member was `SAFE` with empty queues and
+inboxes 71 s after it started.
+
+| peaks during the ingest | inbox (entries) | busy (60 s average) | longest tick |
+|---|---|---|---|
+| local (the writer) | 85 | 22% | 74 ms |
+| mini2, surface, ocilab1 | 3,409, 181, 1,721 | 41%, 23%, 65% | 429, 759, 451 ms |
+| mini1 | 6,108 | 97% | 475 ms |
+| vps2, vps1 | 3,086, 2,494 | 35%, 35% | 384, 355 ms |
+
+The writer's replication queue peaked at 5,129 chunks and drained in about 60 s. On 1.5.4 on
+loopback the writer's longest tick was about 450 ms with an inbox of 20,000 to 100,000, and
+`profile-ingest.sh` was RED. mini1 is the hot node (97% busy, the last under 60%); it did not trip
+the rule (over 90% for 180 s). Not looked into.
+
+**Join** (`scripts/watch-join.sh v1.5.6`, vps2 removed and re-joined as a new empty member, offer
+10G, the other six as healthy): ready after 47 s, every member `SAFE` with empty inboxes 35 s after
+the join, no rule tripped.
+
+| peaks during the join | 1.5.4 | 1.5.6 |
+|---|---|---|
+| ready after | 102 s | 47 s |
+| vps2 busy / longest tick / inbox | 96% / 1,493 ms / 10,657 | 96% / 907 ms / 2,700 |
+| healthy members' busy | 11 to 51% | 3 to 13% |
+| healthy members' inbox | 311 to 1,742 | 4 to 2,986 (local 2,986, mini2 1,956) |
+
+The healthy inboxes are the one figure that did not improve: the join announcement arrives as a
+burst, and they drained within 23 s. Single runs of each.
+
+What is left of #74: the per-peer back-off on timeouts (#91 step 3). The ingest tick and the join
+cost are no longer a problem on a cluster this size.
+
 ## Order
 
 Ranked by value on 2026-10-19: what takes a node out comes first, then what makes everything slow,
