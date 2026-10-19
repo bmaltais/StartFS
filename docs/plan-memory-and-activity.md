@@ -237,6 +237,28 @@ burst, and they drained within 23 s. Single runs of each.
 What is left of #74: the per-peer back-off on timeouts (#91 step 3). The ingest tick and the join
 cost are no longer a problem on a cluster this size.
 
+## What 1.5.7 and 1.5.8 changed (2026-10-19)
+
+**1.5.7 (#110, #91 step 3, no protocol change):** a peer that answers nothing is retried after half the
+time it has been silent, from 5 s up to 60 s, and at the usual pace again once anything is heard from it.
+`scripts/profile-deadpeer.sh` (3 loopback nodes, 3 copies, one frozen, 4,200 chunks) is GREEN on the
+released binary: retries in the last minute peaked at about 13,800 and fell to 4,200, against about
+50,000 (4,200 every 5 s) before; busy 2% from 75 s; the healthy peer held all its chunks at copy end.
+This closes what was left of #74.
+
+**1.5.8 (#112, #82, no protocol change):** a change in who is reachable, asleep or lost, or in the
+offers, makes a node check again only the chunks it is working on and those the change touches (targets
+moved, stand-ins needed, held without being a target); a restarted daemon still checks all it holds. A
+held chunk whose asks are outstanding is *re-checking*, not short of copies (`status` shows the count,
+local to the node, not gossiped). Harness: questions sent by the other nodes after a restart, and after a
+member was cut off and back, 504 -> 0 (60 files, 5 nodes, 3 copies). Live rolling upgrade 1.5.7 -> 1.5.8
+of all seven members: 473 s, each node ready in about 60 s, queues 2,500 to 3,800 at restart and 0 within
+about 30 s, inbox peak 63, no `AT RISK`; mini1, which went `DEGRADED` then `AT RISK` on 1.5.1, stayed
+`SAFE` with its queue at 0 within 10 s. The restarted node still reads `DEGRADED` for about 30 s because
+it counts the others as down until their hellos arrive. Not measured: the inbound question rate on the
+other nodes during a restart (no `activity` sampling), and no same-cluster baseline on 1.5.6. Not done:
+debounce, persisting holder knowledge across restarts.
+
 ## Why mini1 ran hot, and the 10G offer (2026-10-19)
 
 In the 1.5.6 ingest mini1 peaked at 97% busy and 6,108 inbox entries, mini2 (the same hardware) at
@@ -288,10 +310,10 @@ then visibility, then the rest.
 | 3 | #85 `meta.redb` write flood | the cause (`reconcile` rewriting the tree) is fixed in 1.5.1 (#87, #89, #88); keep it open until a weak node with a large tree is seen live. Still to do: the rebuild still reads the whole tree (CPU), and the local-write rebuilds are unmeasured | none |
 | 4 | #78 memory growth, with #66 bound the inbound path and #91 step 1 | **done in 1.5.2 (#93), seen live**; the original text: `mini1` went to 5.6 GiB and dropped out; this takes healthy nodes down and is unbounded. The memory is outside the structures `activity` lists, so find it (allocator? decoded or transfer buffers? state chunks?) with `profile-memory.sh` while a member joins, then bound it by bytes | #63 |
 | 5 | #74 tick saturation and retry loop, with #91 steps 2 and 3 | **first now**: the 2026-10-19 evening join put two healthy nodes at 98% busy with 90,000 to 156,000 queued entries; was second: the replicate phase costs time proportional to the queue and retries add load to a node already behind; give the tick a budget, shed optional work over it, back off per peer on timeouts | none |
-| 6 | #82 rescan after restart, joins and flapping | third: also covers adding a member (every node re-plans placement and rescans); pace it, re-check only what changed, and show "re-checking" instead of `AT RISK` when `repair` says 0 at risk | none |
-| 7 | #91 self-protecting nodes (umbrella) | steps 1 to 3 are the items above, no protocol change; step 4 (advertise load) goes with #84 | #78, #74 |
+| 6 | #82 rescan after restart, joins and flapping | **done in 1.5.8 (#112), closed**; third: also covers adding a member (every node re-plans placement and rescans); pace it, re-check only what changed, and show "re-checking" instead of `AT RISK` when `repair` says 0 at risk | none |
+| 7 | #91 self-protecting nodes (umbrella) | steps 1 to 3 are done (1.5.2, 1.5.6, 1.5.7), still open for step 4 and the memory bounds; step 4 (advertise load) goes with #84 | #78, #74 |
 | 8 | #83 I/O pressure and write rate in `activity`; #84 report lagging nodes and weight placement | #83 is small and safe now and feeds #91; #84 changes the hello (protocol bump), so ship it with #66 or #64; it is what finally lets a weak node hold less | #85 for the numbers; #84 with #64 |
-| 9 | #67 redb cache size, #68 unclaimed chunk replies | small, independent | none |
+| 9 | #67 redb cache size, #68 unclaimed chunk replies, #56 read cache from RAM | small, independent; next candidates without a protocol bump | none |
 | 10 | #69 return freed memory to the OS | done in 1.5.2 (#93, `malloc_trim` every 2 s) | none |
 | 11 | #64 cluster-wide activity | needs a protocol bump (ADR 0002); would have shown vps1 as minutes behind | #63; same release as #66/#84 |
 
@@ -321,7 +343,8 @@ sees every path from both ends.
 - After upgrading, confirm each member runs the new version (`startfs --version`) before the test.
 
 Releases so far for this plan: 1.4.0 (#63, no protocol change); 1.5.0 (#77 purge, **protocol 12**:
-upgrade every member together, then `startfs purge` clears the test data).
+upgrade every member together, then `startfs purge` clears the test data); 1.5.7 (#91 back-off) and
+1.5.8 (#82 re-check less), both protocol 12 and safe to roll one member at a time.
 
 How to upgrade every member (learned the hard way on 2026-10-18, when seven restarts in a row left
 four nodes minutes behind):
@@ -348,7 +371,7 @@ upgraded. Each checkpoint names the data it needs (see "Test data") and what mus
 | #85 | Throttled-disk run | done 2026-10-19 (`docs/validation.md` section 7): loopback with the device capped to 500 IOPS and 60 MB/s; a 1,000-file tree is too small to stall either build, so the proof is the one-entry-on-a-big-tree test (779 -> 22 write syscalls) | met in the test; the live check (a weak node with about 26,000 objects) is open |
 | #78, #66, #91 | A member joins a capped node | `profile-memory.sh` or `profile-restart.sh` with a new empty member joining, node capped to 2 vCPU (`CPUQuota=`), 4 GiB (`MemoryMax=`) and 500 IOPS | no node above its normal memory plus the bound; no member leaves `up`; the tick stays in a normal range after a few seconds |
 | #91 | Live: vps2 back in | after the items above, add vps2 alone, sample with `startfs activity` and `/proc/pressure` | vps2 `up` throughout, `data` returns to `SAFE`, no other node above its baseline |
-| #82 | Rolling restart | restart each node of the loopback or real cluster in turn, sample `status` and `activity` | `data` stays `SAFE` (or says re-checking); question rate bounded by changed placement |
+| #82 | Rolling restart | restart each node of the loopback or real cluster in turn, sample `status` and `activity` | `data` stays `SAFE` (or says re-checking); question rate bounded by changed placement. Done for 1.5.8 (see "What 1.5.7 and 1.5.8 changed"), except the question rate |
 | #66 | Bound holds | `profile-memory.sh` at the baseline load and at 5x (`FILES=20000 BIG=1000`), both modes | receiver peak stays near the bound while the load grows 5x |
 | #66 | Live catch-up | restart a node that was away, with `startfs activity` open on a peer | inbound bytes stay under the bound; RSS does not climb past baseline plus the bound |
 | #67, #68 | Regression | `profile-write.sh`, harness tests | no slowdown; tests pass |
