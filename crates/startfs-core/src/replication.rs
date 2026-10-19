@@ -30,6 +30,15 @@ const MIN_COPIES: u32 = 2;
 /// is pushed on a later tick, once the peer has taken what is queued.
 pub const BACKLOG_LIMIT: u64 = 32 << 20;
 
+/// The most chunks one [`Replicator::poll`] works. A placement change makes all of them due
+/// (about 21,000 on a live node, a ~1 s round on a throttled CPU), which would hold up the
+/// receive and gossip phases of that tick.
+const POLL_BATCH: usize = 1024;
+
+/// How long a chunk held back by the send backlog or the repair rate waits before it is
+/// tried again, so it does not take a place in every round from chunks that can proceed.
+const BLOCKED_WAIT: Duration = Duration::from_secs(1);
+
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
     pub me: MemberId,
@@ -268,17 +277,20 @@ impl Replicator {
         // The least replicated chunks first, so the most at risk are made safe first.
         // Chunks that are settled have nothing left to do until placement changes, and chunks
         // waiting for answers have nothing to do until a retry is due or an answer arrives.
-        let mut ids: Vec<ChunkId> = st
+        // A placement change makes every chunk due at once: work only the most at risk of them
+        // each round, so one round stays short and the rest follow over the next ones.
+        let mut due: Vec<(usize, ChunkId)> = st
             .tracks
             .iter()
             .filter(|(_, t)| !t.settled && t.wake <= view.now)
-            .map(|(id, _)| *id)
+            .map(|(id, t)| (t.holders.len() + usize::from(self.fs.has_replica(id)), *id))
             .collect();
-        ids.sort_by_key(|id| {
-            let t = &st.tracks[id];
-            t.holders.len() + usize::from(self.fs.has_replica(id))
-        });
-        for id in ids {
+        if due.len() > POLL_BATCH {
+            due.select_nth_unstable_by_key(POLL_BATCH, |(replicas, _)| *replicas);
+            due.truncate(POLL_BATCH);
+        }
+        due.sort_unstable_by_key(|(replicas, _)| *replicas);
+        for (_, id) in due {
             busy |= self.work(&mut st, view, transport, &id);
         }
         drop(st);
@@ -427,7 +439,9 @@ impl Replicator {
             busy = true;
         }
         // Everything asked is in flight: sleep until the first retry is due (an answer wakes it).
-        if !blocked {
+        if blocked {
+            track.wake = view.now.saturating_add(BLOCKED_WAIT.as_nanos() as u64);
+        } else {
             let retry = RETRY.as_nanos() as u64;
             track.wake = targets
                 .iter()
