@@ -86,6 +86,51 @@ Remaining" is what settles that, and nobody has looked at it yet.
 A node cannot tell why it is slow (an empty credit bank and an IOPS cap both look like long ticks),
 so the answer is to react to its own symptoms: #91.
 
+## What the 2026-10-19 evening runs showed (1.5.2)
+
+Released 1.5.2 (#93: inbox and send-backlog byte bounds, `malloc_trim` every 2 s; #94) and upgraded
+the five members one at a time with `scripts/rolling-upgrade.sh` (#95). Resident memory afterwards
+was 50 to 83 MiB on every node; before, 3090 was at 1.3 GiB and `ocilab1` at 8.7 GiB. On loopback
+(`scripts/profile-join.sh`, a joiner capped like vps2) the joiner peaks at 149 to 187 MiB instead of
+811 to 976 MiB.
+
+Then vps2 was put back as a new empty member with `--offer 10G` (a small offer, so it takes about 4%
+of the data), watched every 10 s, with a stop rule: stop vps2 and remove it if a healthy node passes
+1 GiB resident or 60,000 queued entries, or `AT RISK` lasts over 3 minutes. It **tripped on the
+inbox** about 2 minutes after the join (the first watcher died of a script bug and was restarted, so
+the first healthy-node sample is late), vps2 was stopped and removed, and the cluster was `SAFE` again
+60 s later.
+
+| | morning (1.5.1, offer 100G) | evening (1.5.2, offer 10G) |
+|---|---|---|
+| healthy node resident | `mini1` 5.6 GiB, swap full | at most 109 MiB |
+| a healthy node down | `mini1`, about 3 minutes | none, all 6 `up` |
+| longest tick | 195.7 s on `mini1` | not sampled; busy 98 to 99% on `ocilab1` and `mini1` |
+| inbox (entries) | 54,582 on `mini1` | 94,091 on `ocilab1`, 155,959 on `mini1` |
+| vps2 | resident 1.4 GiB, tick 91 to 99% busy | resident 84 to 103 MiB, busy 60 to 74%, longest tick 540 ms |
+| after removing vps2 | not removed for hours | `SAFE` with empty inboxes in 60 s |
+
+What this says:
+
+1. **The memory problem (#78) is fixed on the live cluster.** The nodes stayed small while a join
+   produced 150,000 queued entries, because the queue is small in bytes.
+2. **The join storm is now the limit, and it is CPU.** The two 100 GiB nodes (`ocilab1`, `mini1`)
+   hold the most data, so a new member makes them re-plan placement and answer for the most chunks:
+   98 to 99% busy, `AT RISK` shown with `repair` at 0 at risk, an inbox of 90,000 to 156,000 entries.
+   That is #74 (tick budget, the queue-proportional replicate phase, the retry loop) and #82
+   (re-planning and rescan on a join). A weak node would have been behind for longer; vps2 itself
+   coped at a 10 GiB offer.
+3. **The stop rule counted entries, not bytes.** At 109 MiB the nodes were not at risk of memory, so
+   the rule was strict for this build. It is the right one for the next test: a join must not leave a
+   healthy node at 98% busy for minutes.
+4. **vps2 was not tested at a large offer.** The 100 GiB case (the weak node holding the most data)
+   is still the worst case and is untested live; reproduce it on loopback first.
+
+Operating notes: vps2 is out of the cluster and stopped, on 1.5.2. Its data directories are kept on
+the machine (`startfs`, `startfs.attempt-*`, `startfs.old-20261019`); nothing was deleted. The
+watcher and recovery scripts were throwaway (in the session scratchpad); the pattern to keep is a
+watcher with explicit stop rules, which could become `scripts/watch-join.sh`.
+
 ## Order
 
 Ranked by value on 2026-10-19: what takes a node out comes first, then what makes everything slow,
@@ -97,13 +142,13 @@ then visibility, then the rest.
 | 1 | #63 activity view, one node | done (#73, #75), released as 1.4.0, run live | none |
 | 2 | #77 purge | done (#80), released as 1.5.0 (protocol 12); run live | none |
 | 3 | #85 `meta.redb` write flood | the cause (`reconcile` rewriting the tree) is fixed in 1.5.1 (#87, #89, #88); keep it open until a weak node with a large tree is seen live. Still to do: the rebuild still reads the whole tree (CPU), and the local-write rebuilds are unmeasured | none |
-| 4 | #78 memory growth, with #66 bound the inbound path and #91 step 1 | **first now**: `mini1` went to 5.6 GiB and dropped out; this takes healthy nodes down and is unbounded. The memory is outside the structures `activity` lists, so find it (allocator? decoded or transfer buffers? state chunks?) with `profile-memory.sh` while a member joins, then bound it by bytes | #63 |
-| 5 | #74 tick saturation and retry loop, with #91 steps 2 and 3 | second: the replicate phase costs time proportional to the queue and retries add load to a node already behind; give the tick a budget, shed optional work over it, back off per peer on timeouts | none |
+| 4 | #78 memory growth, with #66 bound the inbound path and #91 step 1 | **done in 1.5.2 (#93), seen live**; the original text: `mini1` went to 5.6 GiB and dropped out; this takes healthy nodes down and is unbounded. The memory is outside the structures `activity` lists, so find it (allocator? decoded or transfer buffers? state chunks?) with `profile-memory.sh` while a member joins, then bound it by bytes | #63 |
+| 5 | #74 tick saturation and retry loop, with #91 steps 2 and 3 | **first now**: the 2026-10-19 evening join put two healthy nodes at 98% busy with 90,000 to 156,000 queued entries; was second: the replicate phase costs time proportional to the queue and retries add load to a node already behind; give the tick a budget, shed optional work over it, back off per peer on timeouts | none |
 | 6 | #82 rescan after restart, joins and flapping | third: also covers adding a member (every node re-plans placement and rescans); pace it, re-check only what changed, and show "re-checking" instead of `AT RISK` when `repair` says 0 at risk | none |
 | 7 | #91 self-protecting nodes (umbrella) | steps 1 to 3 are the items above, no protocol change; step 4 (advertise load) goes with #84 | #78, #74 |
 | 8 | #83 I/O pressure and write rate in `activity`; #84 report lagging nodes and weight placement | #83 is small and safe now and feeds #91; #84 changes the hello (protocol bump), so ship it with #66 or #64; it is what finally lets a weak node hold less | #85 for the numbers; #84 with #64 |
 | 9 | #67 redb cache size, #68 unclaimed chunk replies | small, independent | none |
-| 10 | #69 return freed memory to the OS | decide once #78/#66 change the peak; may be part of #78 | #66 |
+| 10 | #69 return freed memory to the OS | done in 1.5.2 (#93, `malloc_trim` every 2 s) | none |
 | 11 | #64 cluster-wide activity | needs a protocol bump (ADR 0002); would have shown vps1 as minutes behind | #63; same release as #66/#84 |
 
 Operating measure until #84: give the weak nodes a small offer so they hold less, and add a member
