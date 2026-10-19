@@ -42,7 +42,7 @@ sees every path from both ends.
   restart next to any result, since it resets counters and memory.
 - After upgrading, confirm each member runs the new version (`startfs --version`) before the test.
 
-Releases so far for this plan: 1.4.0 (#63, no protocol change).
+Releases so far for this plan: 1.4.0 (#63, no protocol change); 1.5.0 (#77 purge, **protocol 12**: upgrade every member together, then `startfs purge` clears the test data).
 
 ## When to test
 
