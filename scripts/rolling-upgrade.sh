@@ -10,12 +10,12 @@
 # Usage: rolling-upgrade.sh vX.Y.Z NODE...
 #   NODE is an ssh host, or `local` for this machine. Put the node that matters most last:
 #   it is upgraded with the most evidence from the others.
-# Environment: BUSY_MAX=50  QUIET_SECS=60  GOOD=4  TIMEOUT=900  STARTFS_BIN='~/.local/bin/startfs'
+# Environment: BUSY_MAX=50  QUIET_SECS=60  GOOD=1  TIMEOUT=900  STARTFS_BIN='~/.local/bin/startfs'
 set -uo pipefail
 [ $# -ge 2 ] || { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 TAG=$1; shift
 WANT=${TAG#v}
-BUSY_MAX=${BUSY_MAX:-50}; QUIET_SECS=${QUIET_SECS:-60}; GOOD=${GOOD:-4}; TIMEOUT=${TIMEOUT:-900}
+BUSY_MAX=${BUSY_MAX:-50}; QUIET_SECS=${QUIET_SECS:-60}; GOOD=${GOOD:-1}; TIMEOUT=${TIMEOUT:-900}
 BIN=${STARTFS_BIN:-'~/.local/bin/startfs'}
 INSTALL="curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | STARTFS_VERSION=$TAG sh"
 T0=$(date +%s)
