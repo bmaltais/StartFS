@@ -932,7 +932,7 @@ fn render_activity(a: &ActivityReport) -> String {
     out.push_str(&format!("  cpu pressure: {}\n", psi(&r.cpu_pressure)));
     out.push_str(&format!("  io pressure: {}\n", psi(&r.io_pressure)));
     out.push_str(&format!(
-        "  daemon written to disk: {}\n",
+        "  daemon storage writes: {} so far\n",
         bytes(r.written_bytes)
     ));
     out.push_str(&match &r.cgroup {

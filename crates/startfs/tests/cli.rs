@@ -367,6 +367,17 @@ fn cli_shows_the_nodes_activity_and_switches_its_counters_off() {
     if json["resources"]["cgroup"].is_null() {
         assert!(text.contains("cgroup memory: unavailable"), "{text}");
     }
+    if json["resources"]["io_pressure"].is_null() {
+        assert!(text.contains("io pressure: unavailable"), "{text}");
+    } else {
+        assert!(text.contains("io pressure: ") && !text.contains("io pressure: unavailable"));
+    }
+    if json["resources"]["written_bytes"].is_null() {
+        assert!(
+            text.contains("daemon storage writes: unavailable"),
+            "{text}"
+        );
+    }
 
     stdout(&startfs(data, &["config", "--activity", "off"]));
     let text = stdout(&startfs(data, &["activity"]));
