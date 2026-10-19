@@ -269,6 +269,9 @@ impl Daemon {
         let held_since = self.gc.lock().unwrap().last.held_since;
         let gc_waiting_on = held_since.map_or_else(Vec::new, |since| self.gc_waiting_on(since));
         let lost = self.with_view(|v| v.lost.clone()).unwrap_or_default();
+        let rechecking = self
+            .with_view(|v| self.replicator.rechecking(v))
+            .unwrap_or(0);
         let membership = self.membership.lock().unwrap();
         let filesystem = membership.filesystem().cloned();
         let now = self.clock.now();
@@ -422,6 +425,7 @@ impl Daemon {
             usable_bytes,
             unreplicated,
             repair,
+            rechecking,
             unheard,
             stranded,
             log: LogStatus {

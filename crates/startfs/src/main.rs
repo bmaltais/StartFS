@@ -775,6 +775,13 @@ fn render(s: &Status) -> String {
     if let Some(line) = unreplicated_line(&s.unreplicated) {
         out.push_str(&line);
     }
+    if s.rechecking > 0 {
+        out.push_str(&format!(
+            "re-checking: {} chunk{} held here, waiting to hear who else holds them\n",
+            s.rechecking,
+            if s.rechecking == 1 { "" } else { "s" }
+        ));
+    }
     for st in &s.stranded {
         let addr = s
             .members
