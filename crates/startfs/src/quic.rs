@@ -20,10 +20,11 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use startfs_core::net::{NodeId, Transport};
+use startfs_core::net::{Inbox, NodeId, Transport};
 use startfs_core::protocol::{Message, PROTOCOL_VERSION};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -82,6 +83,9 @@ struct Shared {
     /// The live connection we dialed to each peer, for its round-trip time.
     links: Mutex<HashMap<NodeId, quinn::Connection>>,
     inbox: Mutex<Sender<(NodeId, Vec<u8>)>>,
+    /// Messages and bytes sent into the inbox and not yet taken out.
+    inbox_messages: AtomicU64,
+    inbox_bytes: AtomicU64,
     /// When a frame from each peer last arrived, handled by the daemon or not.
     heard: Mutex<HashMap<NodeId, Instant>>,
 }
@@ -159,6 +163,8 @@ impl QuicTransport {
             errors: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             inbox: Mutex::new(tx),
+            inbox_messages: AtomicU64::new(0),
+            inbox_bytes: AtomicU64::new(0),
             heard: Mutex::new(HashMap::new()),
         });
         runtime.spawn(accept_loop(shared.clone(), endpoint.clone()));
@@ -216,7 +222,19 @@ impl Transport for QuicTransport {
     }
 
     fn recv(&self) -> Option<(NodeId, Vec<u8>)> {
-        self.inbox.lock().unwrap().try_recv().ok()
+        let (from, body) = self.inbox.lock().unwrap().try_recv().ok()?;
+        self.shared.inbox_messages.fetch_sub(1, Ordering::Relaxed);
+        self.shared
+            .inbox_bytes
+            .fetch_sub(body.len() as u64, Ordering::Relaxed);
+        Some((from, body))
+    }
+
+    fn inbox(&self) -> Option<Inbox> {
+        Some(Inbox {
+            messages: self.shared.inbox_messages.load(Ordering::Relaxed),
+            bytes: self.shared.inbox_bytes.load(Ordering::Relaxed),
+        })
     }
 
     fn local(&self) -> NodeId {
@@ -347,6 +365,10 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
         if stream.read_exact(&mut body).await.is_err() {
             return;
         }
+        shared.inbox_messages.fetch_add(1, Ordering::Relaxed);
+        shared
+            .inbox_bytes
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
         #[allow(
             clippy::let_underscore_must_use,
             reason = "best-effort: the daemon may have stopped receiving"

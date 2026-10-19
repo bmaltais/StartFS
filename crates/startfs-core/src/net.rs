@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct NodeId(pub u32);
 
+/// What has arrived and waits for the daemon to handle it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inbox {
+    pub messages: u64,
+    pub bytes: u64,
+}
+
 pub trait Transport: Send + Sync {
     /// Fire-and-forget; delivery is best effort.
     fn send(&self, to: NodeId, msg: Vec<u8>);
@@ -36,6 +43,11 @@ pub trait Transport: Send + Sync {
     /// The transport's own smoothed round-trip time to `node`, when it has a
     /// live path to it and can measure one.
     fn rtt(&self, _node: NodeId) -> Option<std::time::Duration> {
+        None
+    }
+    /// Messages received but not yet taken by [`recv`](Self::recv), when the
+    /// transport can count them.
+    fn inbox(&self) -> Option<Inbox> {
         None
     }
 }

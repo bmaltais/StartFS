@@ -7,6 +7,7 @@
 //! copy once every chosen node confirms. Nodes only learn who holds what from
 //! these answers, so a node tracks the chunks it is working on and nothing else.
 
+use crate::activity::Activity;
 use crate::chunkstore::ChunkId;
 use crate::control::{Repair, Shortfall, Tier};
 use crate::fs::LocalFs;
@@ -82,6 +83,8 @@ struct Track {
     settled: bool,
     /// Some peer has answered about this chunk, so the holders are known.
     heard: bool,
+    /// When the replicator first worked on the chunk.
+    queued_at: Option<Nanos>,
 }
 
 /// What placement and trimming depend on.
@@ -122,6 +125,7 @@ struct Heal {
 
 pub struct Replicator {
     fs: Arc<LocalFs>,
+    activity: Arc<Activity>,
     state: Mutex<State>,
     heal: Mutex<BTreeMap<ChunkId, Heal>>,
 }
@@ -135,9 +139,10 @@ pub fn tier(copies: u32) -> Tier {
 }
 
 impl Replicator {
-    pub fn new(fs: Arc<LocalFs>) -> Self {
+    pub fn new(fs: Arc<LocalFs>, activity: Arc<Activity>) -> Self {
         Self {
             fs,
+            activity,
             state: Mutex::new(State::default()),
             heal: Mutex::new(BTreeMap::new()),
         }
@@ -190,10 +195,11 @@ impl Replicator {
                 .asked
                 .is_none_or(|at| view.now.saturating_sub(at) >= RETRY.as_nanos() as u64);
             if due {
-                transport.send(
-                    peers[h.tried % peers.len()],
-                    Message::ChunkRequest(*id).encode(),
-                );
+                let peer = peers[h.tried % peers.len()];
+                if h.asked.is_some() {
+                    self.activity.resent_after_timeout(peer);
+                }
+                transport.send(peer, Message::ChunkRequest(*id).encode());
                 h.tried += 1;
                 h.asked = Some(view.now);
                 busy = true;
@@ -300,6 +306,7 @@ impl Replicator {
             return true;
         }
         let track = st.tracks.get_mut(id).expect("tracked");
+        track.queued_at.get_or_insert(view.now);
         let held = self.fs.has_replica(id);
         // Down members may return, so their copies are only replaced once the
         // grace period ends. Unless that leaves too few reachable copies: then
@@ -375,6 +382,11 @@ impl Replicator {
             if !due {
                 continue;
             }
+            let timed_out = !track.answered.contains(t)
+                && track
+                    .sent
+                    .get(t)
+                    .is_some_and(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
             let mut data = None;
             if steward && track.missing.contains(t) {
                 data = self.fs.local_chunk(id);
@@ -387,6 +399,12 @@ impl Replicator {
                     }
                     st.allowance -= bytes.len() as i64;
                 }
+            }
+            if let Some(bytes) = &data {
+                self.activity.chunk_replicated(bytes.len());
+            }
+            if timed_out {
+                self.activity.resent_after_timeout(to);
             }
             transport.send(to, Message::ChunkPush(*id, data).encode());
             track.sent.insert(*t, view.now);
@@ -439,6 +457,7 @@ impl Replicator {
         let Some(member) = view.member_at(from) else {
             return;
         };
+        self.activity.acknowledged(from);
         let mut st = self.state.lock().unwrap();
         if standing == Replica::Full {
             st.full.insert(member);
@@ -463,6 +482,31 @@ impl Replicator {
                 track.sent.remove(&member);
             }
         }
+    }
+
+    /// The queue as it is now: chunks being worked on, asks nobody has
+    /// answered per member, and the age in seconds of the chunk that has been
+    /// waiting longest.
+    pub fn queue(&self, now: Nanos) -> (u64, HashMap<MemberId, u64>, Option<u64>) {
+        let st = self.state.lock().unwrap();
+        let mut in_flight: HashMap<MemberId, u64> = HashMap::new();
+        let mut oldest: Option<Nanos> = None;
+        for t in st.tracks.values().filter(|t| !t.settled) {
+            for member in t.sent.keys() {
+                *in_flight.entry(*member).or_default() += 1;
+            }
+            if let Some(at) = t.queued_at {
+                oldest = Some(oldest.map_or(at, |o| o.min(at)));
+            }
+        }
+        let chunks = st.tracks.values().filter(|t| !t.settled).count() as u64;
+        let age = oldest.map(|at| now.saturating_sub(at) / 1_000_000_000);
+        (chunks, in_flight, age)
+    }
+
+    /// Chunks the replicator tracks, settled or not.
+    pub fn tracked(&self) -> u64 {
+        self.state.lock().unwrap().tracks.len() as u64
     }
 
     /// Members known to be out of room.

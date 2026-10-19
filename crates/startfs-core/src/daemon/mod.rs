@@ -4,12 +4,14 @@
 //! transport and sends whatever is due. A real daemon calls it from a
 //! background thread, the test harness calls it to drive simulated time.
 
+mod figures;
 mod latency;
 mod membership;
 mod peers;
 mod requests;
 mod status;
 
+use crate::activity::{Activity, CountingTransport, Phase};
 use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
 use crate::config::Config;
@@ -24,6 +26,7 @@ use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
 use crate::protocol::{Health, Message};
 use crate::replication::{Replicator, View};
+use crate::resources::{ResourceSource, SystemResources};
 use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -102,6 +105,10 @@ pub struct Daemon {
     replicator: Replicator,
     scrubber: Scrubber,
     power: Mutex<Arc<dyn PowerSource>>,
+    /// Where the activity view gets the OS figures.
+    resources: Mutex<Arc<dyn ResourceSource>>,
+    /// Traffic, tick timings and send outcomes over the last minute.
+    activity: Arc<Activity>,
     /// Set once the process has been asked to stop; `status` reports it.
     stopping: AtomicBool,
 }
@@ -167,10 +174,13 @@ impl Daemon {
             fs.set_replicating();
         }
         let started = clock.now();
+        let activity = Arc::new(Activity::new(clock.clone(), config.activity));
         Ok(Arc::new_cyclic(|me| {
             fs.set_chunk_source(Arc::new(PeerChunks(me.clone())));
             Self {
-                replicator: Replicator::new(fs.clone()),
+                replicator: Replicator::new(fs.clone(), activity.clone()),
+                resources: Mutex::new(Arc::new(SystemResources)),
+                activity,
                 scrubber: Scrubber::new(fs.clone()),
                 power: Mutex::new(Arc::new(MainsPower)),
                 stopping: AtomicBool::new(false),
@@ -215,6 +225,11 @@ impl Daemon {
         self.stopping.store(true, Ordering::SeqCst);
     }
 
+    /// Where to read the OS figures the activity view shows.
+    pub fn set_resource_source(&self, resources: Arc<dyn ResourceSource>) {
+        *self.resources.lock().unwrap() = resources;
+    }
+
     fn on_battery(&self) -> bool {
         self.power.lock().unwrap().on_battery()
     }
@@ -233,6 +248,8 @@ impl Daemon {
 
     /// Connect the daemon to the network.
     pub fn attach(&self, transport: Arc<dyn Transport>) {
+        let transport: Arc<dyn Transport> =
+            Arc::new(CountingTransport::new(transport, self.activity.clone()));
         let mut syncer = Syncer::new(self.fs.clone(), transport.clone(), self.clock.clone());
         syncer.set_chunk_bytes(self.config.state_chunk_bytes);
         *self.syncer.lock().unwrap() = Some(syncer);
@@ -252,6 +269,7 @@ impl Daemon {
             return false;
         };
         let mut busy = false;
+        let mut timer = self.activity.tick_timer();
         // Peers and replication only see committed writes; a file still being
         // written keeps batching until it has been quiet for the commit delay.
         self.fs
@@ -261,6 +279,7 @@ impl Daemon {
         if !self.membership.lock().unwrap().peers().is_empty() {
             self.fs.sync_logged();
         }
+        timer.phase(Phase::Flush);
         self.sync_peers();
         let offer = self
             .membership
@@ -271,6 +290,7 @@ impl Daemon {
             .set_staging_limit(staging_limit(&self.config, offer));
         self.fs
             .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
+        timer.phase(Phase::Sync);
         // A long queue is worked off over several ticks, so the rest of the
         // background work is not starved behind it.
         for _ in 0..DRAIN_PER_TICK {
@@ -284,13 +304,17 @@ impl Daemon {
                 Err(e) => eprintln!("startfs: dropped a message from node {}: {e}", from.0),
             }
         }
+        timer.phase(Phase::Receive);
         busy |= self.keepalive();
+        timer.phase(Phase::Gossip);
         if let Some(s) = self.syncer.lock().unwrap().as_mut() {
             busy |= s.poll();
         }
+        timer.phase(Phase::Sync);
         busy |= self
             .with_view(|v| self.replicator.poll(v, &*transport))
             .unwrap_or(false);
+        timer.phase(Phase::Replicate);
         busy |= self.finish_leaving(&*transport);
         busy |= self.collect_garbage();
         busy |= self.compact_log();
@@ -298,6 +322,7 @@ impl Daemon {
             // The scrub only gets the disk when nothing else wants it.
             busy |= self.scrub();
         }
+        timer.finish();
         busy
     }
 
@@ -624,6 +649,9 @@ impl Daemon {
             let sent = self.clock.now();
             transport.send(peer, Message::ChunkRequest(*id).encode());
             let reply = self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
+            if reply.is_none() {
+                self.activity.timed_out(peer);
+            }
             let answered = reply
                 .as_ref()
                 .map_or_else(|| self.clock.now(), |(at, _)| *at);

@@ -333,9 +333,20 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `repair_bytes_per_sec` | 64 MiB | most bytes per second each node sends when repairing (restoring copies after a lost node or a `config --copies` increase); every holder sends its share, so the cluster's speed grows with its size |
 | `scrub_period_secs` | 30 days | full integrity pass period |
 | `state_chunk_bytes` | 1 MiB | size of each piece when sending the whole metadata state to a member that missed a log compaction |
+| `activity` | `true` | keep the counters and tick timers behind `startfs activity` (a rolling minute, in memory); `startfs config --activity on\|off` changes it until the daemon restarts |
 | `mountpoint` | unset | mount here when `--mount` is not given |
 | `allowed_tags` | `[]` | Tailscale ACL tags a peer must carry (empty: any tailnet machine) |
 | `whois_socket` | platform default | `tailscaled` socket |
+
+### Why is a transfer slow?
+
+`startfs activity` (`--json` for scripts) shows this machine's own last minute: bytes and
+messages per peer path in four categories (chunk data, metadata, gossip, other), how long the
+background tick takes and how much of the time it is busy, the replication queue, sends that
+timed out or were retried, the sizes of the chunks being replicated, what the main in-memory
+structures hold, and the daemon's and machine's memory and CPU (from `/proc`; a figure the
+operating system does not give reads "unavailable"). `startfs status` adds a `busy:` line when
+the tick thread worked more than 80% of the minute. The figures are not sent to other members.
 
 ## Known limits and non-goals
 

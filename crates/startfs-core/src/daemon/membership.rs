@@ -208,9 +208,13 @@ impl Daemon {
         &self,
         offer_bytes: Option<u64>,
         copies: Option<u32>,
+        activity: Option<bool>,
     ) -> Result<(), Error> {
         if copies == Some(0) {
             return Err(Error::BadFilesystemSpec);
+        }
+        if let Some(on) = activity {
+            self.set_activity(on);
         }
         // Lowering drops copies, so only do it when none of them is still being made
         // or out of reach. Judged before taking the lock (status takes it too), so

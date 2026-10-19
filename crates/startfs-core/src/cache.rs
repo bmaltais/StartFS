@@ -185,6 +185,16 @@ impl DecodedCache {
         }
     }
 
+    /// Chunks held, their bytes and the limit.
+    pub fn stats(&self) -> (u64, u64, u64) {
+        let c = self.inner.lock().unwrap();
+        (
+            c.entries.len() as u64,
+            c.used,
+            self.limit.load(Ordering::SeqCst),
+        )
+    }
+
     /// Hold at most `bytes`; 0 turns the cache off.
     pub fn set_limit(&self, bytes: u64) {
         self.limit.store(bytes, Ordering::SeqCst);

@@ -1,6 +1,7 @@
 //! The control interface: how the CLI (and the test harness) talks to the
 //! daemon over a local unix socket. One JSON request line, one JSON response line.
 
+use crate::activity::ActivityReport;
 use crate::cache::CacheStats;
 use crate::daemon::Daemon;
 use crate::error::Error;
@@ -23,6 +24,8 @@ pub enum Request {
         copies: u32,
     },
     Status,
+    /// This node's recent traffic, tick timings, queues and resource use.
+    Activity,
     /// Ask every reachable member for its storage figures.
     NodeStats,
     /// Mint another join token (valid for the configured time).
@@ -33,6 +36,9 @@ pub enum Request {
         /// Change the filesystem's number of copies (for every member).
         #[serde(default)]
         copies: Option<u32>,
+        /// Switch the activity counters on or off, until the daemon restarts.
+        #[serde(default)]
+        activity: Option<bool>,
     },
     /// Make a token we issued stop working.
     Revoke {
@@ -351,6 +357,17 @@ pub struct Status {
     pub warnings: Vec<String>,
     /// Conflict copies awaiting the user's attention (delete one to resolve it).
     pub conflicts: Vec<ConflictCopy>,
+    /// Set when the tick thread was busy more than 80% of the last minute;
+    /// `startfs activity` has the detail.
+    #[serde(default)]
+    pub tick_busy: Option<TickBusy>,
+}
+
+/// The tick thread is the bottleneck, as far as the last minute shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickBusy {
+    pub percent: u32,
+    pub avg_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +376,7 @@ pub enum Response {
     Joined,
     Done,
     Status(Box<Status>),
+    Activity(Box<ActivityReport>),
     NodeStats(Vec<NodeReport>),
     Error(String),
 }
@@ -535,6 +553,7 @@ impl Client {
         match self.call(&Request::Config {
             offer_bytes: Some(bytes),
             copies: None,
+            activity: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -546,8 +565,29 @@ impl Client {
         match self.call(&Request::Config {
             offer_bytes: None,
             copies: Some(copies),
+            activity: None,
         })? {
             Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Switch the activity counters on or off (until the daemon restarts).
+    pub fn set_activity(&self, on: bool) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            copies: None,
+            activity: Some(on),
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// This node's activity: recent traffic, tick timings, queues, resources.
+    pub fn activity(&self) -> Result<ActivityReport, Error> {
+        match self.call(&Request::Activity)? {
+            Response::Activity(a) => Ok(*a),
             other => Err(unexpected(other)),
         }
     }

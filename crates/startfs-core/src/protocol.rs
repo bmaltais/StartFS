@@ -46,6 +46,19 @@ pub enum Message {
     StatsReply(NodeStats),
 }
 
+/// The kinds of traffic the activity view tells apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Category {
+    /// Chunk requests, replies, pushes and their acknowledgements.
+    Chunk,
+    /// Operation log entries and state transfer.
+    Metadata,
+    /// Hello, members, tokens, health and the copies setting.
+    Gossip,
+    /// Joining and storage-figure queries.
+    Other,
+}
+
 /// One member's view of its replication, as gossiped to the others.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Health {
@@ -133,6 +146,17 @@ impl Message {
         // Postcard writes the variant index first; the chunk-carrying
         // variants are `ChunkReply` and `ChunkPush`.
         matches!(raw.get(1), Some(7 | 8))
+    }
+
+    /// What an encoded message is for, as the activity view groups traffic.
+    pub fn category(raw: &[u8]) -> Category {
+        // The variant index again; see `is_bulk`.
+        match raw.get(1) {
+            Some(6..=9) => Category::Chunk,
+            Some(1 | 2) => Category::Metadata,
+            Some(0 | 3 | 10..=12) => Category::Gossip,
+            _ => Category::Other,
+        }
     }
 }
 

@@ -350,6 +350,11 @@ impl LocalFs {
         MemberId(self.node.load(Ordering::SeqCst))
     }
 
+    /// Chunks the decoded-chunk cache holds, their bytes and its limit.
+    pub fn decoded_stats(&self) -> (u64, u64, u64) {
+        self.decoded.stats()
+    }
+
     /// Cap the memory used to keep recently read chunks decoded; 0 turns it off.
     pub fn set_read_cache_limit(&self, bytes: u64) {
         self.decoded.set_limit(bytes);

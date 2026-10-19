@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod cache;
 pub mod chunker;
 pub mod chunkstore;
@@ -15,6 +16,7 @@ pub mod placement;
 pub mod power;
 pub mod protocol;
 pub mod replication;
+pub mod resources;
 pub mod scrub;
 pub mod sync;
 

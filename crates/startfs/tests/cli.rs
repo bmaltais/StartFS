@@ -331,3 +331,65 @@ fn cli_changes_the_number_of_copies_and_rejects_nonsense() {
     let text = stdout(&startfs(data, &["status"]));
     assert!(text.contains("home (3 copies)"), "{text}");
 }
+
+#[test]
+fn cli_shows_the_nodes_activity_and_switches_its_counters_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "1"],
+    ));
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&startfs(data, &["activity", "--json"]))).unwrap();
+    assert_eq!(json["enabled"], true);
+    // The real daemon ticks on the system clock, and reads its own memory
+    // from /proc where there is one.
+    let text = stdout(&startfs(data, &["activity"]));
+    for needle in [
+        "peer paths",
+        "replication queue: 0 chunks",
+        "in memory:",
+        "resources:",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+    if cfg!(target_os = "linux") {
+        assert!(
+            json["resources"]["rss_bytes"].as_u64().unwrap() > 0,
+            "{json}"
+        );
+        assert!(json["resources"]["threads"].as_u64().unwrap() > 0);
+    }
+    // A source the platform lacks reads as unavailable, never as zero.
+    if json["resources"]["cgroup"].is_null() {
+        assert!(text.contains("cgroup memory: unavailable"), "{text}");
+    }
+
+    stdout(&startfs(data, &["config", "--activity", "off"]));
+    let text = stdout(&startfs(data, &["activity"]));
+    assert!(text.contains("counters are off"), "{text}");
+    assert!(text.contains("resources:"), "{text}");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&startfs(data, &["activity", "--json"]))).unwrap();
+    assert_eq!(json["enabled"], false);
+    assert!(json["tick"].is_null());
+
+    assert!(
+        !startfs(data, &["config", "--activity", "maybe"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn the_activity_setting_in_the_config_file_turns_the_counters_off_from_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon_with(data, true, "activity = false\n");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&startfs(data, &["activity", "--json"]))).unwrap();
+    assert_eq!(json["enabled"], false);
+}

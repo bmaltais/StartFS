@@ -3,12 +3,13 @@
 # many files, against a plain directory on the same filesystem. One node, 1 copy.
 # With `sudo -n strace` available (ptrace_scope blocks attaching without root), also prints how
 # many syncs and directory scans the daemon made per file written.
+# NODE_CONFIG adds lines to the daemon's config.toml (for example `activity = false`).
 # Usage: profile-write.sh   (needs /dev/fuse, fusermount3, python3)
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 build; setup_env
 mkdir -p "$WORK/A/mnt" "$WORK/base" "$WORK/src16k" "$WORK/src1m" "$WORK/src8b"
-start_node A "$WORK/A/mnt"
+start_node A "$WORK/A/mnt" "${NODE_CONFIG:-}"
 sf A create --name profile --copies 1 >/dev/null
 M="$WORK/A/mnt"; B="$WORK/base"
 

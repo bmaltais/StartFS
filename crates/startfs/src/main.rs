@@ -2,6 +2,7 @@
 
 use startfs::mount;
 use startfs::node::{self, Ticker};
+use startfs_core::activity::{ActivityReport, Traffic};
 use startfs_core::clock::SystemClock;
 use startfs_core::config::Config;
 use startfs_core::control::{self, Client, NodeState, ScrubState, Status, Tier};
@@ -24,6 +25,8 @@ commands:
                                       create a filesystem and print its join token
   status [--json]                     show the state of this node's filesystem (--json: as JSON,
                                       for scripts and GUIs)
+  activity [--json]                   show this node's recent traffic, tick timings, queues and
+                                      memory over the last minute (--json: as JSON)
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
   join TOKEN [--offer SIZE]           join the filesystem a token names
   token [--example]                   print a new join token (--example: the full join
@@ -31,8 +34,10 @@ commands:
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
-  config [--offer SIZE] [--copies N]  change this node's space offer (sizes like 500M, 2T), or
-                                      the filesystem's number of copies on every node";
+  config [--offer SIZE] [--copies N] [--activity on|off]
+                                      change this node's space offer (sizes like 500M, 2T), the
+                                      filesystem's number of copies on every node, or whether this
+                                      node keeps the counters behind `activity` (until restart)";
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
@@ -46,6 +51,8 @@ enum CliError {
     Json(serde_json::Error),
     #[error("--copies must be a number")]
     CopiesNotANumber,
+    #[error("--activity must be on or off")]
+    ActivityNotOnOff,
     #[error("remove needs a member number (see `startfs status`)")]
     RemoveNeedsMember,
     #[error("not a size: {0}")]
@@ -175,6 +182,14 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             if let Some(bytes) = optional_size(rest, "--offer")? {
                 Client::new(socket.clone()).set_offer(bytes)?;
             }
+            if let Ok(value) = flag_value(rest, "--activity") {
+                let on = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(CliError::ActivityNotOnOff),
+                };
+                Client::new(socket.clone()).set_activity(on)?;
+            }
             if let Ok(copies) = flag_value(rest, "--copies") {
                 let copies = copies
                     .parse::<u32>()
@@ -203,6 +218,18 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                 );
             } else {
                 print!("{}", render(&status));
+            }
+            Ok(())
+        }
+        "activity" => {
+            let report = Client::new(socket).activity()?;
+            if rest.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(CliError::Json)?
+                );
+            } else {
+                print!("{}", render_activity(&report));
             }
             Ok(())
         }
@@ -709,6 +736,12 @@ fn render(s: &Status) -> String {
             names.join(", ")
         ));
     }
+    if let Some(t) = &s.tick_busy {
+        out.push_str(&format!(
+            "busy: the background tick worked {}% of the last minute (average {} ms); see `startfs activity`\n",
+            t.percent, t.avg_ms
+        ));
+    }
     for w in &s.warnings {
         out.push_str(&format!("warning: {w}\n"));
     }
@@ -749,6 +782,147 @@ fn render(s: &Status) -> String {
             out.push_str(&format!("  {}\n", c.path));
         }
     }
+    out
+}
+
+fn render_activity(a: &ActivityReport) -> String {
+    let mut out = String::new();
+    if a.enabled {
+        out.push_str(&format!(
+            "activity over the last {:.0} s (counters reset when the daemon restarts)\n",
+            a.window_secs
+        ));
+    } else {
+        out.push_str(
+            "activity counters are off (`startfs config --activity on` switches them on); only resources and queues are shown\n",
+        );
+    }
+    let secs = a.window_secs.max(1.0);
+    let rate = |t: &Traffic| {
+        format!(
+            "{}/s {:.1} msg/s",
+            human((t.bytes as f64 / secs) as u64),
+            t.messages as f64 / secs
+        )
+    };
+    if a.enabled {
+        out.push_str("peer paths (out | in; chunk data, metadata, gossip, other):\n");
+    } else {
+        out.push_str("peer paths:\n");
+    }
+    for p in &a.peers {
+        let state = match p.state {
+            NodeState::Online => "online",
+            NodeState::Down => "down",
+            NodeState::Lost => "lost",
+            NodeState::Leaving => "leaving",
+        };
+        out.push_str(&format!(
+            "  {} ({state}), {} in flight\n",
+            p.addr, p.in_flight
+        ));
+        let Some(t) = &p.traffic else {
+            continue;
+        };
+        for (name, c) in [("out", &t.sent), ("in ", &t.received)] {
+            out.push_str(&format!(
+                "    {name}: chunks {}, metadata {}, gossip {}, other {}\n",
+                rate(&c.chunk),
+                rate(&c.metadata),
+                rate(&c.gossip),
+                rate(&c.other)
+            ));
+        }
+        out.push_str(&format!(
+            "    sends: {} acknowledged, {} timed out, {} retried\n",
+            t.acknowledged, t.timed_out, t.retried
+        ));
+    }
+    if let Some(t) = &a.tick {
+        let p = &t.avg_phase_ms;
+        out.push_str(&format!(
+            "tick: {} in the window, average {:.1} ms, longest {:.1} ms, busy {:.0}% of the time\n  phases (average ms): flush {:.2}, sync {:.2}, receive {:.2}, gossip {:.2}, replicate {:.2}, other {:.2}\n",
+            t.ticks, t.avg_ms, t.max_ms, t.busy_fraction * 100.0, p.flush, p.sync, p.receive, p.gossip, p.replicate, p.other
+        ));
+    } else if a.enabled {
+        out.push_str("tick: no ticks in the window\n");
+    }
+    out.push_str(&format!("replication queue: {} chunks", a.queue.chunks));
+    if let Some(age) = a.queue.oldest_secs {
+        out.push_str(&format!(", the oldest waiting {age} s"));
+    }
+    out.push('\n');
+    if a.chunk_sizes.iter().any(|c| c.chunks > 0) {
+        let mut low = 0;
+        let classes: Vec<String> = a
+            .chunk_sizes
+            .iter()
+            .map(|c| {
+                let label = match c.up_to_bytes {
+                    Some(up) => format!("{}-{}", human(low), human(up)),
+                    None => format!("over {}", human(low)),
+                };
+                low = c.up_to_bytes.unwrap_or(0);
+                format!("{label}: {}", c.chunks)
+            })
+            .collect();
+        out.push_str(&format!(
+            "chunks replicated by size: {}\n",
+            classes.join(", ")
+        ));
+    }
+    out.push_str("in memory:\n");
+    let s = &a.structures;
+    for (name, st) in [
+        ("inbox", &s.inbox),
+        ("unclaimed chunk replies", &s.chunk_replies),
+        ("decoded-chunk cache", &s.decoded_cache),
+        ("replication index", &s.replication_index),
+        ("staging index", &s.staging_index),
+    ] {
+        out.push_str(&match st {
+            None => format!("  {name}: unavailable\n"),
+            Some(st) => format!(
+                "  {name}: {} entries{}{}\n",
+                st.entries,
+                st.bytes
+                    .map_or(String::new(), |b| format!(", {}", human(b))),
+                st.limit_bytes
+                    .map_or(", no limit".to_string(), |l| format!(" of {}", human(l)))
+            ),
+        });
+    }
+    out.push_str("resources:\n");
+    let r = &a.resources;
+    let bytes = |v: Option<u64>| v.map_or("unavailable".to_string(), human);
+    let psi = |v: &Option<startfs_core::resources::Pressure>| {
+        v.map_or("unavailable".to_string(), |p| {
+            format!("{:.1}% (10 s), {:.1}% (60 s)", p.avg10, p.avg60)
+        })
+    };
+    out.push_str(&format!(
+        "  daemon: {} resident, cpu {}, {} threads\n",
+        bytes(r.rss_bytes),
+        r.cpu_secs
+            .map_or("unavailable".to_string(), |c| format!("{c:.1} s")),
+        r.threads
+            .map_or("unavailable".to_string(), |t| t.to_string()),
+    ));
+    out.push_str(&format!(
+        "  machine: {} memory available, {} swap used\n",
+        bytes(r.mem_available_bytes),
+        bytes(r.swap_used_bytes)
+    ));
+    out.push_str(&format!("  memory pressure: {}\n", psi(&r.memory_pressure)));
+    out.push_str(&format!("  cpu pressure: {}\n", psi(&r.cpu_pressure)));
+    out.push_str(&match &r.cgroup {
+        None => "  cgroup memory: unavailable\n".to_string(),
+        Some(c) => format!(
+            "  cgroup memory: {} used of {}\n",
+            human(c.memory_current_bytes),
+            c.memory_limit_bytes.map_or("no limit".to_string(), human)
+        ),
+    });
     out
 }
 
