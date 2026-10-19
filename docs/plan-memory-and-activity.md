@@ -164,6 +164,40 @@ and vps1 was ready after 117 s.
 
 Open: single runs of each; the offer-weighted share a weak node holds is still not capped (#84).
 
+## What mini1 showed after 1.5.5 (name lookups in every tick)
+
+During the 1.5.5 rolling upgrade `scripts/rolling-upgrade.sh` stalled on mini1: idle, `data: SAFE`,
+empty inbox, but `busy` 51 to 54% for 5 minutes, against a gate of 50%. The user also saw
+`systemd-resolve` using CPU, and a reboot changed nothing.
+
+Cause: `sync_peers` told the transport every member's address on every tick, and on the real
+network that is a blocking name lookup (`getaddrinfo`, which goes to `systemd-resolved`, and for a
+MagicDNS name on to Tailscale). `strace` for 5 s on the mini1 daemon: 1,127 `sendmmsg` and 1,138
+`connect`, about 225 lookups a second. Tailscale kept flushing the resolver cache there, so none was
+answered locally. The lookups also ran under the membership lock.
+
+| idle, no traffic | 1.5.5 mini1 | 1.5.5 mini2 | 1.5.6 mini1 |
+|---|---|---|---|
+| `sync` phase per tick | 9.59 ms | 2.20 ms | 0.48 ms |
+| average tick | 9.8 ms | 2.3 ms | 0.7 ms |
+| busy | 50% | 19% | 6% |
+| lookups in 5 s | 2,265 syscalls | not measured | 12 syscalls |
+
+Fixed in 1.5.6 (#104): an address is announced again only when it changed or after 10 s. After the
+1.5.6 rolling upgrade every node idled at 1 to 8% busy.
+
+What it means for the numbers above: every `busy` and tick figure measured before 1.5.6 includes
+this cost, about 1 to 10 ms of each tick depending on how slow the node's resolver was. The joins
+above ran with it, so the weak nodes' busy figures were worse than the work they did. Measurements
+of #74 and #91 should be repeated on 1.5.6 before more is built on them.
+
+Smaller: the readiness gate waits for the version the node had when the script started, so a node
+upgraded by hand while the script waits for it never becomes ready; fixed in the same change.
+
+Not answered: vps2's Azure "CPU Credits Remaining" metric (11:15 to 11:20 UTC 2026-10-19); the
+user never gave it, and it is not needed now. vps1 was lowered to `--offer 10G` the same day (a
+stopgap until #84), so both weak nodes now offer 10 GiB.
+
 ## Order
 
 Ranked by value on 2026-10-19: what takes a node out comes first, then what makes everything slow,

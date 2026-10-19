@@ -25,7 +25,8 @@ say() { printf '[%4ds] %s\n' $(( $(date +%s) - T0 )) "$*"; }
 on() { local n=$1; shift; if [ "$n" = local ]; then bash -c "$*"; else ssh -o BatchMode=yes -o ConnectTimeout=8 "$n" "$*"; fi; }
 ont() { local n=$1; shift; if [ "$n" = local ]; then bash -c "$*"; else ssh -t "$n" "$*"; fi; }
 
-# sample NODE VERSION: print one status line; succeed when the node is ready at that version.
+# sample NODE VERSIONS: print one status line; succeed when the node is ready at one of the versions
+# (VERSIONS is `a|b`).
 sample() {
   local n=$1 want=$2 out ver data up inbox busy rss queue
   out=$(on "$n" "$BIN --version; echo ==; $BIN status; echo ==; $BIN activity" 2>&1) || { echo unreachable; return 1; }
@@ -37,11 +38,12 @@ sample() {
   rss=$(echo "$out" | sed -n 's/.*daemon: \([0-9.]* [KMG]iB\) resident.*/\1/p' | head -1 | tr -d ' ')
   queue=$(echo "$out" | sed -n 's/^replication queue: \([0-9]*\) chunks.*/\1/p' | head -1)
   echo "ver=${ver:-?} data=${data:-?} up=$up inbox=${inbox:-?} busy=${busy:-?}% rss=${rss:-?} queue=${queue:-?}"
-  [ "$ver" = "$want" ] && [ "$data" = SAFE ] && [ "${up%/*}" = "${up#*/}" ] \
+  case "|$want|" in *"|$ver|"*) ;; *) return 1 ;; esac
+  [ "$data" = SAFE ] && [ "${up%/*}" = "${up#*/}" ] \
     && [ "${inbox:-1}" = 0 ] && [ "${busy:-100}" -lt "$BUSY_MAX" ]
 }
 
-# wait_ready NODE MIN_SECS VERSION
+# wait_ready NODE MIN_SECS VERSIONS
 wait_ready() {
   local n=$1 since=$2 want=$3 good=0 start line el
   start=$(date +%s)
@@ -61,7 +63,9 @@ for n in "$@"; do
   say "=== $n: checking it is quiet before touching it"
   old=$(on "$n" "$BIN --version" | awk '{print $2}')
   [ -n "$old" ] || { say "$n: cannot run $BIN, stopping here"; exit 1; }
-  wait_ready "$n" 0 "$old" || exit 1
+  # Ready at the old version or the new: a node upgraded by hand meanwhile is not stuck here.
+  wait_ready "$n" 0 "$old|$WANT" || exit 1
+  old=$(on "$n" "$BIN --version" | awk '{print $2}')
   if [ "$old" = "$WANT" ]; then say "=== $n: already on $WANT"; continue; fi
   say "=== $n: upgrading $old -> $WANT"
   ont "$n" "$INSTALL" || { say "$n: INSTALL FAILED, stopping here"; exit 1; }
