@@ -19,12 +19,30 @@ what order, and how to test each when it is ready. Update it as issues land.
 | # | Issue | Why here | Depends on |
 |---|---|---|---|
 | 0 | #70 memory profile script | merged; the measuring tool for everything below | none |
-| 1 | #63 activity view, one node | the only `ready-for-agent` item; no protocol change; shows the rest on a real node | none |
+| 1 | #63 activity view, one node | merged (#73, #75), released as 1.4.0; its live checkpoint is still to run; no protocol change; shows the rest on a real node | none |
 | 2 | #66 bound the inbound path | the actual defect; needs a short grilling round first (byte bound, frame caps per message type, protocol bump or not). #62 only caps messages drained per tick (it is a liveness fix); the inbox is still an unbounded channel, and a smaller drain lets a burst queue up longer, so read #62 before starting | #63 helps measure it |
 | 3 | #67 redb cache size | small, independent, safe to do alongside #2 | none |
 | 4 | #68 drop unclaimed chunk replies | small, independent | none |
 | 5 | #69 return freed memory to the OS | only worth deciding once #66 changes the peak | #66 |
 | 6 | #64 cluster-wide activity | needs a protocol bump (ADR 0002) | #63; ship in the same release as #66 if #66 also bumps the protocol, so members upgrade in lockstep once |
+
+## Releases and upgrades
+
+Each step that must be seen on the real cluster needs a release first: a "Release X.Y.Z" PR (the
+usual six-file bump, see the release process in the repo notes), merged, then the `vX.Y.Z` tag, which
+runs the release workflow. Then upgrade **every member** with `STARTFS_VERSION=vX.Y.Z` and the
+installer, not just one node, so each node can show its own `startfs activity` and the checkpoint
+sees every path from both ends.
+
+- A change to `PROTOCOL_VERSION` (probably #66 and #64) requires every member to be upgraded
+  together (ADR 0002); the installer warns. State it in the release PR's Merge Danger.
+- A release without a protocol bump (1.4.0, for #63) works with mixed versions, but upgrade all
+  members anyway for the checkpoint.
+- Upgrading restarts the daemon and its mount (#45): do it when nothing is writing, and note the
+  restart next to any result, since it resets counters and memory.
+- After upgrading, confirm each member runs the new version (`startfs --version`) before the test.
+
+Releases so far for this plan: 1.4.0 (#63, no protocol change).
 
 ## When to test
 
@@ -34,7 +52,7 @@ upgraded. Each checkpoint names the data it needs (see "Test data") and what mus
 | After | Checkpoint | How | Must hold |
 |---|---|---|---|
 | now (before #63) | Baseline on current `main` | memory and write-path runs done 2026-10-18, see `docs/baselines/`; rerun `profile-write.sh` on a quiet machine for the #63 overhead comparison | numbers exist for `main` with #62 in |
-| #63 | Instrumented burst on the real cluster | upgrade one node, `make-tree.py` with a new seed into its mount, run `startfs activity` every minute | each reading in the skill section is explained by `status`; overhead under 1% |
+| #63 | Instrumented burst on the real cluster | release 1.4.0, upgrade every member, `make-tree.py` with a new seed into one node's mount, run `startfs activity` on it and on a receiver every minute | each reading in the skill section is explained by `status`; the skill rows marked "not yet observed" get real output; overhead under 1% (measured on 3 loopback nodes: -0.7%, `docs/validation.md` section 6) |
 | #66 | Bound holds | `profile-memory.sh` at the baseline load and at 5x (`FILES=20000 BIG=1000`), both modes | receiver peak stays near the bound while the load grows 5x |
 | #66 | Live catch-up | restart a node that was away, with `startfs activity` open on a peer | inbound bytes stay under the bound; RSS does not climb past baseline plus the bound |
 | #67, #68 | Regression | `profile-write.sh`, harness tests | no slowdown; tests pass |
@@ -148,6 +166,12 @@ cp -r /tmp/burst ~/StartFS/burst-$(date +%s)
 - Restarting a daemon resets its counters and memory; note any restart next to a result.
 - Peers that are down change what you see. Check `startfs status` and `tailscale ping` for the VPSes
   before blaming the software; vps1 and vps2 took turns being unreachable during the original report.
+
+## Found by #63
+
+- #74: a peer that never answers keeps the tick 80 to 90% busy and slows transfers to the healthy
+  peers (loopback run: `replicate` phase 43 ms per tick, 47,804 timeouts a minute). Likely behind the
+  original slow copy; fix it and recheck with `startfs activity` on the live cluster.
 
 ## Open questions
 
