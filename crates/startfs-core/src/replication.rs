@@ -23,6 +23,11 @@ use std::time::Duration;
 /// How long to wait for a peer's answer before asking again.
 pub const RETRY: Duration = Duration::from_secs(5);
 
+/// The longest wait between asks to a peer that has answered nothing for a long time (#91): a
+/// frozen or unreachable peer is asked less and less often, not every [`RETRY`] for as long as
+/// it stays silent.
+pub const MAX_RETRY: Duration = Duration::from_secs(60);
+
 /// Fewest reachable copies a chunk is left with: below this, repair does not
 /// wait out the grace period for a member to return.
 const MIN_COPIES: u32 = 2;
@@ -57,6 +62,9 @@ pub struct View<'a> {
     /// Members seen asleep within the stand-in retention (including those
     /// asleep now): copies made to cover for them are not trimmed yet.
     pub kept: &'a HashSet<MemberId>,
+    /// When each member was last heard from (anything it sent): a member heard since it was
+    /// first asked is not silent.
+    pub heard: &'a HashMap<MemberId, Nanos>,
     /// Space this node offers for replicas.
     pub offer: u64,
     /// Most bytes per second sent when re-replicating chunks already held.
@@ -120,6 +128,8 @@ struct State {
     tracks: BTreeMap<ChunkId, Track>,
     /// Members that turned a chunk away for lack of room; placement skips them.
     full: HashSet<MemberId>,
+    /// Peers that have not answered anything since this time (when they were first asked).
+    silent: HashMap<MemberId, Nanos>,
     /// The copies and membership (id, offer, revision) placement last used.
     epoch: Option<Epoch>,
     /// Bytes of re-replication allowed right now; goes negative after a send.
@@ -143,6 +153,17 @@ pub struct Replicator {
     activity: Arc<Activity>,
     state: Mutex<State>,
     heal: Mutex<BTreeMap<ChunkId, Heal>>,
+}
+
+/// How long to wait before asking `peer` again: [`RETRY`], growing to half the time it has been
+/// silent, up to [`MAX_RETRY`].
+fn retry_delay(silent: &HashMap<MemberId, Nanos>, view: &View<'_>, peer: MemberId) -> Nanos {
+    let since = silent.get(&peer).map(|at| match view.heard.get(&peer) {
+        Some(heard) => *at.max(heard),
+        None => *at,
+    });
+    let silence = since.map_or(0, |at| view.now.saturating_sub(at));
+    (silence / 2).clamp(RETRY.as_nanos() as u64, MAX_RETRY.as_nanos() as u64)
 }
 
 pub fn tier(copies: u32) -> Tier {
@@ -392,11 +413,12 @@ impl Replicator {
             }
             // A target that just said it lacks the chunk is sent it at once by
             // the steward; everyone else asks again only after a retry delay.
+            let retry = retry_delay(&st.silent, view, *t);
             let due = (steward && track.answered.contains(t))
                 || track
                     .sent
                     .get(t)
-                    .is_none_or(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
+                    .is_none_or(|at| view.now.saturating_sub(*at) >= retry);
             let Some(to) = view.endpoint(*t) else {
                 blocked = true;
                 continue;
@@ -408,7 +430,7 @@ impl Replicator {
                 && track
                     .sent
                     .get(t)
-                    .is_some_and(|at| view.now.saturating_sub(*at) >= RETRY.as_nanos() as u64);
+                    .is_some_and(|at| view.now.saturating_sub(*at) >= retry);
             let mut data = None;
             if steward && track.missing.contains(t) {
                 if transport.backlog(to) >= BACKLOG_LIMIT {
@@ -436,18 +458,20 @@ impl Replicator {
             transport.send(to, Message::ChunkPush(*id, data).encode());
             track.sent.insert(*t, view.now);
             track.answered.remove(t);
+            st.silent.entry(*t).or_insert(view.now);
             busy = true;
         }
         // Everything asked is in flight: sleep until the first retry is due (an answer wakes it).
         if blocked {
             track.wake = view.now.saturating_add(BLOCKED_WAIT.as_nanos() as u64);
         } else {
-            let retry = RETRY.as_nanos() as u64;
             track.wake = targets
                 .iter()
                 .filter(|t| **t != view.me && !track.holders.contains(*t))
-                .filter_map(|t| track.sent.get(t))
-                .map(|at| at.saturating_add(retry))
+                .filter_map(|t| {
+                    let at = track.sent.get(t)?;
+                    Some(at.saturating_add(retry_delay(&st.silent, view, *t)))
+                })
                 .min()
                 .unwrap_or(0);
         }
@@ -499,6 +523,7 @@ impl Replicator {
         };
         self.activity.acknowledged(from);
         let mut st = self.state.lock().unwrap();
+        st.silent.remove(&member);
         if standing == Replica::Full {
             st.full.insert(member);
         }
