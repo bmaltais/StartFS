@@ -23,7 +23,8 @@ fn send_reply(c: &Cluster, id: u8, len: usize) {
     );
 }
 
-/// Let `by` pass in steps short enough that the peers never look asleep.
+/// Let `by` pass in 10 s steps (`Cluster::elapse` jumps 240 s, too coarse for these bounds),
+/// short enough that the peers never look asleep.
 fn step(c: &Cluster, by: Duration) {
     for _ in 0..by.as_secs() / 10 {
         c.advance(Duration::from_secs(10));
@@ -38,10 +39,10 @@ fn a_reply_nobody_asked_for_is_dropped_after_a_while() {
     c.sync();
     assert_eq!(unclaimed(&c, 1).entries, 1);
 
-    step(&c, Duration::from_secs(20));
+    step(&c, Duration::from_secs(50));
     assert_eq!(unclaimed(&c, 1).entries, 1, "dropped too early");
 
-    step(&c, Duration::from_secs(120));
+    step(&c, Duration::from_secs(20));
     let left = unclaimed(&c, 1);
     assert_eq!((left.entries, left.bytes), (0, Some(0)));
 }
@@ -73,11 +74,10 @@ fn a_reply_arriving_after_its_fetch_timed_out_is_dropped_not_kept() {
     c.network()
         .set_delay(NodeId(0), NodeId(1), Duration::from_secs(10));
     let ino = c.fs(1).lookup(ROOT_INO, "f").unwrap().ino;
-    let read = c.fs(1).read(ino, 0, 64 * 1024);
-    if read.is_ok() {
-        // The chunk was already local: nothing to test here.
-        return;
-    }
+    assert!(
+        c.fs(1).read(ino, 0, 64 * 1024).is_err(),
+        "the chunk must not be local to node 1 for this test to mean anything"
+    );
     step(&c, Duration::from_secs(30));
     assert!(
         unclaimed(&c, 1).entries > before,

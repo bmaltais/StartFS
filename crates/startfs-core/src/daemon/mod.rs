@@ -174,6 +174,11 @@ fn staging_limit(config: &Config, offer: u64) -> u64 {
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
 type ChunkAnswer = Option<Vec<u8>>;
 
+/// The chunk data an answer holds, for the unclaimed replies' byte figure and cap.
+fn answer_bytes(answer: &ChunkAnswer) -> u64 {
+    answer.as_ref().map_or(0, |d| d.len() as u64)
+}
+
 /// Fetches chunks from peers on behalf of the filesystem.
 struct PeerChunks(Weak<Daemon>);
 
@@ -718,10 +723,9 @@ impl Daemon {
     fn prune_chunk_replies(&self) {
         let now = self.clock.now();
         let ttl = UNCLAIMED_REPLY_TTL.as_nanos() as Nanos;
-        let size = |a: &ChunkAnswer| a.as_ref().map_or(0, |d| d.len() as u64);
         let mut replies = self.chunk_replies.lock().unwrap();
         replies.retain(|_, (at, _)| now.saturating_sub(*at) < ttl);
-        let mut total: u64 = replies.values().map(|(_, a)| size(a)).sum();
+        let mut total: u64 = replies.values().map(|(_, a)| answer_bytes(a)).sum();
         if total <= UNCLAIMED_REPLY_BYTES {
             return;
         }
@@ -732,7 +736,7 @@ impl Daemon {
                 break;
             }
             if let Some((_, a)) = replies.remove(&key) {
-                total -= size(&a);
+                total -= answer_bytes(&a);
             }
         }
     }

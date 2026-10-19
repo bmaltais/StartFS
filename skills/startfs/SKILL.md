@@ -104,8 +104,8 @@ Observed on a node under load: the first two rows (a frozen peer during a copy o
 files). The waiting, memory-pressure and resident-size rows follow from what the figures measure but
 have not yet been seen in a real run; say so if asked how sure the reading is.
 
-`inbox` and `unclaimed chunk replies` show `no limit` when nothing bounds them: a large figure
-there is real memory held. `cgroup memory` can be the whole login session, not just StartFS.
+`inbox` shows `no limit` when nothing bounds it: a large figure there is real memory held.
+`unclaimed chunk replies` are capped (16 MiB) and dropped after a minute. `cgroup memory` can be the whole login session, not just StartFS.
 
 What not to conclude: nothing here says what another machine sees (each end of a path counts
 its own side); counters only cover the current daemon run; and `startfs config --activity off`
