@@ -66,6 +66,10 @@ const GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// How often it looks while a purge is still taking in recent deletes.
 const PURGE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long a member's address is trusted before the transport is told it again. The address is
+/// a name, and telling the transport is a lookup: once per tick it kept the resolver busy.
+const ADDRESS_RECHECK: Duration = Duration::from_secs(10);
+
 const DOWN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(3 * HELLO_INTERVAL.as_secs());
 
@@ -98,6 +102,8 @@ pub struct Daemon {
     looked: Mutex<(Option<Nanos>, Nanos)>,
     /// When each peer endpoint was last heard from.
     heard: Mutex<HashMap<NodeId, Nanos>>,
+    /// The address each member's endpoint was last announced to the transport at, and when.
+    announced: Mutex<HashMap<NodeId, (String, Nanos)>>,
     last_gossip: Mutex<Option<Nanos>>,
     /// The latest replication health each peer gossiped, and when it arrived.
     peer_health: Mutex<HashMap<NodeId, (Nanos, Health)>>,
@@ -213,6 +219,7 @@ impl Daemon {
                 slept: Mutex::new(HashMap::new()),
                 looked: Mutex::new((None, 0)),
                 heard: Mutex::new(HashMap::new()),
+                announced: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
                 peer_health: Mutex::new(HashMap::new()),
                 stats_replies: Mutex::new(HashMap::new()),
@@ -668,15 +675,24 @@ impl Daemon {
 
     /// Exchange logs with exactly the other members.
     fn sync_peers(&self) {
-        let peers = {
+        let (members, peers) = {
             let m = self.membership.lock().unwrap();
-            if let Some(t) = self.transport() {
-                for member in m.members() {
+            (m.members(), m.peers())
+        };
+        if let Some(t) = self.transport() {
+            let now = self.clock.now();
+            let mut announced = self.announced.lock().unwrap();
+            for member in members {
+                let fresh = announced.get(&member.endpoint).is_some_and(|(addr, at)| {
+                    *addr == member.addr
+                        && now.saturating_sub(*at) < ADDRESS_RECHECK.as_nanos() as Nanos
+                });
+                if !fresh {
                     t.learn(member.endpoint, &member.addr);
+                    announced.insert(member.endpoint, (member.addr, now));
                 }
             }
-            m.peers()
-        };
+        }
         if let Some(s) = self.syncer.lock().unwrap().as_mut() {
             s.set_peers(&peers);
         }
