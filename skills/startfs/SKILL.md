@@ -34,6 +34,13 @@ untouched. If it warns that the protocol changed, upgrade every member: until th
 Done when `startfs status` on each machine shows all members `up`.
 `STARTFS_VERSION=vX.Y.Z` pins a release (older ones warn).
 
+For several machines, upgrade one at a time and wait until the cluster is calm before the next:
+`scripts/rolling-upgrade.sh vX.Y.Z local HOST...` (ssh hosts, the machine that matters most last)
+installs, then waits for `data: SAFE`, every member up, an empty inbox (`startfs activity`) and a
+quiet tick, and stops on a node that does not get there. Never restart a node that is still
+catching up: a restart makes every node re-check its chunks. Expect `DEGRADED` for a minute or two
+after each restart.
+
 ## Create a filesystem (first machine)
 
 ```sh

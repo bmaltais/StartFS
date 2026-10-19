@@ -155,6 +155,16 @@ Downgrading is allowed but not recommended: a newer build can write state an old
 refuses to read. If you built from source, rebuild and `systemctl --user restart
 startfs.service` instead.
 
+### Upgrading a whole cluster
+
+Upgrade one machine at a time and let it settle before the next, because a restart makes every
+member re-check its chunks. `scripts/rolling-upgrade.sh vX.Y.Z local HOST...` does that over ssh
+(`local` is this machine; list the one that matters most last). After each install it waits for
+`data: SAFE`, every member up, an empty inbox and a quiet tick (`BUSY_MAX`, a 60 s average, so it
+lags by about a minute), prints one status line every 10 s, and stops without touching the rest if
+a node is not ready after 15 minutes. Run it in a terminal you can watch: the installer asks before
+restarting a daemon whose mount is in use.
+
 ## Quickstart
 
 The daemon is already running after the Linux install (on macOS or a manual install, run
