@@ -238,6 +238,14 @@ the whole tree. The rebuild still reads the whole tree (CPU), but the disk write
 Receiver `meta.redb` `pwrite64` for the 4,200-file copy on three loopback nodes (single runs under
 `strace`): 5,788 before #87, 3,355 after it, 1,724 and 1,538 with this change.
 
+With the disk capped to 500 IOPS and 60 MB/s (`scripts/profile-apply.sh`, `TRACE=1`, 1,000 small and
+20 large files, one run per build): `meta.redb` `pwrite64` 3,913 on the build before #87 and 2,392
+now; copy time 85 s and 91 s; tick average 48 and 51 ms; inbox 7 and 0 entries at the end. A tree
+that small does not stall either build, and the copy is limited by the chunk fsyncs, so the
+issue's acceptance check (tick under a second, inbox near 0 on a 4,000-file burst) cannot tell the
+builds apart on loopback. The evidence for the fix is the table above; the live check needs a
+node with a tree of about 26,000 objects.
+
 ### The live disks
 
 The live VPSes (vps1, vps2) are Azure Standard_B2als_v2 (2 vCPU, 4 GiB; the VM allows 3,750
