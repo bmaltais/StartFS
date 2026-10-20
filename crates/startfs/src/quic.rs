@@ -43,6 +43,16 @@ const CLOSE_REFUSED: u32 = 1;
 /// slows the sender instead of this node's memory growing (#91). Metadata and gossip are exempt.
 pub const INBOX_BULK_LIMIT: u64 = 64 << 20;
 const INBOX_POLL: Duration = Duration::from_millis(5);
+/// Flow-control window of one stream. Every chunk message has a stream of its own, so this is how
+/// much of a chunk can be in flight in one round trip: quinn's default (about 1.25 MiB) holds a
+/// 1 to 4 MiB chunk to a fraction of the link on any path with real latency.
+const STREAM_WINDOW: u32 = 8 << 20;
+/// Flow-control window of a connection, sized for the bulk bytes the replicator allows in flight
+/// to one peer (`BACKLOG_LIMIT`) and the inbox holds back (`INBOX_BULK_LIMIT`).
+const CONNECTION_WINDOW: u32 = 64 << 20;
+/// Kernel buffer asked for each direction of the UDP socket. The default (about 200 KB) overflows
+/// when a window of data arrives in a burst; the kernel caps the request at `net.core.rmem_max`.
+const SOCKET_BUFFER: usize = 8 << 20;
 
 /// Resolve a `host:port` string, preferring IPv4: nodes listen on their tailnet
 /// IPv4 only, while a MagicDNS name also carries an IPv6 address.
@@ -185,7 +195,12 @@ impl QuicTransport {
         client.transport_config(Arc::new(transport_config()));
         let endpoint = {
             let _guard = runtime.enter();
-            let mut endpoint = quinn::Endpoint::server(server, bind)?;
+            let mut endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(server),
+                bound_socket(bind)?,
+                Arc::new(quinn::TokioRuntime),
+            )?;
             endpoint.set_default_client_config(client);
             endpoint
         };
@@ -326,12 +341,37 @@ impl Transport for QuicTransport {
     }
 }
 
+/// A UDP socket bound to `bind` with larger kernel buffers than the default.
+fn bound_socket(bind: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(bind),
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    // A refused size only leaves the default in place.
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "best-effort: the kernel may cap or refuse the size"
+    )]
+    let _ = socket.set_recv_buffer_size(SOCKET_BUFFER);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "best-effort: the kernel may cap or refuse the size"
+    )]
+    let _ = socket.set_send_buffer_size(SOCKET_BUFFER);
+    socket.bind(&bind.into())?;
+    Ok(socket.into())
+}
+
 fn transport_config() -> quinn::TransportConfig {
     let mut cfg = quinn::TransportConfig::default();
     cfg.keep_alive_interval(Some(Duration::from_secs(5)));
     cfg.max_idle_timeout(Some(
         Duration::from_secs(30).try_into().expect("idle timeout"),
     ));
+    cfg.stream_receive_window(STREAM_WINDOW.into());
+    cfg.receive_window(CONNECTION_WINDOW.into());
+    cfg.send_window(u64::from(CONNECTION_WINDOW));
     cfg
 }
 

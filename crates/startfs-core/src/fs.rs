@@ -222,13 +222,47 @@ pub trait ChunkSource: Send + Sync {
     /// Ask peers for a chunk. `accept` says whether received bytes are the
     /// right chunk; a source tries another peer when it says no.
     fn fetch(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>>;
+
+    /// Ask for several chunks at once, so their round trips overlap. The answers are in the order
+    /// of `ids`, `None` for a chunk no peer supplied. `accept` says whether bytes are the chunk
+    /// named by its first argument. The first chunk is the one a read waits for: a source tries
+    /// harder for it than for the rest.
+    fn fetch_many(
+        &self,
+        ids: &[ChunkId],
+        accept: &dyn Fn(&ChunkId, &[u8]) -> bool,
+    ) -> Vec<Option<Vec<u8>>> {
+        ids.iter()
+            .map(|id| self.fetch(id, &|d| accept(id, d)))
+            .collect()
+    }
 }
+
+/// Most chunks a read fetches beyond the one it is waiting for, and the most bytes they add up to
+/// (the daemon keeps 16 MiB of unclaimed replies, so this stays under it).
+const READAHEAD_CHUNKS: usize = 8;
+const READAHEAD_BYTES: u64 = 8 << 20;
 
 /// Chunks fetched during one operation, and the one it is waiting for.
 #[derive(Default)]
 struct Spill {
     got: HashMap<ChunkId, Vec<u8>>,
     miss: Option<ChunkId>,
+    /// The chunks after the missing one that a sequential read will want next.
+    ahead: Vec<ChunkId>,
+}
+
+/// The chunks of `refs` worth fetching along with a missing one that precedes them.
+fn readahead(refs: &[ChunkRef]) -> Vec<ChunkId> {
+    let mut bytes = 0u64;
+    refs.iter()
+        .take(READAHEAD_CHUNKS)
+        .take_while(|r| {
+            bytes += u64::from(r.len);
+            bytes <= READAHEAD_BYTES
+        })
+        .map(|r| r.id)
+        .collect()
 }
 
 pub struct LocalFs {
@@ -406,7 +440,7 @@ impl LocalFs {
             match self.view(|v| f(v, &mut spill)) {
                 Err(FsError::Unavailable) if spill.miss.is_some() => {
                     let id = spill.miss.take().expect("checked");
-                    let data = self.fetch_remote(&id)?;
+                    let data = self.fetch_remote_ahead(&id, &spill.ahead)?;
                     spill.got.insert(id, data);
                 }
                 other => return other,
@@ -651,6 +685,42 @@ impl LocalFs {
         }
     }
 
+    /// [`Self::fetch_remote`] for a read that looks sequential: the chunks `ahead` that are not
+    /// held here are requested in the same round trip and kept in the cache, so the reads that
+    /// follow find them instead of each waiting for a peer.
+    fn fetch_remote_ahead(&self, id: &ChunkId, ahead: &[ChunkId]) -> FsResult<Vec<u8>> {
+        let mut ids = vec![*id];
+        ids.extend(ahead.iter().filter(|a| !self.holds(a)).copied());
+        if ids.len() == 1 {
+            return self.fetch_remote(id);
+        }
+        let source = self.source.lock().unwrap().clone();
+        let accept = |want: &ChunkId, d: &[u8]| blake3::hash(d).as_bytes() == want;
+        let mut answers = source
+            .map(|s| s.fetch_many(&ids, &accept))
+            .unwrap_or_default();
+        answers.resize(ids.len(), None);
+        for (want, data) in ids.iter().zip(&answers).skip(1) {
+            if let Some(data) = data
+                && accept(want, data)
+            {
+                self.cache.put(data);
+            }
+        }
+        match answers.swap_remove(0) {
+            Some(data) if accept(id, &data) => {
+                self.cache.put(&data);
+                Ok(data)
+            }
+            _ => self.fetch_remote(id),
+        }
+    }
+
+    /// Whether a chunk is held here, as a replica, staged or cached.
+    fn holds(&self, id: &ChunkId) -> bool {
+        self.has_replica(id) || self.has_staged(id) || self.cache.touch(id)
+    }
+
     /// Run `f`, fetching from peers (outside any lock) each chunk it finds
     /// missing and then running it again.
     fn fetching<T>(
@@ -710,7 +780,7 @@ impl LocalFs {
             Content::Chunks(refs) => {
                 let mut out = Vec::with_capacity((to - from) as usize);
                 let mut pos = 0u64;
-                for r in refs {
+                for (n, r) in refs.iter().enumerate() {
                     let (start, stop) = (pos, pos + r.len as u64);
                     pos = stop;
                     if stop <= from {
@@ -719,7 +789,17 @@ impl LocalFs {
                     if start >= to {
                         break;
                     }
-                    let data = self.chunk(&r.id, spill)?;
+                    let data = match self.chunk(&r.id, spill) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            // A read that starts at or before this chunk is moving through the
+                            // file; one that lands inside it is more likely a random access.
+                            if spill.miss.is_some() && from <= start {
+                                spill.ahead = readahead(&refs[n + 1..]);
+                            }
+                            return Err(e);
+                        }
+                    };
                     let lo = from.saturating_sub(start) as usize;
                     let hi = (to.min(stop) - start) as usize;
                     out.extend_from_slice(&data[lo..hi]);
