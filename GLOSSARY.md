@@ -56,7 +56,7 @@ A member unseen for 5 minutes but not yet lost. Others cover for it with stand-i
 _Avoid_: Offline, down (down means unseen for three hello intervals)
 
 **Re-checking**:
-A chunk held here whose placement this node has asked other members about (after a restart or a change of membership) and whose answers have not all come in. It is not counted as short of copies meanwhile, so a restart does not turn the verdict to `DEGRADED` by itself; `status` shows how many chunks this node is re-checking. A peer that stays silent ends it: the chunk is then short of copies.
+A chunk held here whose placement this node has asked other members about (after a restart or a change of membership) and whose answers have not all come in. It is not counted as short of copies meanwhile, so a restart does not turn the verdict to `DEGRADED` by itself. Nor does a member this node has not yet heard from since it started: for its first 30 s (three hello intervals) such a member shows as `unknown`, not `down`, and a member that stays silent past that becomes `down`. `status` shows how many chunks this node is re-checking. A peer that stays silent ends it: the chunk is then short of copies.
 _Avoid_: Rescan (that is every chunk, which only a restarted daemon still does)
 
 **Collective memory**:

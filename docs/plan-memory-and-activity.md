@@ -254,8 +254,8 @@ local to the node, not gossiped). Harness: questions sent by the other nodes aft
 member was cut off and back, 504 -> 0 (60 files, 5 nodes, 3 copies). Live rolling upgrade 1.5.7 -> 1.5.8
 of all seven members: 473 s, each node ready in about 60 s, queues 2,500 to 3,800 at restart and 0 within
 about 30 s, inbox peak 63, no `AT RISK`; mini1, which went `DEGRADED` then `AT RISK` on 1.5.1, stayed
-`SAFE` with its queue at 0 within 10 s. The restarted node still reads `DEGRADED` for about 30 s because
-it counts the others as down until their hellos arrive. Not measured: the inbound question rate on the
+`SAFE` with its queue at 0 within 10 s. (Since fixed, #132: the restarted node shows the others as `unknown`, not `down`, until their hellos
+arrive or 30 s pass, so it no longer reads `DEGRADED` for that time.) Not measured: the inbound question rate on the
 other nodes during a restart (no `activity` sampling), and no same-cluster baseline on 1.5.6. Not done:
 debounce, persisting holder knowledge across restarts.
 

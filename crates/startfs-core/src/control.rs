@@ -123,6 +123,8 @@ pub enum NodeState {
     Leaving,
     /// Restarting on a new release: the others expect it back within its upgrade pause.
     Upgrading,
+    /// This daemon has just started and not yet heard from the member: neither up nor down.
+    Unknown,
 }
 
 /// One member of the filesystem, as `status` shows it.

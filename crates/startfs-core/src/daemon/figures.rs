@@ -1,6 +1,6 @@
 //! The activity view: this node's recent rates, queues and resource use.
 
-use super::standing::{is_up, node_state};
+use super::standing::{is_unknown, is_up, node_state};
 use super::{Daemon, UNCLAIMED_REPLY_BYTES, answer_bytes};
 use crate::activity::{ActivityReport, PeerActivity, QueueActivity, Structure, Structures};
 use crate::error::Error;
@@ -48,6 +48,7 @@ impl Daemon {
                         state: node_state(
                             m.leaving,
                             up,
+                            is_unknown(heard.get(&m.endpoint).copied(), self.started, now),
                             lost.contains(&m.id),
                             paused.contains(&m.id),
                         ),
