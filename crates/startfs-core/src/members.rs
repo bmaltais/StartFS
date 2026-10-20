@@ -96,6 +96,12 @@ pub struct Member {
 }
 
 impl Member {
+    /// Whether placement may put a copy on this member: it offers space and is
+    /// not leaving. Weight only scales a share of an offer, it never creates one.
+    pub fn takes_copies(&self) -> bool {
+        self.offer_bytes > 0 && !self.leaving
+    }
+
     /// What placement weighs the member by: its weight, or its offer when it
     /// has none.
     pub fn share(&self) -> u64 {

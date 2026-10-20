@@ -51,7 +51,7 @@ pub fn place(
 ) -> Vec<MemberId> {
     let mut scored: Vec<(f64, &Member)> = members
         .iter()
-        .filter(|m| m.offer_bytes > 0 && !m.leaving && !skip.contains(&m.id))
+        .filter(|m| m.takes_copies() && !skip.contains(&m.id))
         .map(|m| (-unit(chunk, m.id).ln() / m.share() as f64, m))
         .collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.id.cmp(&b.1.id)));

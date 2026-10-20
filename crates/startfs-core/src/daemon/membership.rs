@@ -1,7 +1,8 @@
 //! Membership flows: creating, joining, leaving and removing members, and
 //! minting or revoking join tokens.
 
-use super::{DOWN_AFTER, Daemon};
+use super::Daemon;
+use super::standing::is_up;
 use crate::control::{FilesystemInfo, Verdict};
 use crate::error::Error;
 use crate::members::{JoinRequest, MemberId, Membership, Token};
@@ -191,13 +192,8 @@ impl Daemon {
                 .into_iter()
                 .find(|x| x.id == member)
                 .is_some_and(|x| {
-                    self.heard
-                        .lock()
-                        .unwrap()
-                        .get(&x.endpoint)
-                        .is_some_and(|t| {
-                            self.clock.now().saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64
-                        })
+                    let heard = self.heard.lock().unwrap().get(&x.endpoint).copied();
+                    is_up(heard, self.clock.now())
                 });
             if up {
                 return Err(Error::MemberOnline(member));

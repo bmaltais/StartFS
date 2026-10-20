@@ -1,8 +1,8 @@
 //! The activity view: this node's recent rates, queues and resource use.
 
-use super::{DOWN_AFTER, Daemon, UNCLAIMED_REPLY_BYTES, answer_bytes};
+use super::standing::{is_up, node_state};
+use super::{Daemon, UNCLAIMED_REPLY_BYTES, answer_bytes};
 use crate::activity::{ActivityReport, PeerActivity, QueueActivity, Structure, Structures};
-use crate::control::NodeState;
 use crate::error::Error;
 use crate::net::Inbox;
 
@@ -41,20 +41,10 @@ impl Daemon {
                 .into_iter()
                 .filter(|m| Some(m.id) != me)
                 .map(|m| {
-                    let up = heard
-                        .get(&m.endpoint)
-                        .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64);
+                    let up = is_up(heard.get(&m.endpoint).copied(), now);
                     PeerActivity {
                         member: m.id,
-                        state: if m.leaving {
-                            NodeState::Leaving
-                        } else if up {
-                            NodeState::Online
-                        } else if lost.contains(&m.id) {
-                            NodeState::Lost
-                        } else {
-                            NodeState::Down
-                        },
+                        state: node_state(m.leaving, up, lost.contains(&m.id)),
                         in_flight: in_flight.get(&m.id).copied().unwrap_or(0),
                         traffic: enabled
                             .then(|| totals.peers.get(&m.endpoint).copied().unwrap_or_default()),

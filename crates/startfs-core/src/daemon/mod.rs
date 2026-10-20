@@ -10,8 +10,10 @@ mod membership;
 mod peers;
 mod purge;
 mod requests;
+mod standing;
 mod status;
 
+use self::standing::is_up;
 use crate::activity::{Activity, CountingTransport, Phase};
 use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
@@ -780,11 +782,7 @@ impl Daemon {
         let mut peers = self.membership.lock().unwrap().peers();
         let heard = self.heard.lock().unwrap().clone();
         let now = self.clock.now();
-        let down = |p: &NodeId| {
-            heard
-                .get(p)
-                .is_none_or(|at| now.saturating_sub(*at) >= DOWN_AFTER.as_nanos() as Nanos)
-        };
+        let down = |p: &NodeId| !is_up(heard.get(p).copied(), now);
         {
             let latency = self.latency.lock().unwrap();
             peers.sort_by_key(|p| {
