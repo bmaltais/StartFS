@@ -30,18 +30,21 @@ commands:
   purge                               free the data of deleted files on every member now, instead
                                       of after the retention period (not undoable)
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
-  join TOKEN [--offer SIZE]           join the filesystem a token names
+  join TOKEN [--offer SIZE] [--site NAME]
+                                      join the filesystem a token names, declaring where this
+                                      node lives (home, cloud) so copies are spread across sites
   token [--example]                   print a new join token (--example: the full join
                                       command to paste on the other machine)
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
-  config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off]
+  config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off] [--site NAME]
                                       change this node's space offer (sizes like 500M, 2T), its
                                       weight (the share of new copies it takes, in the same
                                       units; 0: follow the offer), the filesystem's number of
                                       copies on every node, or whether this node keeps the
-                                      counters behind `activity` (until restart)";
+                                      counters behind `activity` (until restart), or the site
+                                      this node declares (empty: none, so it is its own site)";
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
@@ -164,7 +167,8 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         "join" => {
             let token = rest.first().ok_or(CliError::Usage)?;
             let offer = optional_size(rest, "--offer")?;
-            Client::new(socket).join(token, offer)?;
+            let site = flag_value(rest, "--site").unwrap_or_default();
+            Client::new(socket).join_at(token, offer, &site)?;
             println!("joined");
             Ok(())
         }
@@ -195,6 +199,9 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             }
             if let Some(bytes) = optional_size(rest, "--weight")? {
                 Client::new(socket.clone()).set_weight(bytes)?;
+            }
+            if let Ok(site) = flag_value(rest, "--site") {
+                Client::new(socket.clone()).set_site(&site)?;
             }
             if let Ok(value) = flag_value(rest, "--activity") {
                 let on = match value.as_str() {
@@ -356,10 +363,14 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "daemon" => (&["--mount"], &[], 0),
         "create" => (&["--name", "--copies"], &["--example"], 0),
         "status" | "activity" | "stats" => (&[], &["--json"], 0),
-        "join" => (&["--offer"], &[], 1),
+        "join" => (&["--offer", "--site"], &[], 1),
         "token" => (&[], &["--example"], 0),
         "remove" | "revoke" => (&[], &[], 1),
-        "config" => (&["--offer", "--weight", "--copies", "--activity"], &[], 0),
+        "config" => (
+            &["--offer", "--weight", "--copies", "--activity", "--site"],
+            &[],
+            0,
+        ),
         // purge, leave and unknown commands (reported as usage later)
         _ => (&[], &[], 0),
     };
@@ -557,6 +568,9 @@ fn members_table(members: &[control::MemberStatus]) -> String {
             let mut offered = format!("{} offered", human(m.offer_bytes));
             if m.weight_bytes > 0 {
                 offered = format!("{offered}, weight {}", human(m.weight_bytes));
+            }
+            if !m.site.is_empty() {
+                offered = format!("{offered}, site {}", m.site);
             }
             [
                 m.id.to_string(),

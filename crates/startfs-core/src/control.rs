@@ -46,6 +46,9 @@ pub enum Request {
         /// Switch the activity counters on or off, until the daemon restarts.
         #[serde(default)]
         activity: Option<bool>,
+        /// Declare where this node lives; empty clears it (it is then its own site).
+        #[serde(default)]
+        site: Option<String>,
     },
     /// Make a token we issued stop working.
     Revoke {
@@ -61,6 +64,9 @@ pub enum Request {
     Join {
         token: String,
         offer_bytes: Option<u64>,
+        /// The site to declare on joining; empty for none.
+        #[serde(default)]
+        site: String,
     },
 }
 
@@ -120,6 +126,9 @@ pub struct MemberStatus {
     /// means the offer.
     #[serde(default)]
     pub weight_bytes: u64,
+    /// The site the member declared; empty when it has none.
+    #[serde(default)]
+    pub site: String,
     /// Whether this is the node answering.
     pub is_self: bool,
     /// Why this node cannot reach the member, when it is not up (for example a protocol
@@ -552,9 +561,15 @@ impl Client {
 
     /// Join the filesystem a token names.
     pub fn join(&self, token: &str, offer_bytes: Option<u64>) -> Result<(), Error> {
+        self.join_at(token, offer_bytes, "")
+    }
+
+    /// Join the filesystem a token names, declaring this node's site.
+    pub fn join_at(&self, token: &str, offer_bytes: Option<u64>, site: &str) -> Result<(), Error> {
         match self.call(&Request::Join {
             token: token.into(),
             offer_bytes,
+            site: site.into(),
         })? {
             Response::Joined => Ok(()),
             other => Err(unexpected(other)),
@@ -586,6 +601,7 @@ impl Client {
             weight_bytes: None,
             copies: None,
             activity: None,
+            site: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -600,6 +616,7 @@ impl Client {
             weight_bytes: Some(bytes),
             copies: None,
             activity: None,
+            site: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -613,6 +630,21 @@ impl Client {
             weight_bytes: None,
             copies: Some(copies),
             activity: None,
+            site: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Declare where this node lives; empty clears it.
+    pub fn set_site(&self, site: &str) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            weight_bytes: None,
+            copies: None,
+            activity: None,
+            site: Some(site.into()),
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -626,6 +658,7 @@ impl Client {
             weight_bytes: None,
             copies: None,
             activity: Some(on),
+            site: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),

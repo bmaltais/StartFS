@@ -27,8 +27,9 @@ impl Daemon {
                 weight_bytes,
                 copies,
                 activity,
+                site,
             } => {
-                self.configure(offer_bytes, weight_bytes, copies, activity)?;
+                self.configure(offer_bytes, weight_bytes, copies, activity, site)?;
                 Response::Done
             }
             Request::Revoke { token } => {
@@ -43,8 +44,12 @@ impl Daemon {
                 self.remove_member(member)?;
                 Response::Done
             }
-            Request::Join { token, offer_bytes } => {
-                self.join(&token, offer_bytes)?;
+            Request::Join {
+                token,
+                offer_bytes,
+                site,
+            } => {
+                self.join(&token, offer_bytes, site)?;
                 Response::Joined
             }
             Request::Purge => Response::Purged(self.purge()?),

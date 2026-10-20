@@ -69,6 +69,7 @@ impl Node {
         self.call(Request::Join {
             token: token.into(),
             offer_bytes: None,
+            site: String::new(),
         })
     }
 
@@ -126,6 +127,7 @@ fn a_joined_node_sees_metadata_and_reads_chunks_from_its_peer() {
     let joined = b.call(Request::Join {
         token,
         offer_bytes: Some(0),
+        site: String::new(),
     });
     assert!(matches!(joined, Response::Joined), "{joined:?}");
 

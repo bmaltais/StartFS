@@ -171,6 +171,10 @@ that way: members on different protocols cannot see each other, so the first nod
 only until the daemon answers at the new version, then waits for each node to be ready. The
 cluster cannot sync for those few minutes, and nothing is lost; rerunning skips nodes already done.
 
+Protocol 14 (the next minor release after 1.7.0) adds each member's site to the member list. It
+is a protocol change, so use `--lockstep`; members on protocol 13 show as incompatible until
+they are upgraded. Nothing changes in placement until you declare a site.
+
 ## Quickstart
 
 The daemon is already running after the Linux install (on macOS or a manual install, run
@@ -190,6 +194,9 @@ contributes):
 ```sh
 startfs join startfs1-AbC... --offer 100G
 ```
+
+Add `--site home` (or `cloud`, any label) to say where the machine lives, so that copies are
+spread across sites; see [Surviving machine loss](#surviving-machine-loss).
 
 That is all: `~/StartFS` is now the same filesystem on both. Use it like any directory.
 
@@ -237,6 +244,17 @@ filesystem) keeps N copies of every chunk on N different machines.
   one's data is back to N copies, you are one failure closer to loss. `startfs status`
   shows copies possible versus wanted and the repair progress.
 - **Machines that sleep are covered for.** See [Machines that sleep](#machines-that-sleep).
+- **A local disaster can be survived if you declare sites.** Placement alone does not know where
+  machines are, so with four home machines and one cloud machine many chunks would sit wholly at
+  home. Tell each machine where it lives (`startfs join TOKEN --site home`, or
+  `startfs config --site cloud`; `--site ""` clears it) and every chunk's copies are spread
+  over `min(copies, sites)` sites, so a fire or a router failure at home leaves a copy in the
+  cloud. A machine with no label is its own site. Sites are declared, never detected. Be aware
+  that the off-site machine then takes at least 1/N of all data (its upload bandwidth and disk).
+  Labelling or relabelling re-places chunks in the background, at the `repair_bytes_per_sec`
+  rate. `startfs status` shows each member's site and warns when the copies cannot span as many
+  sites as they should (a site is lost or full); writes are never refused for that, and the
+  copies move back when the site returns. See `docs/adr/0005-sites-are-declared.md`.
 - A short outage is not a loss. A machine that is merely offline keeps working locally and
   catches up when it returns; concurrent edits to the same file become conflict copies.
 
@@ -321,7 +339,8 @@ Run it on any node. `startfs stats --json` gives the full figures per member.
 
 Other commands: `startfs leave` (hand this node's data over and leave),
 `startfs remove <member>` (drop a dead member; its data is re-replicated),
-`startfs config --offer 500G` (this node's space), `startfs config --weight 50G` (the share of
+`startfs config --offer 500G` (this node's space), `startfs config --site cloud` (where this
+node lives, see [Surviving machine loss](#surviving-machine-loss); it moves data), `startfs config --weight 50G` (the share of
 new copies this node takes, in the units of the offer, when a big disk is slow; 0 follows the
 offer; it moves data) and `startfs config --copies 3`, which
 changes the number of copies for the whole filesystem, on every node. Raising it makes the

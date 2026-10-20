@@ -49,7 +49,12 @@ impl Daemon {
         true
     }
 
-    pub(super) fn join(&self, token: &str, offer_bytes: Option<u64>) -> Result<(), Error> {
+    pub(super) fn join(
+        &self,
+        token: &str,
+        offer_bytes: Option<u64>,
+        site: String,
+    ) -> Result<(), Error> {
         let token = Token::parse(token)?;
         if self.membership.lock().unwrap().filesystem().is_some() {
             return Err(Error::AlreadyInFilesystem);
@@ -70,6 +75,7 @@ impl Daemon {
                 token_id: token.token_id,
                 addr: self.addr(),
                 offer_bytes: offer,
+                site: site.trim().to_string(),
             })
             .encode(),
         );
@@ -203,13 +209,14 @@ impl Daemon {
         Ok(())
     }
 
-    /// Change this node's space offer, weight or the copies; `None` leaves each as it is.
+    /// Change this node's space offer, weight, site or the copies; `None` leaves each as it is.
     pub(super) fn configure(
         &self,
         offer_bytes: Option<u64>,
         weight_bytes: Option<u64>,
         copies: Option<u32>,
         activity: Option<bool>,
+        site: Option<String>,
     ) -> Result<(), Error> {
         if copies == Some(0) {
             return Err(Error::BadFilesystemSpec);
@@ -243,6 +250,9 @@ impl Daemon {
         }
         if let Some(bytes) = weight_bytes {
             membership.set_weight(bytes)?;
+        }
+        if let Some(site) = site {
+            membership.set_site(site.trim())?;
         }
         self.fs.set_staging_limit(super::staging_limit(
             &self.config,

@@ -353,6 +353,7 @@ impl Daemon {
                     },
                     offer_bytes: m.offer_bytes,
                     weight_bytes: m.weight_bytes,
+                    site: m.site,
                     is_self,
                     behind: if !up {
                         None
@@ -448,6 +449,39 @@ impl Daemon {
                 storage_nodes,
                 if storage_nodes == 1 { "" } else { "s" }
             ));
+        }
+        if let Some(f) = &filesystem {
+            // A site is a label, or the member itself when it has none.
+            let site = |m: &crate::members::Member| {
+                if m.site.is_empty() {
+                    format!("#{}", m.id)
+                } else {
+                    format!("={}", m.site)
+                }
+            };
+            let all = membership.members();
+            // A site only counts if some member there offers space; a full or lost one still does.
+            let offering = |m: &&crate::members::Member| m.offer_bytes > 0 && !m.leaving;
+            let declared: std::collections::HashSet<String> =
+                all.iter().filter(offering).map(&site).collect();
+            let reachable: std::collections::HashSet<String> = all
+                .iter()
+                .filter(|m| {
+                    m.offer_bytes > 0
+                        && !m.leaving
+                        && !full.contains(&m.id)
+                        && !lost.contains(&m.id)
+                })
+                .map(&site)
+                .collect();
+            let wanted = (f.copies as usize).min(declared.len());
+            if all.iter().filter(offering).any(|m| !m.site.is_empty()) && reachable.len() < wanted {
+                warnings.push(format!(
+                    "sites: copies should span {wanted} sites, but only {} can take them \
+                     (a site is full, lost or offers nothing)",
+                    reachable.len()
+                ));
+            }
         }
         let verdict = filesystem.as_ref().map(|f| {
             verdict(

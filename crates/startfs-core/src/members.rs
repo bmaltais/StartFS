@@ -81,6 +81,10 @@ pub struct Member {
     /// that should differ from what it offers; 0 means the offer.
     #[serde(default)]
     pub weight_bytes: u64,
+    /// Where the member lives (home, cloud), as it declared; empty means it is
+    /// its own site. Placement spreads a chunk's copies across sites.
+    #[serde(default)]
+    pub site: String,
     /// Bumped by the member each time it changes its own record; the highest wins.
     pub rev: u64,
     /// The member is handing its data to the others and about to go.
@@ -121,6 +125,9 @@ pub struct JoinRequest {
     /// The joiner's advertised `host:port`.
     pub addr: String,
     pub offer_bytes: u64,
+    /// The joiner's declared site; empty means none.
+    #[serde(default)]
+    pub site: String,
 }
 
 /// A join token as every member knows it. `expires` never changes and `revoked`
@@ -275,6 +282,7 @@ impl Membership {
                 addr,
                 offer_bytes,
                 weight_bytes: 0,
+                site: String::new(),
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -378,6 +386,7 @@ impl Membership {
                 addr: request.addr,
                 offer_bytes: request.offer_bytes,
                 weight_bytes: 0,
+                site: request.site,
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -533,6 +542,18 @@ impl Membership {
         let me = self.me;
         if let Some(m) = self.members.get_mut(&me) {
             m.weight_bytes = bytes;
+            m.rev += 1;
+        }
+        self.save()
+    }
+
+    /// Declare where this node lives; empty clears it.
+    pub fn set_site(&mut self, site: &str) -> Result<(), Error> {
+        let me = self.me;
+        if let Some(m) = self.members.get_mut(&me)
+            && m.site != site
+        {
+            m.site = site.to_string();
             m.rev += 1;
         }
         self.save()

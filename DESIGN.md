@@ -39,6 +39,9 @@ same code with a different membership scope.
 7. **Capacity and placement:** weighted by contributed space. Each node declares a space offer
    (e.g. 50GB laptop, 2TB server) and placement (weighted rendezvous hashing) is proportional to it,
    or to a separate weight (`config --weight`, 0 = the offer) for a large disk that is slow.
+   Each member may also declare a site (`join --site`, `config --site`; ADR 0005): placement then
+   spreads a chunk's copies over `min(copies, eligible sites)` sites, and a member with no label is
+   its own site. Sites are declared, never detected, and a missing site never refuses a write.
    Each member gossips its backlog in `Health` (age of its last tick, inbox messages and bytes);
    `status` shows a member that is up but behind, and the replicator sends it nothing new until it
    catches up, without changing placement or the epoch (ADR 0004).

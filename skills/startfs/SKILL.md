@@ -147,7 +147,10 @@ must run protocol 12 (release 1.5.0 or newer).
 `startfs config --offer SIZE` changes a machine's contribution later. A big disk that is slow
 (a cloud disk with an IOPS cap) should offer its space but take a smaller share of the writes:
 `startfs config --weight SIZE` sets the share in the units of the offer (0 follows the offer).
-It moves data. A member that is up but backed up shows as `up, 3 min behind (10k messages
+It moves data. `startfs join TOKEN --site NAME` or `startfs config --site NAME` declares where a
+machine lives (home, cloud; empty clears it); copies of each chunk are then spread across sites,
+so one off-site machine holds at least 1/N of the data, and `status` warns when the sites cannot
+be spanned. A member that is up but backed up shows as `up, 3 min behind (10k messages
 queued)` in `status`, with a warning; the others send it nothing new until it catches up, so
 do not restart it and do not lower its offer for that. Global flags
 `--data-dir DIR` and `--config FILE` go before the command.
