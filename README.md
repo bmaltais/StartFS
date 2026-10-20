@@ -315,7 +315,9 @@ Run it on any node. `startfs stats --json` gives the full figures per member.
 
 Other commands: `startfs leave` (hand this node's data over and leave),
 `startfs remove <member>` (drop a dead member; its data is re-replicated),
-`startfs config --offer 500G` (this node's space) and `startfs config --copies 3`, which
+`startfs config --offer 500G` (this node's space), `startfs config --weight 50G` (the share of
+new copies this node takes, in the units of the offer, when a big disk is slow; 0 follows the
+offer; it moves data) and `startfs config --copies 3`, which
 changes the number of copies for the whole filesystem, on every node. Raising it makes the
 extra copies in the background (`status` shows the repair). Lowering is refused until every
 file has all its copies and every member is reachable, then the surplus is trimmed lazily.
@@ -341,6 +343,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `standin_days` | 3 | on `create`: days the extra copies made while a member slept are kept after it is back (0 = no stand-ins for sleeping members) |
 | `gc_retention_secs` | 604800 | on `create`: how long deleted chunks are kept |
 | `repair_bytes_per_sec` | 64 MiB | most bytes per second each node sends when repairing (restoring copies after a lost node or a `config --copies` increase); every holder sends its share, so the cluster's speed grows with its size |
+| `behind_inbox_messages` | 5000 | messages waiting in a peer's inbox from which this node sends it nothing new until it drains (0 = off) |
 | `scrub_period_secs` | 30 days | full integrity pass period |
 | `state_chunk_bytes` | 1 MiB | size of each piece when sending the whole metadata state to a member that missed a log compaction |
 | `activity` | `true` | keep the counters and tick timers behind `startfs activity` (a rolling minute, in memory); `startfs config --activity on\|off` changes it until the daemon restarts |

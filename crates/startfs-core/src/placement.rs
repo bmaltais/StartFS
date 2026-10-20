@@ -1,8 +1,8 @@
 //! Which members hold a chunk: weighted rendezvous hashing.
 //!
 //! Every member gets a score for a chunk from a hash of the two, scaled by
-//! its space offer, and the N best scores win. A member's chance of winning
-//! is proportional to its offer, and when membership changes a chunk only
+//! its share (its weight, or its space offer when it has none), and the N best scores win. A member's chance of winning
+//! is proportional to its share, and when membership changes a chunk only
 //! moves if the member that came or went was among its winners.
 
 use crate::chunkstore::ChunkId;
@@ -29,7 +29,7 @@ pub fn place(
     let mut scored: Vec<(f64, MemberId)> = members
         .iter()
         .filter(|m| m.offer_bytes > 0 && !m.leaving && !skip.contains(&m.id))
-        .map(|m| (-unit(chunk, m.id).ln() / m.offer_bytes as f64, m.id))
+        .map(|m| (-unit(chunk, m.id).ln() / m.share() as f64, m.id))
         .collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     scored

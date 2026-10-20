@@ -141,5 +141,10 @@ must run protocol 12 (release 1.5.0 or newer).
   encryption at rest.
 - Real multi-machine use and macOS are unverified (see "Known limits" in the README).
 
-`startfs config --offer SIZE` changes a machine's contribution later. Global flags
+`startfs config --offer SIZE` changes a machine's contribution later. A big disk that is slow
+(a cloud disk with an IOPS cap) should offer its space but take a smaller share of the writes:
+`startfs config --weight SIZE` sets the share in the units of the offer (0 follows the offer).
+It moves data. A member that is up but backed up shows as `up, 3 min behind (10k messages
+queued)` in `status`, with a warning; the others send it nothing new until it catches up, so
+do not restart it and do not lower its offer for that. Global flags
 `--data-dir DIR` and `--config FILE` go before the command.

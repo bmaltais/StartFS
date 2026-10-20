@@ -70,6 +70,14 @@ Chunks a member that is not up last reported as a single copy. Nobody else knows
 The daemon's own recent rates and timings: traffic per peer path, how long each tick phase takes, and what waits in the replication queue. It describes how the daemon is working now, where `status` describes the state of the cluster.
 _Avoid_: Metrics, telemetry, stats (`stats` is the storage figures)
 
+**Behind**:
+Up but backed up: a member whose last tick began 30 s or more ago, or whose inbox holds `behind_inbox_messages` or more. It is gossiped as its `Load`. `status` says how far behind it is, and other members send it nothing new until it catches up, with no change to placement (ADR 0004).
+_Avoid_: Slow, lagging, down (down means unseen)
+
+**Weight**:
+The share of new copies a member takes, in the units of its offer; placement uses it in place of the offer, and 0 means the offer. A large but slow disk offers capacity with a small weight.
+_Avoid_: Priority, load factor
+
 **Purge**:
 Asking every member to reclaim the chunks no file uses now instead of after the retention period. The reclaim gate still applies, so a member that has not caught up holds it back until it has. Not undoable.
 _Avoid_: Cleanup, force GC

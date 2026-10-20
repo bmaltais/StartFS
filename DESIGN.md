@@ -37,7 +37,11 @@ same code with a different membership scope.
    key can be added later without redesign.
 
 7. **Capacity and placement:** weighted by contributed space. Each node declares a space offer
-   (e.g. 50GB laptop, 2TB server) and placement (weighted rendezvous hashing) is proportional to it.
+   (e.g. 50GB laptop, 2TB server) and placement (weighted rendezvous hashing) is proportional to it,
+   or to a separate weight (`config --weight`, 0 = the offer) for a large disk that is slow.
+   Each member gossips its backlog in `Health` (age of its last tick, inbox messages and bytes);
+   `status` shows a member that is up but behind, and the replicator sends it nothing new until it
+   catches up, without changing placement or the epoch (ADR 0004).
    Usable size is roughly total offered space divided by N. An offer of 0 makes a node a pure client
    (mounts and caches, stores no replicas), which covers the "client-only" role without a separate concept.
 

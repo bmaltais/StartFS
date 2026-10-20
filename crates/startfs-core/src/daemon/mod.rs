@@ -112,6 +112,11 @@ pub struct Daemon {
     /// The address each member's endpoint was last announced to the transport at, and when.
     announced: Mutex<HashMap<NodeId, (String, Nanos)>>,
     last_gossip: Mutex<Option<Nanos>>,
+    /// Members whose last gossiped load put them behind: sent nothing new until
+    /// they catch up.
+    behind: Mutex<HashSet<MemberId>>,
+    /// When the last tick began.
+    last_tick: Mutex<Option<Nanos>>,
     /// The latest replication health each peer gossiped, and when it arrived.
     peer_health: Mutex<HashMap<NodeId, (Nanos, Health)>>,
     /// Storage figures peers sent in answer to the query in flight.
@@ -233,6 +238,8 @@ impl Daemon {
                 heard: Mutex::new(HashMap::new()),
                 announced: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
+                behind: Mutex::new(HashSet::new()),
+                last_tick: Mutex::new(None),
                 peer_health: Mutex::new(HashMap::new()),
                 stats_replies: Mutex::new(HashMap::new()),
                 last_gc: Mutex::new(None),
@@ -307,6 +314,8 @@ impl Daemon {
         let Some(transport) = self.transport() else {
             return false;
         };
+        // Marked first: a hello sent from this tick is from a node that is working.
+        *self.last_tick.lock().unwrap() = Some(self.clock.now());
         let mut busy = false;
         let mut timer = self.activity.tick_timer();
         self.prune_chunk_replies();
@@ -603,7 +612,9 @@ impl Daemon {
                 .filter_map(|m| Some((m.id, *heard.get(&m.endpoint)?)))
                 .collect()
         };
+        let behind = self.behind.lock().unwrap().clone();
         Some(f(&View {
+            behind: &behind,
             me,
             copies,
             members: &members,

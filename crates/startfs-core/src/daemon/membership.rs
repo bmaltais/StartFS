@@ -203,10 +203,11 @@ impl Daemon {
         Ok(())
     }
 
-    /// Change this node's space offer; `None` leaves it as it is.
+    /// Change this node's space offer, weight or the copies; `None` leaves each as it is.
     pub(super) fn configure(
         &self,
         offer_bytes: Option<u64>,
+        weight_bytes: Option<u64>,
         copies: Option<u32>,
         activity: Option<bool>,
     ) -> Result<(), Error> {
@@ -239,6 +240,9 @@ impl Daemon {
         }
         if let Some(bytes) = offer_bytes {
             membership.set_offer(bytes)?;
+        }
+        if let Some(bytes) = weight_bytes {
+            membership.set_weight(bytes)?;
         }
         self.fs.set_staging_limit(super::staging_limit(
             &self.config,
