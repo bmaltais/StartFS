@@ -85,3 +85,9 @@ _Avoid_: Cleanup, force GC
 **Peer path**:
 The traffic between this node and one other member, counted at each end. Two ends that disagree about the same path show loss or a stall on it.
 _Avoid_: Link (a hardlink), connection, route
+
+**Chunk cache**:
+Chunks fetched from other members, kept on this node's disk up to `cache_bytes`, least recently used first. Distinct from the read cache.
+
+**Read cache**:
+Recently read chunks kept decoded in memory up to `read_cache_bytes`, so reading a file in small pieces does not decode a chunk for each piece. Unless set, its size is derived from the machine's total memory. Distinct from the chunk cache.
