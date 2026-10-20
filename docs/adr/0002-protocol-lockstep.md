@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (#26).
+Accepted (#26). Amended by ADR 0006 and ADR 0007 (#127): lockstep stays, with a catch-up channel.
 
 ## Context
 
@@ -29,3 +29,10 @@ installing a release whose protocol differs.
 
 Revisit if a cluster appears that cannot afford its members being unable to sync for
 the minutes an upgrade takes.
+
+## Amendment (#127)
+
+Strict lockstep still holds for every ordinary message. What changed is how a cluster gets
+through a protocol change: the members coordinate it themselves (ADR 0007), and a member that
+was away learns which release to catch up to from an upgrade notice, a frozen message every
+release understands (ADR 0006).
