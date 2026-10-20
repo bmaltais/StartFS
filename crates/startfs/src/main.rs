@@ -594,6 +594,7 @@ fn members_table(members: &[control::MemberStatus]) -> String {
                 NodeState::Lost => "lost",
                 NodeState::Leaving => "leaving",
                 NodeState::Upgrading => "upgrading",
+                NodeState::Unknown => "unknown",
             }
             .to_string();
             if let Some(load) = &m.behind {
@@ -830,6 +831,7 @@ fn render(s: &Status) -> String {
         NodeState::Lost => "lost",
         NodeState::Leaving => "leaving",
         NodeState::Upgrading => "upgrading",
+        NodeState::Unknown => "unknown",
     };
     let mut out = String::from(stopping);
     if let Some(v) = s.verdict {
@@ -1001,6 +1003,7 @@ fn render_activity(a: &ActivityReport) -> String {
             NodeState::Lost => "lost",
             NodeState::Leaving => "leaving",
             NodeState::Upgrading => "upgrading",
+            NodeState::Unknown => "unknown",
         };
         out.push_str(&format!(
             "  {} ({state}), {} in flight\n",

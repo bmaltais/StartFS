@@ -1,7 +1,7 @@
 //! The status report: this node's view of the filesystem and its health.
 
 use super::Daemon;
-use super::standing::{is_up, node_state};
+use super::standing::{is_unknown, is_up, node_state};
 use crate::control::{
     GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
     Shortfall, Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
@@ -346,7 +346,13 @@ impl Daemon {
                 MemberStatus {
                     id: m.id,
                     addr: m.addr,
-                    state: node_state(m.leaving, up, lost.contains(&m.id), paused.contains(&m.id)),
+                    state: node_state(
+                        m.leaving,
+                        up,
+                        !is_self && is_unknown(heard.get(&m.endpoint).copied(), self.started, now),
+                        lost.contains(&m.id),
+                        paused.contains(&m.id),
+                    ),
                     release,
                     protocol,
                     upgrade,

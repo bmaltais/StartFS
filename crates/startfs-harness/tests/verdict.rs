@@ -162,3 +162,59 @@ fn a_restarted_node_learns_from_the_others_what_a_sleeping_member_alone_may_hold
     assert!(s.stranded[0].secs_ago >= 20 * 60 - 240);
     assert_eq!(s.verdict, Some(Verdict::AtRisk));
 }
+
+fn restarted_cluster() -> Cluster {
+    let c = Cluster::with_filesystem(3, 4, "");
+    for i in 0..10 {
+        let fs = c.fs(0);
+        let f = fs.create(ROOT_INO, &format!("f{i}"), 0o644).unwrap();
+        fs.write(f.ino, 0, &noise(60_000, i)).unwrap();
+    }
+    c.sync();
+    c.elapse(Duration::from_secs(60));
+    c
+}
+
+#[test]
+fn a_restarted_node_is_not_degraded_while_it_waits_to_hear_from_its_peers() {
+    let c = restarted_cluster();
+    c.crash(2);
+    c.advance(Duration::from_secs(30));
+    c.restart(2);
+    // Message by message, until the peers' hellos have come in.
+    let mut seen = Vec::new();
+    for _ in 0..160 {
+        c.advance(Duration::from_millis(250));
+        c.tick();
+        let s = c.control(2).status().unwrap();
+        let waiting = s
+            .members
+            .iter()
+            .any(|m| !m.is_self && m.state == NodeState::Unknown);
+        seen.push((s.verdict, waiting));
+    }
+    assert!(
+        seen.iter().all(|(v, _)| *v != Some(Verdict::Degraded)),
+        "degraded just after a restart: {seen:?}"
+    );
+    assert_eq!(seen.last().unwrap().0, Some(Verdict::Safe));
+}
+
+#[test]
+fn a_restarted_node_whose_peer_is_really_down_turns_degraded_once_the_window_passes() {
+    let c = restarted_cluster();
+    c.crash(3);
+    c.crash(2);
+    c.advance(Duration::from_secs(30));
+    c.restart(2);
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    assert_ne!(verdict(&c, 2), Some(Verdict::Degraded));
+    for _ in 0..6 {
+        c.advance(HELLO_INTERVAL);
+        c.sync();
+    }
+    let s = c.control(2).status().unwrap();
+    assert!(s.members.iter().any(|m| m.state == NodeState::Down));
+    assert_eq!(s.verdict, Some(Verdict::Degraded));
+}

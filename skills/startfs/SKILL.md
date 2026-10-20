@@ -83,7 +83,7 @@ Read the `data:` line first:
 |---|---|
 | `SAFE` | every file has as many copies as the machines allow, and the wanted number is possible |
 | `BEST-EFFORT` | fewer machines than wanted copies, so the full count is impossible; normal until more machines join |
-| `DEGRADED` | a file is short of copies, a repair is running, or a member is `down` (a `lost` member no longer counts once its data is re-replicated) |
+| `DEGRADED` | a file is short of copies, a repair is running, or a member is `down` (an `unknown` member, one a just-restarted daemon has not heard from yet, does not count for its first 30 s; a `lost` member no longer counts once its data is re-replicated) |
 | `AT RISK` | some data has a single copy left; act now |
 
 For anything but `SAFE`, quote the `redundancy:` line, the `members:` states, any
