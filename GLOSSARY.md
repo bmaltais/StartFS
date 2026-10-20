@@ -91,3 +91,7 @@ Chunks fetched from other members, kept on this node's disk up to `cache_bytes`,
 
 **Read cache**:
 Recently read chunks kept decoded in memory up to `read_cache_bytes`, so reading a file in small pieces does not decode a chunk for each piece. Unless set, its size is derived from the machine's total memory. Distinct from the chunk cache.
+
+**Site**:
+A label a member declares for where it physically lives (home, cloud). It is never detected. Placement spreads a chunk's copies across sites before it weighs members by share. A member with no label is its own site. Distinct from a member, a peer path and weight.
+_Avoid_: Zone, region, location
