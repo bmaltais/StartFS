@@ -7,16 +7,27 @@
 # Run it in a terminal you can watch: the installer asks before restarting a daemon whose mount is
 # in use (STARTFS_FORCE=1 skips the question). Needs ssh access (keys) to every remote node.
 #
-# Usage: rolling-upgrade.sh [--fixpath] vX.Y.Z NODE...
+# Usage: rolling-upgrade.sh [--fixpath] [--lockstep] vX.Y.Z NODE...
 #   --fixpath: pass it to the installer on every node, so a missing PATH entry is added to the
 #   shell profile as it goes (a node already on vX.Y.Z gets the installer run for that alone).
+#   --lockstep: for a release that changes the protocol (the installer warns "protocol N -> M").
+#   Members on different protocols cannot see each other (ADR 0002), so no node can be ready until
+#   all match. Each node is only installed and waited for until its daemon answers at vX.Y.Z, in
+#   quick succession; then every node is waited for to be ready, as above. The cluster cannot sync
+#   for the minutes this takes. Safe to rerun after an interruption: nodes already on vX.Y.Z are skipped.
 #   NODE is an ssh host, or `local` for this machine. Put the node that matters most last:
 #   it is upgraded with the most evidence from the others.
 # Environment: BUSY_MAX=50  QUIET_SECS=60  GOOD=1  TIMEOUT=900  STARTFS_BIN='~/.local/bin/startfs'
 set -uo pipefail
-FIXPATH=
-if [ "${1:-}" = --fixpath ]; then FIXPATH=--fixpath; shift; fi
-[ $# -ge 2 ] || { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+FIXPATH=; LOCKSTEP=
+while :; do
+  case "${1:-}" in
+    --fixpath) FIXPATH=--fixpath; shift ;;
+    --lockstep) LOCKSTEP=1; shift ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 TAG=$1; shift
 WANT=${TAG#v}
 BUSY_MAX=${BUSY_MAX:-50}; QUIET_SECS=${QUIET_SECS:-60}; GOOD=${GOOD:-1}; TIMEOUT=${TIMEOUT:-900}
@@ -62,7 +73,44 @@ wait_ready() {
   done
 }
 
-say "rolling upgrade to $TAG: $*"
+# wait_installed NODE: lockstep only. Succeed once the daemon answers at the new version, whatever
+# else the cluster says (it cannot be well while the protocols differ).
+wait_installed() {
+  local n=$1 start ver
+  start=$(date +%s)
+  while :; do
+    ver=$(on "$n" "$BIN --version; $BIN status >/dev/null 2>&1 || echo down" 2>&1 | tr '\n' ' ' | awk '{print ($NF == "down") ? "down" : $2}')
+    say "$n: ver=${ver:-?}"
+    [ "$ver" = "$WANT" ] && return 0
+    [ $(( $(date +%s) - start )) -ge "$TIMEOUT" ] && { say "$n: daemon not answering at $WANT after ${TIMEOUT}s, stopping here"; return 1; }
+    sleep 5
+  done
+}
+
+say "rolling upgrade to $TAG${LOCKSTEP:+ (lockstep)}: $*"
+if [ -n "$LOCKSTEP" ]; then
+  for n in "$@"; do
+    old=$(on "$n" "$BIN --version" | awk '{print $2}')
+    [ -n "$old" ] || { say "$n: cannot run $BIN, nothing has been touched"; exit 1; }
+  done
+  for n in "$@"; do
+    old=$(on "$n" "$BIN --version" | awk '{print $2}')
+    if [ "$old" = "$WANT" ]; then
+      say "=== $n: already on $WANT"
+      [ -z "$FIXPATH" ] || ont "$n" "$INSTALL" || say "$n: --fixpath failed, going on"
+      continue
+    fi
+    say "=== $n: upgrading $old -> $WANT"
+    ont "$n" "$INSTALL" || { say "$n: INSTALL FAILED, stopping here (the nodes before it are on $WANT, the rest on $old)"; exit 1; }
+    wait_installed "$n" || exit 1
+  done
+  for n in "$@"; do
+    wait_ready "$n" "$QUIET_SECS" "$WANT" || exit 1
+    say "=== $n: ready"
+  done
+  say "ALL DONE: $*"
+  exit 0
+fi
 for n in "$@"; do
   say "=== $n: checking it is quiet before touching it"
   old=$(on "$n" "$BIN --version" | awk '{print $2}')
