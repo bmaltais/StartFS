@@ -287,6 +287,11 @@ fn is_acl(name: &str) -> bool {
 /// Counter set while applied entries have not yet been reconciled into the tree.
 const STALE: &str = "tree_stale";
 
+/// The metadata database's page cache. redb's default is 1 GiB, which a daemon on a small
+/// machine should not be allowed to fill as the filesystem grows; 64 MiB holds the metadata of
+/// hundreds of thousands of files (a 43 MB file in the live cluster) and a miss is a page read.
+const METADATA_CACHE_BYTES: usize = 64 << 20;
+
 impl LocalFs {
     pub fn open(
         dir: &Path,
@@ -295,7 +300,10 @@ impl LocalFs {
         clock: Arc<dyn Clock>,
     ) -> FsResult<Self> {
         std::fs::create_dir_all(dir).map_err(db)?;
-        let database = Database::create(dir.join("meta.redb")).map_err(db)?;
+        let database = Database::builder()
+            .set_cache_size(METADATA_CACHE_BYTES)
+            .create(dir.join("meta.redb"))
+            .map_err(db)?;
         let fs = Self {
             db: database,
             chunks: ChunkStore::open(&dir.join("chunks"))?,

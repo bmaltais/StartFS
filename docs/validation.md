@@ -290,6 +290,23 @@ Tests: `a_slow_link_holds_no_more_chunk_bytes_than_the_backlog_limit` (harness; 
 peer without the limit) and `a_receiver_that_falls_behind_holds_a_bounded_inbox_and_still_hears_metadata`
 (real QUIC over loopback).
 
+## 9. The metadata database's cache size (#67)
+
+redb's default page cache is 1 GiB, so a large metadata file could fill that much anonymous memory.
+`LocalFs::open` now sets 64 MiB (`METADATA_CACHE_BYTES`, a constant, not a setting: the live
+cluster's metadata file is 43 MB, and a miss only costs a page read). `scripts/profile-write.sh`,
+one run each, wall time through the FUSE mount:
+
+| workload | default 1 GiB | 64 MiB |
+|---|---|---|
+| 128 MiB dd | 0.324 s | 0.307 s |
+| 1000 x 8 B | 0.325 s | 0.321 s |
+| 1000 x 16 KiB | 0.649 s | 0.646 s |
+| 200 x 1 MiB | 0.433 s | 0.430 s |
+
+No difference: this workload's metadata is smaller than either cache. It does not exercise a
+metadata file larger than 64 MiB, which is where reads would start missing.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU
