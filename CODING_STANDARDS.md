@@ -26,5 +26,6 @@ Read during review, not implementation. Mechanical rules live in CI (`.github/wo
 
 - A test of behaviour goes through the cluster harness: `FsOps`, the daemon control interface, the simulated network and clock. Tests of internals are rejected.
 - A test asserts the bound the spec states; when the code misses it, fix the code, not the assertion.
+- A fix for something seen on a live cluster is shown to clear it with the same observation, not only a harness test: the harness has no QUIC links, so transport behaviour (stale connections, reconnects) is checked with `scripts/trace-restart.sh` or on the cluster.
 - A test of durability fails when the code under test is made eager or lazy the wrong way. `crash` and `restart` keep lazy commits, so they prove nothing about a power cut; observe `has_unsynced` instead.
 - A test that spawns real processes or sockets reads each request fully before replying and polls for readiness. Timing guesses make it flaky under load.
