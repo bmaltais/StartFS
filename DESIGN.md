@@ -39,11 +39,13 @@ same code with a different membership scope.
 7. **Capacity and placement:** weighted by contributed space. Each node declares a space offer
    (e.g. 50GB laptop, 2TB server) and placement (weighted rendezvous hashing) is proportional to it,
    or to a separate weight (`config --weight`, 0 = the offer) for a large disk that is slow.
+   A weight only scales a share of an offer: a member offering 0 takes no copies whatever its weight,
+   and `status` does not count it toward the copies the cluster can hold.
    Each member may also declare a site (`join --site`, `config --site`; ADR 0005): placement then
    spreads a chunk's copies over `min(copies, eligible sites)` sites, and a member with no label is
    its own site. Sites are declared, never detected, and a missing site never refuses a write.
    Each member gossips its backlog in `Health` (age of its last tick, inbox messages and bytes);
-   `status` shows a member that is up but behind, and the replicator sends it nothing new until it
+   `status` shows a member that is up but behind (by the same verdict the replicator acts on, hysteresis included), and the replicator sends it nothing new until it
    catches up, without changing placement or the epoch (ADR 0004).
    Usable size is roughly total offered space divided by N. An offer of 0 makes a node a pure client
    (mounts and caches, stores no replicas), which covers the "client-only" role without a separate concept.
