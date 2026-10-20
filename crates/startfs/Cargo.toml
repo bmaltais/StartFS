@@ -1,16 +1,17 @@
 [package]
 name = "startfs"
-version = "1.8.1"
+version = "1.9.0"
 edition = "2024"
 
 [dependencies]
-startfs-core = { version = "1.8.1", path = "../startfs-core" }
+startfs-core = { version = "1.9.0", path = "../startfs-core" }
 libc = "0.2.191"
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 serde_json = "1.0.154"
+socket2 = "0.6.5"
 thiserror = "2.0.21"
 
 [target.'cfg(unix)'.dependencies]

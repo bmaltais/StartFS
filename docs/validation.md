@@ -307,6 +307,51 @@ one run each, wall time through the FUSE mount:
 No difference: this workload's metadata is smaller than either cache. It does not exercise a
 metadata file larger than 64 MiB, which is where reads would start missing.
 
+## 10. Transfer speed between nodes on a high-latency path
+
+`scripts/profile-transfer.sh`, two nodes, a 256 MiB incompressible file, latency added to loopback
+with `tc netem` (`RTT_MS`, needs `sudo`); `BIN` compares binaries. Two directions, median MiB/s
+over the runs (3 to 6 each):
+
+- **replicate** (`MODE=replicate`, 2 copies): A writes the file through its mount; the time is until
+  it is fully replicated on B.
+- **read** (`MODE=read`, 1 copy, B offers no space): B reads a file that only A holds, through its
+  mount with `O_DIRECT`, so every chunk comes from A.
+
+Changes compared: **base** (1.8.1), **buffers** (larger QUIC windows and UDP socket buffers),
+**both** (buffers plus read-ahead and parallel chunk fetch).
+
+| RTT | Direction | base | buffers | both |
+|---|---|---|---|---|
+| 0 | replicate | 123 | 107 (noise) | |
+| 10 ms | replicate | 37.9 | 62.6 | 59.2 |
+| 10 ms | read | 33.3 | 46.2 | **106.5** |
+| 20 ms | replicate | 32.6 | 47.9 | 51.4 |
+| 20 ms | read | 25.4 | 38.1 | **87.4** |
+| 50 ms | replicate | 32.5 | 55.5 | |
+| 50 ms | read | 14.5 | | **60** |
+| 150 ms | replicate | 25.9 | 39.8 | |
+
+Read-ahead does not touch the replication path, so its replicate columns are the same code as
+buffers (the differences are noise). A blank cell was not measured.
+
+- The replicator was not the limit: during the 50 ms transfer all of the file's ~100 chunks were
+  in flight at once and the rate stayed flat, so the cap was the connection.
+- Raising only the QUIC flow-control windows (8 MiB per stream, 64 MiB per connection) changed
+  little (30 against 33 MiB/s at 50 ms). Asking for 8 MiB UDP socket buffers (the kernel grants up
+  to `net.core.rmem_max`, 4 MiB here, against a 208 KB default) is what moved the rate: datagram
+  drops at the receiving socket were making the congestion controller back off.
+- BBR (`quinn::congestion::BbrConfig`) was tried and rejected: replication fell to about
+  0.1 MiB/s on the same path.
+- Remote reads fetched one chunk per round trip, so the rate was a chunk per RTT. A read that
+  starts at or before a missing chunk now also requests the next chunks (up to 8, 8 MiB) in the
+  same round trip, spread over the peers that are up, and keeps them in the read cache; a read that
+  lands inside a chunk fetches only that chunk. `tests/read_ahead.rs` covers both.
+- Runs vary a lot (the same replication took 4 to 8 s), so read the figures as ranges. All of this
+  is one machine with delay-only netem (no loss, no jitter); real links were not measured.
+  Read-ahead was not measured on random access beyond the harness test, nor with more than one
+  peer holding the data.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

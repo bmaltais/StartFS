@@ -193,6 +193,17 @@ impl ChunkSource for PeerChunks {
     fn fetch(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
         self.0.upgrade()?.fetch_chunk(id, accept)
     }
+
+    fn fetch_many(
+        &self,
+        ids: &[ChunkId],
+        accept: &dyn Fn(&ChunkId, &[u8]) -> bool,
+    ) -> Vec<Option<Vec<u8>>> {
+        match self.0.upgrade() {
+            Some(daemon) => daemon.fetch_chunks(ids, accept),
+            None => vec![None; ids.len()],
+        }
+    }
 }
 
 impl Daemon {
@@ -775,10 +786,9 @@ impl Daemon {
         poll()
     }
 
-    /// Ask peers until one supplies the chunk: the ones that answer fastest
-    /// first, those not yet timed before those that are not up.
-    fn fetch_chunk(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
-        let transport = self.transport()?;
+    /// The peers to ask for chunks, the ones that answer fastest first, those not yet timed
+    /// before those that are not up, and how many of them are up.
+    fn ranked_peers(&self) -> (Vec<NodeId>, usize) {
         let mut peers = self.membership.lock().unwrap().peers();
         let heard = self.heard.lock().unwrap().clone();
         let now = self.clock.now();
@@ -793,6 +803,66 @@ impl Daemon {
                 )
             });
         }
+        let up = peers.iter().filter(|p| !down(p)).count();
+        (peers, up)
+    }
+
+    /// Request every chunk at once, spread over the peers that are up, and collect the answers.
+    /// The first chunk, the one a read is blocked on, falls back to asking the peers one by one;
+    /// the others are best effort.
+    fn fetch_chunks(
+        &self,
+        ids: &[ChunkId],
+        accept: &dyn Fn(&ChunkId, &[u8]) -> bool,
+    ) -> Vec<Option<Vec<u8>>> {
+        let mut answers = vec![None; ids.len()];
+        let (Some(transport), Some(first)) = (self.transport(), ids.first()) else {
+            return answers;
+        };
+        let (peers, up) = self.ranked_peers();
+        if up > 0 {
+            let asked: Vec<(NodeId, Nanos)> = ids
+                .iter()
+                .enumerate()
+                .map(|(n, id)| {
+                    let peer = peers[n % up];
+                    self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+                    let sent = self.clock.now();
+                    transport.send(peer, Message::ChunkRequest(*id).encode());
+                    (peer, sent)
+                })
+                .collect();
+            for ((id, (peer, sent)), answer) in ids.iter().zip(asked).zip(answers.iter_mut()) {
+                let reply =
+                    self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
+                if reply.is_none() {
+                    self.activity.timed_out(peer);
+                }
+                let answered = reply
+                    .as_ref()
+                    .map_or_else(|| self.clock.now(), |(at, _)| *at);
+                self.latency
+                    .lock()
+                    .unwrap()
+                    .record(peer, answered.saturating_sub(sent), answered);
+                if let Some((_, Some(data))) = reply
+                    && accept(id, &data)
+                {
+                    *answer = Some(data);
+                }
+            }
+        }
+        if answers[0].is_none() {
+            answers[0] = self.fetch_chunk(first, &|d| accept(first, d));
+        }
+        answers
+    }
+
+    /// Ask peers until one supplies the chunk: the ones that answer fastest
+    /// first, those not yet timed before those that are not up.
+    fn fetch_chunk(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+        let transport = self.transport()?;
+        let (peers, _) = self.ranked_peers();
         for peer in peers {
             self.chunk_replies.lock().unwrap().remove(&(peer, *id));
             let sent = self.clock.now();
