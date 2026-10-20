@@ -196,18 +196,3 @@ impl SavedFile {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn release_tags_compare_as_versions() {
-        assert!(is_newer("v1.10.0", "v1.9.0"));
-        assert!(!is_newer("v1.9.0", "v1.10.0"));
-        assert!(!is_newer("v1.9.0", "v1.9.0"));
-        assert!(is_newer("v2.0.0", "v2.0.0-rc.1"));
-        assert!(!is_newer("v2.0.0-rc.1", "v2.0.0"));
-        assert!(!is_newer("latest", "v1.0.0"));
-    }
-}

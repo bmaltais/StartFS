@@ -192,8 +192,25 @@ members' addresses reach the transport through `Transport::learn`.
   (`Message::is_bulk`) each get their own lower-priority stream, so a big transfer never delays them.
 - Frames are a 4-byte length plus the message, capped at 256 MiB. Every encoded message starts with a
   protocol version byte (`PROTOCOL_VERSION`); a mismatch fails at the handshake and in `Message::decode`.
+  The one exception is the upgrade notice (ADR 0006): a frozen message starting with `NOTICE_BYTE` that
+  every release decodes, handed to a refused peer after the refusal text so it learns which release to
+  catch up to.
 - Certificates are throwaway and unchecked; identity is whois only. The `whois_socket` config option
   points at a non-default `tailscaled` socket (macOS needs it set).
+
+## Upgrades (as built)
+
+`startfs update [vX.Y.Z]` gossips an intent (a concrete release tag, resolved once by the issuer); see
+ADR 0007 and `daemon/upgrade.rs`. Every member stages the release through the `Installer` seam (the real
+one runs the embedded `scripts/install.sh` in stage, apply, latest and mount-check modes) and learns the
+target's protocol from the staged binary. Same protocol: a rolling upgrade, lowest member first, each
+announcing an upgrade pause (honoured in `with_view` and `status`: nothing new sent, no stand-ins, verdict
+kept) and starting only when nobody is paused or still away and nothing is short of copies. Different
+protocol: a lockstep upgrade, one go-signal from the issuer once every member not absent has staged; stages
+expire after 10 minutes without the issuer; each node rolls back alone. A member is absent only after the
+asleep threshold. A busy mount holds the restart (staged, reported) until freed or `update --force`.
+Not done: keeping the mount across the restart (out of scope), skipping the post-restart re-check, and
+authenticating the update request (the tailnet is trusted).
 
 ## Future: personal (group-of-1) scope
 

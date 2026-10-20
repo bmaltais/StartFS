@@ -350,6 +350,13 @@ impl Cluster {
         }
     }
 
+    /// Make every node run the release `version` (without the leading `v`).
+    pub fn set_version(&self, version: &str) {
+        for n in self.nodes.iter() {
+            n.release.set_version(version);
+        }
+    }
+
     /// The release node `i` runs, as a tag.
     pub fn release_of(&self, i: usize) -> String {
         self.nodes[i].release.tag()

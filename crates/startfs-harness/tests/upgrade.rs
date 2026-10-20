@@ -389,3 +389,25 @@ fn a_member_that_fails_a_rolling_swap_comes_back_on_the_old_release_and_does_not
     // It is not tried again by itself.
     assert_eq!(c.restarts().iter().filter(|r| r.node == 1).count(), 1);
 }
+
+/// Versions compare as numbers: 1.10 is later than 1.9, and nothing is followed back to 1.9.
+#[test]
+fn a_notice_is_compared_as_a_version_not_as_text() {
+    let notice = |release: &str| {
+        Message::UpgradeNotice(UpgradeNotice {
+            release: release.into(),
+            protocol: PROTOCOL_VERSION + 1,
+        })
+        .encode()
+    };
+    let c = Cluster::with_filesystem(2, 2, "");
+    c.set_version("1.9.0");
+    c.publish_with_protocol("v1.10.0", PROTOCOL_VERSION + 1);
+    c.publish_with_protocol("v1.2.0", PROTOCOL_VERSION + 1);
+    startfs_core::net::Transport::send(&c.transport(1), NodeId(0), notice("v1.2.0"));
+    c.elapse(30 * MINUTE);
+    assert!(c.restarts().is_empty(), "1.2.0 is earlier than 1.9.0");
+
+    startfs_core::net::Transport::send(&c.transport(1), NodeId(0), notice("v1.10.0"));
+    until(&c, || c.release_of(0) == "v1.10.0");
+}

@@ -101,6 +101,10 @@ impl NodeRelease {
         self.wire.store(protocol, Ordering::SeqCst);
     }
 
+    pub(crate) fn set_version(&self, version: &str) {
+        self.running.lock().unwrap().version = version.to_string();
+    }
+
     pub(crate) fn set_mount_in_use(&self, in_use: bool) {
         self.mount_in_use.store(in_use, Ordering::SeqCst);
     }
