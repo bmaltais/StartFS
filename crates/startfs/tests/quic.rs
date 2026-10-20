@@ -286,8 +286,12 @@ mod local_api {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
+                // The whole request first: closing with bytes unread resets the connection.
                 let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap();
+                let mut n = 0;
+                while !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    n += stream.read(&mut buf[n..]).unwrap();
+                }
                 let request = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let _ = tx.send(request.lines().next().unwrap().to_string());
                 stream.write_all(reply.as_bytes()).unwrap();

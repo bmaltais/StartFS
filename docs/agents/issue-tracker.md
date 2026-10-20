@@ -4,7 +4,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
+- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a quoted heredoc (`<<'EOF'`) for multi-line bodies and write backticks as they are: a backslash stays in the text.
 - **Create issues one at a time.** Numbers are assigned in arrival order, so backgrounded or parallel `gh issue create` calls scramble them. Read the URL each call prints before citing an issue by number.
 - **Read an issue**: `gh issue view <number> --json number,title,body,labels,comments`. Always include the comments: triage puts the agent brief there, and the body alone is not the spec. Plain `gh issue view` hides them.
 - **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
