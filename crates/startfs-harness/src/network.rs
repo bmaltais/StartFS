@@ -1,8 +1,9 @@
 use startfs_core::clock::Clock;
 use startfs_core::net::{Inbox, NodeId, Transport};
 use startfs_core::ops::Nanos;
-use startfs_core::protocol::Message;
+use startfs_core::protocol::{Message, NOTICE_BYTE, PROTOCOL_VERSION};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,9 +59,17 @@ impl SimNetwork {
     }
 
     pub fn transport(&self, node: NodeId) -> SimTransport {
+        self.transport_speaking(node, Arc::new(AtomicU8::new(PROTOCOL_VERSION)))
+    }
+
+    /// A transport that speaks the protocol version `wire` holds, as a node on another
+    /// release does: what it sends carries that version, and it takes a message for its
+    /// own only when it carries it. The daemon on top still speaks [`PROTOCOL_VERSION`].
+    pub(crate) fn transport_speaking(&self, node: NodeId, wire: Arc<AtomicU8>) -> SimTransport {
         SimTransport {
             node,
             net: self.clone(),
+            wire,
         }
     }
 
@@ -143,10 +152,40 @@ impl SimNetwork {
 pub struct SimTransport {
     node: NodeId,
     net: SimNetwork,
+    wire: Arc<AtomicU8>,
+}
+
+impl SimTransport {
+    /// What the daemon on top reads of a message that arrived: one in the version this
+    /// transport speaks is read as the daemon's own, and one in any other version is
+    /// not, whatever number it carries.
+    fn inbound(&self, mut msg: Vec<u8>) -> Vec<u8> {
+        let wire = self.wire.load(Ordering::SeqCst);
+        if wire != PROTOCOL_VERSION
+            && let Some(version) = msg.first_mut()
+            && *version != NOTICE_BYTE
+        {
+            *version = if *version == wire {
+                PROTOCOL_VERSION
+            } else if *version == PROTOCOL_VERSION {
+                PROTOCOL_VERSION + 1
+            } else {
+                *version
+            };
+        }
+        msg
+    }
 }
 
 impl Transport for SimTransport {
-    fn send(&self, to: NodeId, msg: Vec<u8>) {
+    fn send(&self, to: NodeId, mut msg: Vec<u8>) {
+        let wire = self.wire.load(Ordering::SeqCst);
+        if wire != PROTOCOL_VERSION
+            && let Some(version) = msg.first_mut()
+            && *version != NOTICE_BYTE
+        {
+            *version = wire;
+        }
         let mut s = self.net.state.lock().unwrap();
         if !s.reachable(self.node, to) {
             return;
@@ -228,7 +267,7 @@ impl Transport for SimTransport {
             .position(|m| m.to == self.node && m.deliver_at <= now)?;
         let m = s.in_flight.remove(pos);
         if s.reachable(m.from, m.to) {
-            Some((m.from, m.msg))
+            Some((m.from, self.inbound(m.msg)))
         } else {
             None
         }

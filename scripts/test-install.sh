@@ -156,3 +156,61 @@ echo "ok   processes inside the mount are listed; with no terminal the upgrade g
 STARTFS_FORCE=1 install_version v1.0.2 || fail "forced upgrade with a process inside the mount"
 expect "sleep (pid $holder)" "$work/out"
 echo "ok   STARTFS_FORCE=1 lists them and goes ahead"
+
+# The modes the daemon drives for `startfs update`. Who is inside the mount is asked first.
+STARTFS_CHECK_MOUNT=1 sh "$here/install.sh" >"$work/out" 2>&1 && status=0 || status=$?
+[ "$status" = 3 ] || fail "a busy mount must exit 3, got $status"
+expect "sleep (pid $holder)" "$work/out"
+kill "$holder"; wait "$holder" 2>/dev/null || true
+STARTFS_CHECK_MOUNT=1 sh "$here/install.sh" >"$work/out" 2>&1 || fail "a free mount must exit 0"
+[ ! -s "$work/out" ] || fail "a free mount lists nobody"
+echo "ok   STARTFS_CHECK_MOUNT exits 3 and names who is inside the mount, 0 when nobody is"
+
+rm -rf "$HOME/.config" "$HOME/.local"
+install_version v1.0.0 || fail "fresh install for the staging tests"
+make_release v1.0.5 1.0.5 5
+: >"$work/state/calls"
+STARTFS_BASE_URL=file://$work/rel STARTFS_VERSION=v1.0.1 STARTFS_STAGE=1 \
+  sh "$here/install.sh" >"$work/out" 2>&1 || fail "stage"
+expect "Staged v1.0.1 (startfs 1.0.1 (protocol 4))" "$work/out"
+[ "$("$bin" --version)" = "startfs 1.0.0 (protocol 4)" ] || fail "staging replaced the binary"
+[ "$("$bin.staged/startfs" --version)" = "startfs 1.0.1 (protocol 4)" ] || fail "release not staged"
+[ "$(cat "$bin.staged/TAG")" = v1.0.1 ] || fail "staged release not named"
+[ ! -s "$work/state/calls" ] || fail "staging touched the service"
+echo "ok   STARTFS_STAGE fetches and checks the release, keeps it next to the binary and swaps nothing"
+
+STARTFS_BASE_URL=file:///nonexistent STARTFS_VERSION=v1.0.1 STARTFS_STAGE=1 \
+  sh "$here/install.sh" >"$work/out" 2>&1 || fail "stage again"
+expect "already staged" "$work/out"
+echo "ok   a release staged already is not fetched again"
+
+(cd "$work/rel/v1.0.5" && echo "0000  nothing" >"$(ls ./*.sha256)")
+if STARTFS_BASE_URL=file://$work/rel STARTFS_VERSION=v1.0.5 STARTFS_STAGE=1 \
+  sh "$here/install.sh" >"$work/out" 2>&1; then fail "a bad checksum must not stage"; fi
+expect "checksum mismatch" "$work/out"
+[ "$(cat "$bin.staged/TAG")" = v1.0.1 ] || fail "a failed staging disturbed what was staged"
+echo "ok   a release that fails its checksum is not staged and leaves the staged one alone"
+
+if STARTFS_APPLY_STAGED=1 STARTFS_VERSION=v1.0.2 STARTFS_FORCE=1 sh "$here/install.sh" >"$work/out" 2>&1; then
+  fail "applying another release than the staged one must fail"
+fi
+expect "the staged release is v1.0.1, not v1.0.2" "$work/out"
+[ "$("$bin" --version)" = "startfs 1.0.0 (protocol 4)" ] || fail "a refused apply changed the binary"
+echo "ok   STARTFS_APPLY_STAGED refuses a release other than the staged one"
+
+: >"$work/state/calls"
+STARTFS_APPLY_STAGED=1 STARTFS_FORCE=1 STARTFS_VERIFY_SECS=1 STARTFS_BASE_URL=file:///nonexistent \
+  sh "$here/install.sh" >"$work/out" 2>&1 || fail "apply"
+[ "$("$bin" --version)" = "startfs 1.0.1 (protocol 4)" ] || fail "staged release not swapped in"
+[ ! -e "$bin.staged" ] || fail "the staged copy was left behind"
+expect "stop startfs.service" "$work/state/calls"
+expect "enable --now startfs.service" "$work/state/calls"
+echo "ok   STARTFS_APPLY_STAGED swaps in what was staged without downloading, and clears it"
+
+if STARTFS_APPLY_STAGED=1 STARTFS_FORCE=1 sh "$here/install.sh" >"$work/out" 2>&1; then fail "nothing is staged"; fi
+expect "no release is staged" "$work/out"
+echo "ok   STARTFS_APPLY_STAGED with nothing staged fails"
+
+STARTFS_LATEST=1 STARTFS_VERSION=v1.0.4 sh "$here/install.sh" >"$work/out" 2>&1 || fail "latest"
+[ "$(cat "$work/out")" = v1.0.4 ] || fail "STARTFS_LATEST must print the tag alone"
+echo "ok   STARTFS_LATEST prints the tag and does nothing else"

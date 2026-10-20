@@ -10,11 +10,14 @@ pub(super) fn is_up(last_heard: Option<Nanos>, now: Nanos) -> bool {
     last_heard.is_some_and(|t| now.saturating_sub(t) < DOWN_AFTER.as_nanos() as Nanos)
 }
 
-pub(super) fn node_state(leaving: bool, up: bool, lost: bool) -> NodeState {
+/// `paused`: the member announced an upgrade pause and is expected back.
+pub(super) fn node_state(leaving: bool, up: bool, lost: bool, paused: bool) -> NodeState {
     if leaving {
         NodeState::Leaving
     } else if up {
         NodeState::Online
+    } else if paused {
+        NodeState::Upgrading
     } else if lost {
         NodeState::Lost
     } else {

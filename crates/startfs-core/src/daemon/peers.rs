@@ -117,6 +117,8 @@ impl Daemon {
                     self.sync_peers();
                 }
             }
+            Message::Upgrade(gossip) => self.on_upgrade_gossip(from, gossip),
+            Message::UpgradeNotice(notice) => self.on_upgrade_notice(from, notice),
             msg @ (Message::Hello(_) | Message::Entries(_) | Message::StateChunk(_)) => {
                 if let Some(s) = self.syncer.lock().unwrap().as_mut() {
                     s.handle(from, msg);

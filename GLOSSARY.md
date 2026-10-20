@@ -95,3 +95,21 @@ Recently read chunks kept decoded in memory up to `read_cache_bytes`, so reading
 **Site**:
 A label a member declares for where it physically lives (home, cloud). It is never detected. Placement spreads a chunk's copies across sites before it weighs members by share. A member with no label is its own site. Distinct from a member, a peer path and weight.
 _Avoid_: Zone, region, location
+
+**Staged release**:
+A release a member has fetched and checked but not yet swapped in, so it is ready to take over on the word to go. Nothing restarts while a release is only staged.
+_Avoid_: Pending update, downloaded update
+
+**Rolling upgrade**:
+An upgrade to a release with the same protocol version, taken one member at a time while the others keep working. Distinct from a lockstep upgrade.
+
+**Lockstep upgrade**:
+An upgrade to a release with a different protocol version. Every reachable member stages the release first, then all swap together, so the cluster cannot sync only for the restart itself. Distinct from a rolling upgrade (ADR 0002).
+
+**Upgrade notice**:
+A message in a fixed form that every release understands whatever its protocol version, saying which release the cluster is on. A member that was away and finds itself incompatible learns from it which release to catch up to. It names a release and never carries a binary.
+_Avoid_: Update command, upgrade order
+
+**Upgrade pause**:
+An announced absence of a member that is about to restart for an upgrade. The others send it nothing new, make no stand-in copies for it and keep the verdict as it was, until it returns or the asleep threshold passes, when it is simply asleep.
+_Avoid_: Contributing pause, maintenance mode, drain

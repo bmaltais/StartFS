@@ -1,4 +1,5 @@
 use crate::network::{SimNetwork, SimTransport};
+use crate::releases::{NodeRelease, Releases};
 use startfs_core::clock::{Clock, ManualClock};
 use startfs_core::config::Config;
 use startfs_core::control::{self, Client};
@@ -8,7 +9,9 @@ use startfs_core::members::MemberId;
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_core::power::ManualPower;
+use startfs_core::protocol::PROTOCOL_VERSION;
 use startfs_core::resources::{ManualResources, Resources};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -113,6 +116,46 @@ struct Node {
     resources: Arc<ManualResources>,
     /// The host this node advertises from its next start; `None` is its tailnet IP.
     host: Mutex<Option<String>>,
+    /// The release it runs and what it can upgrade to; kept across restarts, as the
+    /// binary on disk is.
+    release: Arc<NodeRelease>,
+    /// Where an upgrade has taken the node.
+    swap: Mutex<SwapState>,
+}
+
+/// How an upgrade is taking a node down and bringing it back.
+#[derive(Clone, Copy)]
+enum SwapState {
+    /// Not being swapped.
+    Running,
+    /// The node asked for a swap; it goes down once its last messages have been
+    /// delivered, this many rounds from now.
+    Pending(u8),
+    /// Down for the swap until the given time.
+    Down(Nanos),
+}
+
+/// How long a node is down while it swaps in a release and restarts, unless a test says otherwise.
+const RESTART_TAKES: Duration = Duration::from_secs(20);
+
+/// One time an upgrade took a node down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restart {
+    pub node: usize,
+    /// When the node went down.
+    pub from: Nanos,
+    /// When it was back; `None` while it is still down.
+    pub back: Option<Nanos>,
+}
+
+/// What the nodes and the work that drives them share.
+#[derive(Clone)]
+struct Env {
+    network: SimNetwork,
+    clock: Arc<ManualClock>,
+    restarts: Arc<Mutex<Vec<Restart>>>,
+    /// How long a node is down for a swap, in seconds.
+    restart_takes: Arc<AtomicU64>,
 }
 
 /// N real nodes sharing one injectable clock and one simulated network.
@@ -120,6 +163,9 @@ pub struct Cluster {
     clock: Arc<ManualClock>,
     network: SimNetwork,
     nodes: Arc<Vec<Node>>,
+    releases: Arc<Releases>,
+    restarts: Arc<Mutex<Vec<Restart>>>,
+    restart_takes: Arc<AtomicU64>,
 }
 
 /// 2023-11-14T22:13:20Z, an arbitrary fixed start so runs are deterministic.
@@ -171,6 +217,7 @@ impl Cluster {
         }
         let clock = Arc::new(ManualClock::new(START));
         let network = SimNetwork::new(clock.clone());
+        let releases = Arc::new(Releases::default());
         let nodes: Vec<Node> = (0..n)
             .map(|i| Node {
                 dir: TempDir::new().expect("tempdir"),
@@ -189,17 +236,35 @@ impl Cluster {
                 power: Arc::new(ManualPower::default()),
                 resources: Arc::new(ManualResources::default()),
                 host: Mutex::new(None),
+                release: Arc::new(NodeRelease::new(releases.clone())),
+                swap: Mutex::new(SwapState::Running),
             })
             .collect();
         let nodes = Arc::new(nodes);
-        for i in 0..n {
-            network.register(&address(i, &config_for_nodes), NodeId(i as u32));
-            open(&nodes, i, &network, clock.clone());
-        }
-        Self {
+        let restarts = Arc::new(Mutex::new(Vec::new()));
+        let cluster = Self {
             clock,
             network,
             nodes,
+            releases,
+            restarts,
+            restart_takes: Arc::new(AtomicU64::new(RESTART_TAKES.as_secs())),
+        };
+        for i in 0..n {
+            cluster
+                .network
+                .register(&address(i, &config_for_nodes), NodeId(i as u32));
+            open(&cluster.nodes, i, &cluster.env());
+        }
+        cluster
+    }
+
+    fn env(&self) -> Env {
+        Env {
+            network: self.network.clone(),
+            clock: self.clock.clone(),
+            restarts: self.restarts.clone(),
+            restart_takes: self.restart_takes.clone(),
         }
     }
 
@@ -207,7 +272,7 @@ impl Cluster {
     /// Time does not pass; advance the clock to trigger retries after a heal.
     pub fn sync(&self) {
         for _ in 0..200 {
-            if !pump(&self.nodes) {
+            if !pump(&self.nodes, &self.env()) {
                 return;
             }
         }
@@ -216,7 +281,7 @@ impl Cluster {
 
     /// One round of background work on every live node, nothing more.
     pub fn tick(&self) -> bool {
-        pump(&self.nodes)
+        pump(&self.nodes, &self.env())
     }
 
     /// Like [`Cluster::tick`], but node `stuck` does no background work: its
@@ -262,6 +327,72 @@ impl Cluster {
         self.network.transport(NodeId(i as u32))
     }
 
+    /// Publish a release the nodes can upgrade to, speaking the current protocol version.
+    pub fn publish(&self, tag: &str) {
+        self.releases.publish(tag, PROTOCOL_VERSION, false);
+    }
+
+    /// Publish a release that speaks another protocol version.
+    pub fn publish_with_protocol(&self, tag: &str, protocol: u8) {
+        self.releases.publish(tag, protocol, false);
+    }
+
+    /// Publish a pre-release: never the latest stable one.
+    pub fn publish_prerelease(&self, tag: &str) {
+        self.releases.publish(tag, PROTOCOL_VERSION, true);
+    }
+
+    /// Make every node run a release that speaks `protocol`, as the one before an
+    /// upgrade across a protocol change does.
+    pub fn set_protocol(&self, protocol: u8) {
+        for n in self.nodes.iter() {
+            n.release.set_protocol(protocol);
+        }
+    }
+
+    /// Make every node run the release `version` (without the leading `v`).
+    pub fn set_version(&self, version: &str) {
+        for n in self.nodes.iter() {
+            n.release.set_version(version);
+        }
+    }
+
+    /// The release node `i` runs, as a tag.
+    pub fn release_of(&self, i: usize) -> String {
+        self.nodes[i].release.tag()
+    }
+
+    /// The release node `i` has staged and not yet swapped in.
+    pub fn staged_on(&self, i: usize) -> Option<String> {
+        self.nodes[i].release.staged_tag()
+    }
+
+    /// Say whether processes are using node `i`'s mount, which a restart would take from them.
+    pub fn set_mount_in_use(&self, i: usize, in_use: bool) {
+        self.nodes[i].release.set_mount_in_use(in_use);
+    }
+
+    /// Node `i` cannot fetch the release `tag`, for `why`.
+    pub fn break_release(&self, i: usize, tag: &str, why: &str) {
+        self.nodes[i].release.break_release(tag, why);
+    }
+
+    /// The next swap of node `i` fails to bring up the new daemon: the installer
+    /// restores the old release and the node comes back on it.
+    pub fn fail_next_swap(&self, i: usize) {
+        self.nodes[i].release.fail_next_swap();
+    }
+
+    /// How long a node is down while an upgrade swaps in its release and restarts it.
+    pub fn set_restart_takes(&self, by: Duration) {
+        self.restart_takes.store(by.as_secs(), Ordering::SeqCst);
+    }
+
+    /// Every time an upgrade took a node down, in order.
+    pub fn restarts(&self) -> Vec<Restart> {
+        self.restarts.lock().unwrap().clone()
+    }
+
     pub fn now(&self) -> Nanos {
         self.clock.now()
     }
@@ -301,10 +432,7 @@ impl Cluster {
 
     /// Kill the node process: in-memory state is lost, disk state survives.
     pub fn crash(&self, i: usize) {
-        self.nodes[i].server.lock().unwrap().take();
-        self.nodes[i].daemon.lock().unwrap().take();
-        self.nodes[i].fs.slot.lock().unwrap().take();
-        self.network.set_down(NodeId(i as u32), true);
+        crash_node(&self.nodes, i, &self.env());
     }
 
     /// Faults hit what is on disk, so commit the node's buffered writes first.
@@ -373,7 +501,7 @@ impl Cluster {
 
     /// Start the node again from its on-disk state.
     pub fn restart(&self, i: usize) {
-        open(&self.nodes, i, &self.network, self.clock.clone());
+        open(&self.nodes, i, &self.env());
         self.network.set_down(NodeId(i as u32), false);
     }
 }
@@ -418,21 +546,79 @@ fn address(index: usize, config: &Config) -> String {
     format!("100.64.0.{}:{}", index + 1, config.port)
 }
 
+/// The node's process dies: in-memory state is lost, disk state survives.
+fn crash_node(nodes: &[Node], i: usize, env: &Env) {
+    nodes[i].server.lock().unwrap().take();
+    nodes[i].daemon.lock().unwrap().take();
+    nodes[i].fs.slot.lock().unwrap().take();
+    env.network.set_down(NodeId(i as u32), true);
+}
+
 /// One round of background work on every live node; whether anything happened.
-fn pump(nodes: &[Node]) -> bool {
+/// An upgrade that was handed over takes its node down once the node's last messages
+/// have had a round to arrive, and brings it back on the new release after a while.
+fn pump(nodes: &Arc<Vec<Node>>, env: &Env) -> bool {
     let mut busy = false;
-    for n in nodes {
+    let now = env.clock.now();
+    for (i, n) in nodes.iter().enumerate() {
+        let back = matches!(*n.swap.lock().unwrap(), SwapState::Down(at) if now >= at);
+        if back {
+            n.release.finish_swap();
+            open(nodes, i, env);
+            env.network.set_down(NodeId(i as u32), false);
+            if let Some(r) = env
+                .restarts
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .rev()
+                .find(|r| r.node == i && r.back.is_none())
+            {
+                r.back = Some(now);
+            }
+            *n.swap.lock().unwrap() = SwapState::Running;
+            busy = true;
+        }
+    }
+    for n in nodes.iter() {
         let daemon = n.daemon.lock().unwrap().clone();
         if let Some(d) = daemon {
             busy |= d.tick();
+        }
+    }
+    for (i, n) in nodes.iter().enumerate() {
+        let state = *n.swap.lock().unwrap();
+        match state {
+            SwapState::Running if n.release.swap_requested() => {
+                *n.swap.lock().unwrap() = SwapState::Pending(2);
+                busy = true;
+            }
+            SwapState::Pending(0) => {
+                crash_node(nodes, i, env);
+                env.restarts.lock().unwrap().push(Restart {
+                    node: i,
+                    from: now,
+                    back: None,
+                });
+                let takes = Duration::from_secs(env.restart_takes.load(Ordering::SeqCst));
+                *n.swap.lock().unwrap() = SwapState::Down(now + takes.as_nanos() as u64);
+                busy = true;
+            }
+            SwapState::Pending(rounds) => {
+                *n.swap.lock().unwrap() = SwapState::Pending(rounds - 1);
+                busy = true;
+            }
+            SwapState::Running | SwapState::Down(_) => {}
         }
     }
     busy
 }
 
 /// Start node `index` from its on-disk state and connect it to the network.
-fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<ManualClock>) {
+fn open(nodes: &Arc<Vec<Node>>, index: usize, env: &Env) {
     let node = &nodes[index];
+    let clock = env.clock.clone();
+    let network = &env.network;
     let host = node
         .host
         .lock()
@@ -449,15 +635,19 @@ fn open(nodes: &Arc<Vec<Node>>, index: usize, network: &SimNetwork, clock: Arc<M
     .expect("open node");
     daemon.set_power_source(node.power.clone());
     daemon.set_resource_source(node.resources.clone());
-    daemon.attach(Arc::new(network.transport(NodeId(index as u32))));
+    daemon.set_installer(node.release.clone());
+    daemon.attach(Arc::new(
+        network.transport_speaking(NodeId(index as u32), node.release.wire()),
+    ));
     // A request that waits for a peer lets the whole simulated cluster run, and
     // time pass once it has nothing left to do, so that delayed messages arrive.
     let cluster: Weak<Vec<Node>> = Arc::downgrade(nodes);
+    let env = env.clone();
     daemon.set_wait_hook(Arc::new(move || {
         if let Some(nodes) = cluster.upgrade()
-            && !pump(&nodes)
+            && !pump(&nodes, &env)
         {
-            clock.advance(Duration::from_millis(1));
+            env.clock.advance(Duration::from_millis(1));
         }
     }));
     *node.fs.slot.lock().unwrap() = Some(daemon.fs());

@@ -8,7 +8,7 @@
 use startfs::identity::{PeerIdentity, StaticWhois};
 use startfs::quic::QuicTransport;
 use startfs_core::net::{NodeId, Transport};
-use startfs_core::protocol::PROTOCOL_VERSION;
+use startfs_core::protocol::{Message, PROTOCOL_VERSION, UpgradeNotice};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -156,6 +156,35 @@ fn a_peer_speaking_another_protocol_version_fails_with_a_clear_error() {
     assert!(recv_within(&a, Duration::from_millis(300)).is_none());
     // The accepting side says so too.
     wait_for_error(&a, old.local(), "protocol version mismatch");
+}
+
+#[test]
+fn a_peer_refused_for_its_protocol_version_is_handed_the_upgrade_notice() {
+    let whois = tailnet();
+    let a = node(1, &whois, &[]);
+    let old = QuicTransport::start_versioned(
+        SocketAddr::new(ip(2), 0),
+        whois.clone(),
+        vec![],
+        PROTOCOL_VERSION - 1,
+    )
+    .unwrap();
+    let notice = Message::UpgradeNotice(UpgradeNotice {
+        release: "v99.0.0".into(),
+        protocol: PROTOCOL_VERSION,
+    })
+    .encode();
+    a.set_notice(Some(notice.clone()));
+
+    let a_at_old = old.resolve(&a.local_addr().to_string()).unwrap();
+    old.send(a_at_old, b"hello".to_vec());
+    // The refusal still says why, in plain words...
+    let why = wait_for_error(&old, a_at_old, "protocol version mismatch");
+    assert!(why.is_ascii(), "{why:?}");
+    // ...and brings the notice, as if the refusing node had sent it.
+    let (from, msg) = recv_within(&old, Duration::from_secs(5)).expect("the notice");
+    assert_eq!((from, msg), (a.local(), notice));
+    assert!(recv_within(&a, Duration::from_millis(300)).is_none());
 }
 
 #[test]

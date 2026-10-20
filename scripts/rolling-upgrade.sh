@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# From the first release that has `startfs update` on, the cluster upgrades itself (README,
+# "Upgrading a whole cluster"). This script is for the hop to that release, which older
+# daemons cannot be told about (use --lockstep: it changes the protocol), and goes a release or two later.
+#
 # Upgrade every member one at a time, and wait for each to be ready before the next. Ready means:
 # the new version, `data: SAFE`, every member up, an empty inbox, the tick under BUSY_MAX percent,
 # for GOOD samples in a row 10 s apart, and at least QUIET_SECS since the restart. A node that is
@@ -27,7 +31,7 @@ while :; do
     *) break ;;
   esac
 done
-[ $# -ge 2 ] || { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 TAG=$1; shift
 WANT=${TAG#v}
 BUSY_MAX=${BUSY_MAX:-50}; QUIET_SECS=${QUIET_SECS:-60}; GOOD=${GOOD:-1}; TIMEOUT=${TIMEOUT:-900}

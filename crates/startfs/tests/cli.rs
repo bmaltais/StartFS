@@ -75,6 +75,16 @@ fn start_daemon(data: &Path) -> Daemon {
 }
 
 fn start_daemon_with(data: &Path, tailnet_knows_peers: bool, extra_config: &str) -> Daemon {
+    start_daemon_in(data, tailnet_knows_peers, extra_config, &[])
+}
+
+/// A daemon with extra environment variables, as the installer's settings reach it.
+fn start_daemon_in(
+    data: &Path,
+    tailnet_knows_peers: bool,
+    extra_config: &str,
+    env: &[(&str, &Path)],
+) -> Daemon {
     std::fs::create_dir_all(data).unwrap();
     let whois = data.join("whois.sock");
     fake_tailscaled(&whois, tailnet_knows_peers);
@@ -94,6 +104,7 @@ fn start_daemon_with(data: &Path, tailnet_knows_peers: bool, extra_config: &str)
             .arg("--config")
             .arg(&config)
             .arg("daemon")
+            .envs(env.iter().copied())
             .spawn()
             .unwrap(),
     );
@@ -447,4 +458,116 @@ fn help_prints_usage_and_an_unknown_flag_runs_nothing() {
     let status = stdout(&startfs(data, &["status"]));
     assert!(!status.contains("purge in progress"), "{status}");
     assert!(!status.contains("leaving"), "{status}");
+}
+
+/// A release of a fake `startfs` that reports the version and the protocol the real one
+/// speaks, as the installer script would find it under `base`.
+fn publish_fake_release(base: &Path, tag: &str) {
+    let target = format!(
+        "{}-{}",
+        std::env::consts::ARCH,
+        if std::env::consts::OS == "macos" {
+            "macos"
+        } else {
+            "linux"
+        }
+    );
+    let name = format!("startfs-{tag}-{target}");
+    let pkg = base.join("pkg").join(&name);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("startfs"),
+        format!(
+            "#!/bin/sh\necho \"startfs {} (protocol {})\"\n",
+            tag.trim_start_matches('v'),
+            startfs_core::protocol::PROTOCOL_VERSION
+        ),
+    )
+    .unwrap();
+    std::fs::write(pkg.join("startfs.service"), "[Service]\n").unwrap();
+    let dir = base.join("releases").join(tag);
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = format!(
+        "chmod +x pkg/{name}/startfs && tar czf releases/{tag}/{name}.tar.gz -C pkg {name} \
+         && cd releases/{tag} && (sha256sum {name}.tar.gz || shasum -a 256 {name}.tar.gz) > {name}.tar.gz.sha256"
+    );
+    let out = Command::new("sh")
+        .args(["-c", &script])
+        .current_dir(base)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_update_stages_the_release_and_has_the_installer_swap_it_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let install = dir.path().join("bin");
+    let releases = dir.path().join("fake-releases");
+    publish_fake_release(&releases, "v99.0.0");
+    let base_url =
+        std::ffi::OsString::from(format!("file://{}", releases.join("releases").display()));
+    let base_url = Path::new(&base_url).to_path_buf();
+    let _daemon = start_daemon_in(
+        &data,
+        true,
+        "",
+        &[
+            ("INSTALL_DIR", &install),
+            ("STARTFS_BASE_URL", &base_url),
+            // Files only: the test must never touch a service of the machine it runs on.
+            ("STARTFS_NO_SERVICE", Path::new("1")),
+            ("HOME", dir.path()),
+            ("XDG_CONFIG_HOME", &dir.path().join("config")),
+        ],
+    );
+    stdout(&startfs(
+        &data,
+        &["create", "--name", "home", "--copies", "1"],
+    ));
+
+    let said = stdout(&startfs(&data, &["update", "v99.0.0"]));
+    assert!(said.contains("moving the cluster to v99.0.0"), "{said}");
+
+    // One member, one protocol: it stages the release and swaps it in on its own.
+    let started = Instant::now();
+    let swapped = install.join("startfs");
+    while !swapped.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the release was never swapped in"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The installer finishes after the swap puts the binary in place.
+    while install.join("startfs.staged").exists() {
+        assert!(started.elapsed() < Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let version = Command::new(&swapped).arg("--version").output().unwrap();
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("startfs 99.0.0"));
+    let text = stdout(&startfs(&data, &["status"]));
+    assert!(text.contains("restarting on a new release"), "{text}");
+    assert!(text.contains("upgrade: moving to v99.0.0"), "{text}");
+}
+
+#[test]
+fn cli_update_says_when_the_release_is_not_a_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "1"],
+    ));
+    let out = startfs(data, &["update", "1.2.3"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not a release tag"));
+    let out = startfs(data, &["update", "--forced"]);
+    assert!(!out.status.success(), "an unknown flag runs nothing");
 }

@@ -21,7 +21,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::{CryptoProvider, ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use startfs_core::net::{Inbox, NodeId, Transport};
-use startfs_core::protocol::{Message, PROTOCOL_VERSION};
+use startfs_core::protocol::{Message, NOTICE_BYTE, PROTOCOL_VERSION};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -104,6 +104,8 @@ struct Shared {
     backlog: Mutex<HashMap<NodeId, u64>>,
     /// When a frame from each peer last arrived, handled by the daemon or not.
     heard: Mutex<HashMap<NodeId, Instant>>,
+    /// The upgrade notice to hand to a peer refused for its protocol version.
+    notice: Mutex<Option<Vec<u8>>>,
 }
 
 /// A message queued for a peer, with its claim on the backlog when it carries chunk bytes.
@@ -138,6 +140,18 @@ impl Drop for Held {
 }
 
 impl Shared {
+    /// Hand the daemon a message as if `from` had sent it over a working connection.
+    fn deliver(&self, from: NodeId, body: Vec<u8>) {
+        self.inbox_messages.fetch_add(1, Ordering::Relaxed);
+        self.inbox_bytes
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "best-effort: the daemon may have stopped receiving"
+        )]
+        let _ = self.inbox.lock().unwrap().send((from, body));
+    }
+
     /// Look a peer up with `tailscaled` and apply the tag policy.
     async fn authorize(self: &Arc<Self>, addr: SocketAddr) -> Result<(), Error> {
         let this = self.clone();
@@ -219,6 +233,7 @@ impl QuicTransport {
             inbox_bytes: AtomicU64::new(0),
             backlog: Mutex::new(HashMap::new()),
             heard: Mutex::new(HashMap::new()),
+            notice: Mutex::new(None),
         });
         runtime.spawn(accept_loop(shared.clone(), endpoint.clone()));
         Ok(Self {
@@ -334,6 +349,10 @@ impl Transport for QuicTransport {
         self.shared.errors.lock().unwrap().get(&node).cloned()
     }
 
+    fn set_notice(&self, notice: Option<Vec<u8>>) {
+        *self.shared.notice.lock().unwrap() = notice;
+    }
+
     fn rtt(&self, node: NodeId) -> Option<Duration> {
         let links = self.shared.links.lock().unwrap();
         let conn = links.get(&node)?;
@@ -424,7 +443,17 @@ async fn handshake_accept(
     };
     let answer = match &verdict {
         Ok(()) => vec![0],
-        Err(why) => [&[1][..], why.refusal_text().as_bytes()].concat(),
+        Err(why) => {
+            let mut answer = [&[1][..], why.refusal_text().as_bytes()].concat();
+            // A peer on another protocol cannot hear any message of ours, so the notice of
+            // which release the cluster is on (ADR 0006) rides the refusal, after the text.
+            if matches!(why, Error::VersionMismatch { .. })
+                && let Some(notice) = shared.notice.lock().unwrap().clone()
+            {
+                answer.extend(notice);
+            }
+            answer
+        }
     };
     reply.write_all(&answer).await?;
     reply.finish()?;
@@ -490,6 +519,7 @@ struct Link {
 async fn connect(
     shared: &Arc<Shared>,
     endpoint: &quinn::Endpoint,
+    peer: NodeId,
     addr: SocketAddr,
 ) -> Result<Link, Error> {
     shared.authorize(addr).await?;
@@ -512,7 +542,16 @@ async fn connect(
         match answer.split_first() {
             Some((0, _)) => {}
             Some((_, why)) => {
-                return Err(Error::Refused(String::from_utf8_lossy(why).into_owned()));
+                // The text may be followed by an upgrade notice, which starts with a byte
+                // no text holds.
+                let (text, notice) = match why.iter().position(|b| *b == NOTICE_BYTE) {
+                    Some(at) => (&why[..at], Some(why[at..].to_vec())),
+                    None => (why, None),
+                };
+                if let Some(notice) = notice {
+                    shared.deliver(peer, notice);
+                }
+                return Err(Error::Refused(String::from_utf8_lossy(text).into_owned()));
             }
             None => return Err(Error::EmptyHandshakeAnswer),
         }
@@ -554,7 +593,7 @@ async fn peer_sender(
             if failed_at.is_some_and(|t| t.elapsed() < RETRY_AFTER) {
                 continue;
             }
-            match connect(&shared, &endpoint, addr).await {
+            match connect(&shared, &endpoint, peer, addr).await {
                 Ok(l) => {
                     shared.errors.lock().unwrap().remove(&peer);
                     failed_at = None;

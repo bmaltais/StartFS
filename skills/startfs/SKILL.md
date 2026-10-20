@@ -34,7 +34,15 @@ untouched. If it warns that the protocol changed, upgrade every member: until th
 Done when `startfs status` on each machine shows all members `up`.
 `STARTFS_VERSION=vX.Y.Z` pins a release (older ones warn).
 
-For several machines, upgrade one at a time and wait until the cluster is calm before the next:
+For several machines, run `startfs update` (or `startfs update vX.Y.Z`) on any member: the members stage
+the release, then restart one at a time (same protocol) or all together on one go-signal (the protocol
+changes), with no ssh. `startfs status` shows each member staging, staged, waiting on its mount,
+restarting or failed, and a `split` line when members are on different protocols. A member whose mount is
+in use stages but waits: free the mount, or run `startfs update --force` on that node. Members that were
+away catch up when they return. Releases before the first with `startfs update` cannot be told, so that
+hop is the manual one below.
+
+The manual way, one machine at a time, waiting until the cluster is calm before the next:
 `scripts/rolling-upgrade.sh vX.Y.Z local HOST...` (ssh hosts, the machine that matters most last)
 installs, then waits for `data: SAFE`, every member up, an empty inbox (`startfs activity`) and a
 quiet tick, and stops on a node that does not get there. Never restart a node that is still

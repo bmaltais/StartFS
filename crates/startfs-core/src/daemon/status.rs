@@ -24,7 +24,7 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 /// A lost member's copies no longer count and have been re-made elsewhere, so
 /// once nothing is short and no repair runs it no longer reduces redundancy;
 /// a merely down member may still return, so it does.
-fn verdict(
+fn verdict_of(
     wanted: u32,
     possible: u32,
     unreplicated: &[Shortfall],
@@ -293,11 +293,20 @@ impl Daemon {
     }
 
     pub(super) fn status(&self) -> Result<Status, Error> {
+        self.status_with_gate().map(|(status, _)| status)
+    }
+
+    /// The status, and whether the data is safe enough for the next member of a rolling
+    /// upgrade to restart: the verdict is as it is but for members that are down.
+    pub(super) fn status_with_gate(&self) -> Result<(Status, bool), Error> {
         let stats = self.fs.stats()?;
         let mut health = self.local_health();
         let held_since = self.gc.lock().unwrap().last.held_since;
         let gc_waiting_on = held_since.map_or_else(Vec::new, |since| self.gc_waiting_on(since));
         let lost = self.with_view(|v| v.lost.clone()).unwrap_or_default();
+        // Both look at the member list: ask before `status` holds it.
+        let paused = self.paused_members(self.clock.now());
+        let upgrade = self.upgrade_status(self.clock.now());
         let rechecking = self
             .with_view(|v| self.replicator.rechecking(v))
             .unwrap_or(0);
@@ -317,13 +326,17 @@ impl Daemon {
             .map(|m| {
                 let is_self = membership.me() == Some(m.id);
                 let up = is_self || is_up(heard.get(&m.endpoint).copied(), now);
+                // A member in its upgrade pause is back soon: what it last reported
+                // still counts and nothing about it is alarming.
+                let expected = up || paused.contains(&m.id);
+                let (release, protocol, upgrade) = self.member_upgrade(m.endpoint, is_self);
                 if !is_self {
                     // Only a member that is up speaks for its own chunks.
                     match peer_health.get(&m.endpoint) {
-                        Some((_, h)) if up => merge_health(&mut health, h),
+                        Some((_, h)) if expected => merge_health(&mut health, h),
                         _ => unheard.push(m.id),
                     }
-                    if !up
+                    if !expected
                         && let Some(r) = last_report(m.id, m.endpoint, &peer_health, now)
                         && r.chunks > 0
                     {
@@ -333,7 +346,10 @@ impl Daemon {
                 MemberStatus {
                     id: m.id,
                     addr: m.addr,
-                    state: node_state(m.leaving, up, lost.contains(&m.id)),
+                    state: node_state(m.leaving, up, lost.contains(&m.id), paused.contains(&m.id)),
+                    release,
+                    protocol,
+                    upgrade,
                     offer_bytes: m.offer_bytes,
                     weight_bytes: m.weight_bytes,
                     site: m.site,
@@ -470,7 +486,7 @@ impl Daemon {
             }
         }
         let verdict = filesystem.as_ref().map(|f| {
-            verdict(
+            verdict_of(
                 f.copies,
                 copies_possible,
                 &unreplicated,
@@ -479,65 +495,90 @@ impl Daemon {
                 &stranded,
             )
         });
-        Ok(Status {
-            stopping: self.stopping.load(Ordering::SeqCst),
-            verdict,
-            filesystem,
-            node_state: NodeState::Online,
-            // A failed survey should not hide the rest of the report.
-            efficiency: self.fs.efficiency().unwrap_or_default(),
-            usage: Usage {
-                chunks: stats.chunks,
-                stored_bytes: stats.stored_bytes,
-                offer_bytes: membership.my_offer(self.config.offer_bytes),
+        // Members that are gone hold nothing back from the next restart: the data is
+        // safe when nothing is short of copies among the rest. One that is only briefly
+        // unseen may be back at once, so it still counts.
+        let gone = |m: &MemberStatus| {
+            m.state == NodeState::Down
+                && m.last_seen
+                    .is_some_and(|l| l.secs_ago >= super::STANDIN_AFTER.as_secs())
+        };
+        let present: Vec<MemberStatus> = members.iter().filter(|m| !gone(m)).cloned().collect();
+        let gate = filesystem.as_ref().is_some_and(|f| {
+            matches!(
+                verdict_of(
+                    f.copies,
+                    copies_possible,
+                    &unreplicated,
+                    repair.as_ref(),
+                    &present,
+                    &stranded,
+                ),
+                Verdict::Safe | Verdict::BestEffort
+            )
+        });
+        Ok((
+            Status {
+                stopping: self.stopping.load(Ordering::SeqCst),
+                verdict,
+                filesystem,
+                node_state: NodeState::Online,
+                // A failed survey should not hide the rest of the report.
+                efficiency: self.fs.efficiency().unwrap_or_default(),
+                usage: Usage {
+                    chunks: stats.chunks,
+                    stored_bytes: stats.stored_bytes,
+                    offer_bytes: membership.my_offer(self.config.offer_bytes),
+                },
+                staging: {
+                    let s = self.fs.staging_stats()?;
+                    Staging {
+                        chunks: s.chunks,
+                        bytes: s.stored_bytes,
+                    }
+                },
+                cache: self.fs.cache_stats(),
+                members,
+                upgrade,
+                nodes,
+                copies_possible,
+                usable_bytes,
+                unreplicated,
+                repair,
+                rechecking,
+                unheard,
+                stranded,
+                log: LogStatus {
+                    entries: self.fs.log_len().unwrap_or(0),
+                    objects: self.fs.object_count().unwrap_or(0),
+                },
+                scrub: self.scrubber.status(
+                    now,
+                    Duration::from_secs(self.config.scrub_period_secs),
+                    self.on_battery(),
+                    self.replicator.healing(),
+                ),
+                gc: {
+                    let gc = self.gc.lock().unwrap();
+                    GcStatus {
+                        pending_chunks: gc.last.pending_chunks,
+                        pending_bytes: gc.last.pending_bytes,
+                        reclaimed_chunks: gc.reclaimed_chunks,
+                        reclaimed_bytes: gc.reclaimed_bytes,
+                        waiting_on: gc_waiting_on,
+                        purging: self.purging.lock().unwrap().is_some(),
+                    }
+                },
+                warnings,
+                conflicts: self.fs.conflicts()?,
+                tick_busy: self.tick_busy().filter(|(busy, _)| *busy > 0.8).map(
+                    |(busy, avg_ms)| TickBusy {
+                        percent: (busy * 100.0).round() as u32,
+                        avg_ms: avg_ms.round() as u64,
+                    },
+                ),
             },
-            staging: {
-                let s = self.fs.staging_stats()?;
-                Staging {
-                    chunks: s.chunks,
-                    bytes: s.stored_bytes,
-                }
-            },
-            cache: self.fs.cache_stats(),
-            members,
-            nodes,
-            copies_possible,
-            usable_bytes,
-            unreplicated,
-            repair,
-            rechecking,
-            unheard,
-            stranded,
-            log: LogStatus {
-                entries: self.fs.log_len().unwrap_or(0),
-                objects: self.fs.object_count().unwrap_or(0),
-            },
-            scrub: self.scrubber.status(
-                now,
-                Duration::from_secs(self.config.scrub_period_secs),
-                self.on_battery(),
-                self.replicator.healing(),
-            ),
-            gc: {
-                let gc = self.gc.lock().unwrap();
-                GcStatus {
-                    pending_chunks: gc.last.pending_chunks,
-                    pending_bytes: gc.last.pending_bytes,
-                    reclaimed_chunks: gc.reclaimed_chunks,
-                    reclaimed_bytes: gc.reclaimed_bytes,
-                    waiting_on: gc_waiting_on,
-                    purging: self.purging.lock().unwrap().is_some(),
-                }
-            },
-            warnings,
-            conflicts: self.fs.conflicts()?,
-            tick_busy: self
-                .tick_busy()
-                .filter(|(busy, _)| *busy > 0.8)
-                .map(|(busy, avg_ms)| TickBusy {
-                    percent: (busy * 100.0).round() as u32,
-                    avg_ms: avg_ms.round() as u64,
-                }),
-        })
+            gate,
+        ))
     }
 }

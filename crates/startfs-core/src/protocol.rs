@@ -5,6 +5,7 @@ use crate::control::{NodeStats, Repair, Shortfall, Stranded};
 use crate::load::Load;
 use crate::members::{Admission, JoinRequest, Member, MemberId, TokenRec};
 use crate::oplog::{Entry, Frontier, StateChunk};
+use crate::upgrade::UpgradeGossip;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +49,31 @@ pub enum Message {
     /// "Reclaim the chunks no file uses now, without waiting out the retention
     /// period." The reclaim gate still applies.
     Purge,
+    /// The release the sender runs and, while an upgrade is under way, what it is
+    /// moving to and how far the sender has got (ADR 0007).
+    Upgrade(UpgradeGossip),
+    /// Which release the cluster is on, in a form every release reads whatever its
+    /// protocol version (ADR 0006). It never goes through the enum's own encoding:
+    /// see [`NOTICE_BYTE`].
+    UpgradeNotice(UpgradeNotice),
 }
+
+/// Which release the cluster is on, sent to a member that cannot otherwise hear
+/// the others because its protocol version differs. The form is frozen: a change
+/// to it breaks every deployed daemon (ADR 0006), so it names a release and a
+/// protocol number and nothing else, and never carries a binary or a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeNotice {
+    /// The release tag, as `v1.10.0`.
+    pub release: String,
+    /// That release's protocol version.
+    pub protocol: u8,
+}
+
+/// The first byte of an [`UpgradeNotice`], in the place of a protocol version. No
+/// protocol version will be this value, so `decode` routes it to the notice instead
+/// of refusing it as a mismatch.
+pub const NOTICE_BYTE: u8 = 0xFF;
 
 /// The kinds of traffic the activity view tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -57,7 +82,7 @@ pub enum Category {
     Chunk,
     /// Operation log entries and state transfer.
     Metadata,
-    /// Hello, members, tokens, health and the copies setting.
+    /// Hello, members, tokens, health, the copies setting and upgrades.
     Gossip,
     /// Joining and storage-figure queries.
     Other,
@@ -105,7 +130,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 14;
+pub const PROTOCOL_VERSION: u8 = 15;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -131,6 +156,11 @@ pub enum DecodeError {
 impl Message {
     /// The wire form: a version byte, then the message.
     pub fn encode(&self) -> Vec<u8> {
+        if let Message::UpgradeNotice(notice) = self {
+            let mut raw = vec![NOTICE_BYTE];
+            postcard::to_io(notice, &mut raw).expect("notice serialises");
+            return raw;
+        }
         let mut raw = vec![PROTOCOL_VERSION];
         postcard::to_io(self, &mut raw).expect("message serialises");
         raw
@@ -138,6 +168,11 @@ impl Message {
 
     pub fn decode(raw: &[u8]) -> Result<Message, DecodeError> {
         let (&theirs, body) = raw.split_first().ok_or(DecodeError::Malformed)?;
+        if theirs == NOTICE_BYTE {
+            return postcard::from_bytes(body)
+                .map(Message::UpgradeNotice)
+                .map_err(|_| DecodeError::Malformed);
+        }
         if theirs != PROTOCOL_VERSION {
             return Err(DecodeError::VersionMismatch {
                 ours: PROTOCOL_VERSION,
@@ -151,17 +186,20 @@ impl Message {
     /// on streams of their own so they never hold up the metadata exchange.
     pub fn is_bulk(raw: &[u8]) -> bool {
         // Postcard writes the variant index first; the chunk-carrying
-        // variants are `ChunkReply` and `ChunkPush`.
-        matches!(raw.get(1), Some(7 | 8))
+        // variants are `ChunkReply` and `ChunkPush`. A notice has no index.
+        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(7 | 8))
     }
 
     /// What an encoded message is for, as the activity view groups traffic.
     pub fn category(raw: &[u8]) -> Category {
         // The variant index again; see `is_bulk`.
+        if raw.first() == Some(&NOTICE_BYTE) {
+            return Category::Gossip;
+        }
         match raw.get(1) {
             Some(6..=9) => Category::Chunk,
             Some(1 | 2) => Category::Metadata,
-            Some(0 | 3 | 10..=12) => Category::Gossip,
+            Some(0 | 3 | 10..=12 | 13) => Category::Gossip,
             _ => Category::Other,
         }
     }
@@ -197,11 +235,45 @@ mod tests {
         );
     }
 
+    /// The upgrade notice is the one message whose form never changes (ADR 0006):
+    /// every release, whatever its protocol version, must read it. Pinned as bytes
+    /// so any change to it fails here.
+    #[test]
+    fn the_upgrade_notice_keeps_its_frozen_form() {
+        let notice = UpgradeNotice {
+            release: "v1.10.0".into(),
+            protocol: 15,
+        };
+        let mut frozen = vec![NOTICE_BYTE, 7];
+        frozen.extend_from_slice(b"v1.10.0");
+        frozen.push(15);
+        let msg = Message::UpgradeNotice(notice);
+        assert_eq!(msg.encode(), frozen);
+        assert_eq!(Message::decode(&frozen), Ok(msg));
+    }
+
+    #[test]
+    fn a_notice_is_read_whatever_the_protocol_version_that_sent_it() {
+        // `decode` never reads the version byte of an ordinary message as a notice.
+        assert_ne!(NOTICE_BYTE, PROTOCOL_VERSION);
+        let raw = Message::UpgradeNotice(UpgradeNotice {
+            release: "v2.0.0".into(),
+            protocol: PROTOCOL_VERSION + 1,
+        })
+        .encode();
+        assert!(matches!(
+            Message::decode(&raw),
+            Ok(Message::UpgradeNotice(n)) if n.protocol == PROTOCOL_VERSION + 1
+        ));
+        assert!(!Message::is_bulk(&raw));
+        assert_eq!(Message::category(&raw), Category::Gossip);
+    }
+
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        14,
-        "b4fc671a2a69c38829213aed8deec77d0455b1ac577d813058b8c86265b5105a",
+        15,
+        "62f3cf254cd69c0145033e6342fbf4a1351e4581cc6275da8079957f1769f735",
     );
 
     #[test]
@@ -209,6 +281,7 @@ mod tests {
         use crate::control::{Efficiency, FilesystemInfo, NodeStats, Repair, Shortfall, Usage};
         use crate::members::{Admission, IdRange, Member, MemberId, TokenRec};
         use crate::net::NodeId;
+        use crate::upgrade::{Intent, Progress, Release};
         let member = Member {
             id: MemberId(2),
             endpoint: NodeId(1),
@@ -275,6 +348,20 @@ mod tests {
             Message::ChunkAck([1u8; 32], Replica::Missing),
             Message::StatsRequest,
             Message::Purge,
+            Message::Upgrade(UpgradeGossip {
+                running: Release {
+                    version: "1.10.0".into(),
+                    protocol: 15,
+                },
+                intent: Some(Intent {
+                    tag: "v1.11.0".into(),
+                    rev: 2,
+                    issuer: Some(MemberId(1)),
+                    go: true,
+                }),
+                progress: Some(Progress::Failed("why".into())),
+                pause_secs: Some(30),
+            }),
             Message::StatsReply(NodeStats {
                 usage: Usage {
                     chunks: 1,
