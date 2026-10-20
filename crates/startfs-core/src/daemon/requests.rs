@@ -24,10 +24,11 @@ impl Daemon {
             },
             Request::Config {
                 offer_bytes,
+                weight_bytes,
                 copies,
                 activity,
             } => {
-                self.configure(offer_bytes, copies, activity)?;
+                self.configure(offer_bytes, weight_bytes, copies, activity)?;
                 Response::Done
             }
             Request::Revoke { token } => {

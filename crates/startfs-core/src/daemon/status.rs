@@ -6,6 +6,7 @@ use crate::control::{
     Shortfall, Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
 };
 use crate::error::Error;
+use crate::load::Load;
 use crate::members::{Member, MemberId, Membership};
 use crate::net::NodeId;
 use crate::ops::FsOps;
@@ -186,6 +187,7 @@ impl Daemon {
             })
             .collect();
         Health {
+            load: self.local_load(),
             seen,
             reports,
             slept,
@@ -195,6 +197,40 @@ impl Daemon {
             repair: self
                 .with_view(|v| self.replicator.repair_progress(v))
                 .flatten(),
+        }
+    }
+
+    /// How far behind this node's tick and inbox are, as it gossips it.
+    pub(super) fn local_load(&self) -> Load {
+        let began = self.last_tick.lock().unwrap().unwrap_or(self.started);
+        let inbox = self.transport().and_then(|t| t.inbox());
+        Load {
+            tick_secs_ago: self.clock.now().saturating_sub(began) / NANOS_PER_SEC,
+            inbox_messages: inbox.map_or(0, |i| i.messages),
+            inbox_bytes: inbox.map_or(0, |i| i.bytes),
+        }
+    }
+
+    /// Remember whether the member at `from` is behind, going by what it just
+    /// gossiped; `View::behind` follows.
+    pub(super) fn note_load(&self, from: NodeId, load: Load) {
+        let Some(member) = self
+            .membership
+            .lock()
+            .unwrap()
+            .members()
+            .iter()
+            .find(|m| m.endpoint == from)
+            .map(|m| m.id)
+        else {
+            return;
+        };
+        let mut behind = self.behind.lock().unwrap();
+        let was = behind.contains(&member);
+        if load.is_behind(self.config.behind_inbox_messages, was) {
+            behind.insert(member);
+        } else {
+            behind.remove(&member);
         }
     }
 
@@ -316,7 +352,16 @@ impl Daemon {
                         NodeState::Down
                     },
                     offer_bytes: m.offer_bytes,
+                    weight_bytes: m.weight_bytes,
                     is_self,
+                    behind: if !up {
+                        None
+                    } else if is_self {
+                        Some(self.local_load())
+                    } else {
+                        peer_health.get(&m.endpoint).map(|(_, h)| h.load)
+                    }
+                    .filter(|l| l.is_behind(self.config.behind_inbox_messages, false)),
                     standin_secs_left: self.standin_secs_left(m.id, standin_days, now),
                     last_seen: (!up).then(|| {
                         last_seen(
@@ -355,6 +400,7 @@ impl Daemon {
             seen: _,
             reports: _,
             slept: _,
+            load: _,
         } = health;
         let nodes = members.len() as u32;
         // Only members offering space, and with room left, can hold a copy.
@@ -362,7 +408,7 @@ impl Daemon {
         let storage_nodes = membership
             .members()
             .iter()
-            .filter(|m| m.offer_bytes > 0 && !m.leaving && !full.contains(&m.id))
+            .filter(|m| m.share() > 0 && !m.leaving && !full.contains(&m.id))
             .count() as u32;
         let copies_possible = filesystem
             .as_ref()
@@ -375,6 +421,20 @@ impl Daemon {
                     "{} is full: it cannot take new copies{}",
                     m.addr,
                     if m.is_self { " (this node)" } else { "" }
+                ));
+            }
+        }
+        for m in &members {
+            if let Some(load) = &m.behind {
+                warnings.push(format!(
+                    "{} is {}{}",
+                    m.addr,
+                    load.behind_text(),
+                    if m.is_self {
+                        " (this node)"
+                    } else {
+                        "; it is sent nothing new until it catches up"
+                    }
                 ));
             }
         }

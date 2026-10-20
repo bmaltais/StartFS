@@ -2,6 +2,7 @@
 
 use crate::chunkstore::ChunkId;
 use crate::control::{NodeStats, Repair, Shortfall, Stranded};
+use crate::load::Load;
 use crate::members::{Admission, JoinRequest, Member, MemberId, TokenRec};
 use crate::oplog::{Entry, Frontier, StateChunk};
 use serde::{Deserialize, Serialize};
@@ -78,6 +79,9 @@ pub struct Health {
     /// how long ago (rounded up), so the others keep the extra copies made for
     /// it for as long as the sender would.
     pub slept: Vec<Sighting>,
+    /// How far behind the sender's tick and inbox are, so the others can say
+    /// it is behind (and not down) and hold off sending it more.
+    pub load: Load,
 }
 
 /// That the sender observed a member `secs_ago` seconds ago: heard from it, or
@@ -101,7 +105,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 12;
+pub const PROTOCOL_VERSION: u8 = 13;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -196,8 +200,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        12,
-        "e7f713ca1abc2b31de1b1cb114e236d9fa264d7df29db8e562845fda523e21f6",
+        13,
+        "df949fa0d4b31136d736d75de6a121b58704a0497c5ac939319388c559b75404",
     );
 
     #[test]
@@ -210,6 +214,7 @@ mod tests {
             endpoint: NodeId(1),
             addr: "host:7600".into(),
             offer_bytes: 5,
+            weight_bytes: 4,
             rev: 3,
             leaving: false,
             removed: false,
@@ -259,6 +264,11 @@ mod tests {
                     member: MemberId(3),
                     secs_ago: 9,
                 }],
+                load: Load {
+                    tick_secs_ago: 10,
+                    inbox_messages: 11,
+                    inbox_bytes: 12,
+                },
             }),
             Message::Copies { copies: 3, rev: 2 },
             Message::ChunkAck([1u8; 32], Replica::Missing),

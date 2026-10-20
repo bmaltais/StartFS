@@ -55,6 +55,9 @@ pub struct Config {
     /// Most bytes per second this node sends when re-replicating chunks it
     /// already holds (repair and rebalancing; new writes are not limited).
     pub repair_bytes_per_sec: u64,
+    /// Messages waiting in a peer's inbox from which this node sends it nothing
+    /// new until it drains (it is let off below half). 0 turns that off.
+    pub behind_inbox_messages: u64,
     /// How often the scrub reads back every replica this node holds, in seconds.
     pub scrub_period_secs: u64,
     /// Most bytes (encoded, roughly) in one piece when this node sends its
@@ -92,6 +95,7 @@ impl Default for Config {
             gc_retention_secs: 7 * 24 * 3600,
             standin_days: DEFAULT_STANDIN_DAYS,
             repair_bytes_per_sec: 64 << 20,
+            behind_inbox_messages: 5000,
             scrub_period_secs: 30 * 24 * 3600,
             state_chunk_bytes: crate::sync::STATE_CHUNK_BYTES,
             activity: true,

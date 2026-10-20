@@ -100,6 +100,7 @@ impl Daemon {
                         *known = (*known).max(at);
                     }
                     drop(slept);
+                    self.note_load(from, health.load);
                     self.peer_health.lock().unwrap().insert(from, (now, health));
                 }
             }

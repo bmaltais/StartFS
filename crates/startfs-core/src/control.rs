@@ -6,6 +6,7 @@ use crate::cache::CacheStats;
 use crate::daemon::Daemon;
 use crate::error::Error;
 use crate::fs::ConflictCopy;
+use crate::load::Load;
 use crate::members::MemberId;
 use crate::ops::Nanos;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,9 @@ pub enum Request {
     /// Change settings of this node; unset fields stay as they are.
     Config {
         offer_bytes: Option<u64>,
+        /// Change the share of new copies this node takes (0: follow the offer).
+        #[serde(default)]
+        weight_bytes: Option<u64>,
         /// Change the filesystem's number of copies (for every member).
         #[serde(default)]
         copies: Option<u32>,
@@ -112,6 +116,10 @@ pub struct MemberStatus {
     pub state: NodeState,
     /// Space the member offers to the filesystem.
     pub offer_bytes: u64,
+    /// The share of new copies it takes when that differs from the offer; 0
+    /// means the offer.
+    #[serde(default)]
+    pub weight_bytes: u64,
     /// Whether this is the node answering.
     pub is_self: bool,
     /// Why this node cannot reach the member, when it is not up (for example a protocol
@@ -129,6 +137,10 @@ pub struct MemberStatus {
     /// it is up and a measurement exists. Never set for this node itself.
     #[serde(default)]
     pub rtt_micros: Option<u64>,
+    /// How far behind the member is, when it is up but its tick or inbox is
+    /// backed up. Up members that are behind get no new copies until they catch up.
+    #[serde(default)]
+    pub behind: Option<Load>,
 }
 
 /// How long ago any member last heard from a member that is not up.
@@ -571,6 +583,21 @@ impl Client {
     pub fn set_offer(&self, bytes: u64) -> Result<(), Error> {
         match self.call(&Request::Config {
             offer_bytes: Some(bytes),
+            weight_bytes: None,
+            copies: None,
+            activity: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Change the share of new copies this node takes, in the units of the offer;
+    /// 0 makes it follow the offer again.
+    pub fn set_weight(&self, bytes: u64) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            weight_bytes: Some(bytes),
             copies: None,
             activity: None,
         })? {
@@ -583,6 +610,7 @@ impl Client {
     pub fn set_copies(&self, copies: u32) -> Result<(), Error> {
         match self.call(&Request::Config {
             offer_bytes: None,
+            weight_bytes: None,
             copies: Some(copies),
             activity: None,
         })? {
@@ -595,6 +623,7 @@ impl Client {
     pub fn set_activity(&self, on: bool) -> Result<(), Error> {
         match self.call(&Request::Config {
             offer_bytes: None,
+            weight_bytes: None,
             copies: None,
             activity: Some(on),
         })? {

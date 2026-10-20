@@ -62,6 +62,9 @@ pub struct View<'a> {
     /// Members seen asleep within the stand-in retention (including those
     /// asleep now): copies made to cover for them are not trimmed yet.
     pub kept: &'a HashSet<MemberId>,
+    /// Members that are up but behind: sent nothing new until they catch up.
+    /// Unlike `full`, this is not part of the epoch, so it never starts a re-check.
+    pub behind: &'a HashSet<MemberId>,
     /// When each member was last heard from (anything it sent): a member heard since it was
     /// first asked is not silent.
     pub heard: &'a HashMap<MemberId, Nanos>,
@@ -490,6 +493,10 @@ impl Replicator {
                 blocked = true;
                 continue;
             };
+            if view.behind.contains(t) {
+                blocked = true;
+                continue;
+            }
             if !due {
                 continue;
             }

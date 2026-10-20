@@ -36,10 +36,12 @@ commands:
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
-  config [--offer SIZE] [--copies N] [--activity on|off]
-                                      change this node's space offer (sizes like 500M, 2T), the
-                                      filesystem's number of copies on every node, or whether this
-                                      node keeps the counters behind `activity` (until restart)";
+  config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off]
+                                      change this node's space offer (sizes like 500M, 2T), its
+                                      weight (the share of new copies it takes, in the same
+                                      units; 0: follow the offer), the filesystem's number of
+                                      copies on every node, or whether this node keeps the
+                                      counters behind `activity` (until restart)";
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
@@ -190,6 +192,9 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         "config" => {
             if let Some(bytes) = optional_size(rest, "--offer")? {
                 Client::new(socket.clone()).set_offer(bytes)?;
+            }
+            if let Some(bytes) = optional_size(rest, "--weight")? {
+                Client::new(socket.clone()).set_weight(bytes)?;
             }
             if let Ok(value) = flag_value(rest, "--activity") {
                 let on = match value.as_str() {
@@ -354,7 +359,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "join" => (&["--offer"], &[], 1),
         "token" => (&[], &["--example"], 0),
         "remove" | "revoke" => (&[], &[], 1),
-        "config" => (&["--offer", "--copies", "--activity"], &[], 0),
+        "config" => (&["--offer", "--weight", "--copies", "--activity"], &[], 0),
         // purge, leave and unknown commands (reported as usage later)
         _ => (&[], &[], 0),
     };
@@ -539,17 +544,25 @@ fn members_table(members: &[control::MemberStatus]) -> String {
     let rows: Vec<[String; 5]> = members
         .iter()
         .map(|m| {
-            let state = match m.state {
+            let mut state = match m.state {
                 NodeState::Online => "up",
                 NodeState::Down => "down",
                 NodeState::Lost => "lost",
                 NodeState::Leaving => "leaving",
-            };
+            }
+            .to_string();
+            if let Some(load) = &m.behind {
+                state = format!("{state}, {}", load.behind_text());
+            }
+            let mut offered = format!("{} offered", human(m.offer_bytes));
+            if m.weight_bytes > 0 {
+                offered = format!("{offered}, weight {}", human(m.weight_bytes));
+            }
             [
                 m.id.to_string(),
                 m.addr.clone(),
-                state.to_string(),
-                format!("{} offered", human(m.offer_bytes)),
+                state,
+                offered,
                 m.rtt_micros.map_or_else(String::new, rtt_text),
             ]
         })

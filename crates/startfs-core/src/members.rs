@@ -77,6 +77,10 @@ pub struct Member {
     pub addr: String,
     /// Space the member offers to the filesystem, in bytes.
     pub offer_bytes: u64,
+    /// The share of new copies the member takes, in the units of the offer, when
+    /// that should differ from what it offers; 0 means the offer.
+    #[serde(default)]
+    pub weight_bytes: u64,
     /// Bumped by the member each time it changes its own record; the highest wins.
     pub rev: u64,
     /// The member is handing its data to the others and about to go.
@@ -85,6 +89,18 @@ pub struct Member {
     /// The member has gone (left, or was removed): kept so stale gossip cannot revive it.
     #[serde(default)]
     pub removed: bool,
+}
+
+impl Member {
+    /// What placement weighs the member by: its weight, or its offer when it
+    /// has none.
+    pub fn share(&self) -> u64 {
+        if self.weight_bytes > 0 {
+            self.weight_bytes
+        } else {
+            self.offer_bytes
+        }
+    }
 }
 
 /// What an admitting member tells a new member.
@@ -258,6 +274,7 @@ impl Membership {
                 endpoint,
                 addr,
                 offer_bytes,
+                weight_bytes: 0,
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -360,6 +377,7 @@ impl Membership {
                 endpoint,
                 addr: request.addr,
                 offer_bytes: request.offer_bytes,
+                weight_bytes: 0,
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -508,6 +526,16 @@ impl Membership {
         fs.copies_rev = rev;
         self.save_or_report();
         true
+    }
+
+    /// Change how much of the placement this node takes; 0 follows the offer.
+    pub fn set_weight(&mut self, bytes: u64) -> Result<(), Error> {
+        let me = self.me;
+        if let Some(m) = self.members.get_mut(&me) {
+            m.weight_bytes = bytes;
+            m.rev += 1;
+        }
+        self.save()
     }
 
     pub fn set_offer(&mut self, bytes: u64) -> Result<(), Error> {

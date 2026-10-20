@@ -9,6 +9,7 @@ pub mod control;
 pub mod daemon;
 pub mod error;
 pub mod fs;
+pub mod load;
 pub mod members;
 pub mod net;
 pub mod oplog;
