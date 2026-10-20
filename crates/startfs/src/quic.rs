@@ -39,6 +39,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// After a failed connection attempt, messages for that peer are dropped for this long.
 const RETRY_AFTER: Duration = Duration::from_secs(2);
 const CLOSE_REFUSED: u32 = 1;
+const CLOSE_SUPERSEDED: u32 = 2;
 /// Chunk bytes waiting in the inbox past which a stream stops being read, so QUIC flow control
 /// slows the sender instead of this node's memory growing (#91). Metadata and gossip are exempt.
 pub const INBOX_BULK_LIMIT: u64 = 64 << 20;
@@ -96,6 +97,9 @@ struct Shared {
     errors: Mutex<HashMap<NodeId, String>>,
     /// The live connection we dialed to each peer, for its round-trip time.
     links: Mutex<HashMap<NodeId, quinn::Connection>>,
+    /// The live connection each peer dialed to us. A second one from the same peer means it
+    /// restarted: the first is dead and so is our own link to it.
+    dialed: Mutex<HashMap<NodeId, quinn::Connection>>,
     inbox: Mutex<Sender<(NodeId, Vec<u8>)>>,
     /// Messages and bytes sent into the inbox and not yet taken out.
     inbox_messages: AtomicU64,
@@ -228,6 +232,7 @@ impl QuicTransport {
             addrs: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
+            dialed: Mutex::new(HashMap::new()),
             inbox: Mutex::new(tx),
             inbox_messages: AtomicU64::new(0),
             inbox_bytes: AtomicU64::new(0),
@@ -415,6 +420,14 @@ async fn serve_connection(shared: Arc<Shared>, incoming: quinn::Incoming) {
         }
     }
     shared.addrs.lock().unwrap().insert(peer, remote);
+    if let Some(old) = shared.dialed.lock().unwrap().insert(peer, conn.clone()) {
+        // The peer restarted. Our link to it would otherwise sit on a dead path until the
+        // idle timeout, so its hellos would reach the new daemon half a minute late.
+        old.close(CLOSE_SUPERSEDED.into(), b"superseded");
+        if let Some(link) = shared.links.lock().unwrap().remove(&peer) {
+            link.close(CLOSE_SUPERSEDED.into(), b"peer restarted");
+        }
+    }
     while let Ok(stream) = conn.accept_uni().await {
         tokio::spawn(read_messages(shared.clone(), peer, stream));
     }
