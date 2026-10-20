@@ -140,7 +140,7 @@ slower than local disk) and daemon peak RSS was 206 to 222 MiB for a 128 MiB wri
 **Read and write path tuning.** `O_DIRECT` reads of a 256 MiB file through the mount, before and
 after (one run each, shared machine). Before, every FUSE read loaded, decompressed and hashed the
 whole 1 to 4 MiB chunk it touched, and every metadata read took the global lock and a write
-transaction. Now recently read chunks stay decoded in memory (`read_cache_bytes`, 32 MiB) and
+transaction. Now recently read chunks stay decoded in memory (`read_cache_bytes`, 32 MiB when measured; now derived from memory) and
 reads use read-only redb snapshots.
 
 | Read, incompressible / text | Before | After |

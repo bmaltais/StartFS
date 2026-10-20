@@ -19,7 +19,8 @@ pub struct Config {
     pub cache_bytes: u64,
     /// Most bytes of recently read chunks kept decoded in memory, so reading a
     /// file in small pieces does not decode a chunk for each piece. 0 turns it off.
-    pub read_cache_bytes: u64,
+    /// Unset: derived from the machine's memory (see [`read_cache_default`]).
+    pub read_cache_bytes: Option<u64>,
     /// Whether chunks this node stores are compressed: `auto` (try zstd on
     /// chunks a sample shows to be compressible, keep it only when it saves
     /// at least an eighth), `off`, or `always` (every chunk, kept whenever
@@ -84,7 +85,7 @@ impl Default for Config {
             port: 7600,
             offer_bytes: 10 << 30,
             cache_bytes: 1 << 30,
-            read_cache_bytes: DEFAULT_DECODED_BYTES,
+            read_cache_bytes: None,
             compression: Compression::Auto,
             staging_bytes: 4 << 30,
             write_buffer_bytes: crate::fs::DEFAULT_WRITE_BUFFER,
@@ -109,5 +110,86 @@ impl Default for Config {
 impl Config {
     pub fn parse(text: &str) -> Result<Self, Error> {
         Ok(toml::from_str(text)?)
+    }
+
+    /// The read cache size in effect, and whether it was derived rather than
+    /// configured. `total_ram` is the machine's memory, when it could be read.
+    pub fn read_cache_limit(&self, total_ram: Option<u64>) -> (u64, bool) {
+        match self.read_cache_bytes {
+            Some(bytes) => (bytes, false),
+            None => (
+                total_ram.map_or(DEFAULT_DECODED_BYTES, read_cache_default),
+                true,
+            ),
+        }
+    }
+}
+
+/// The read cache size for a machine with `total_ram` bytes of memory: 1/64 of
+/// it, at least 16 MiB (a small board's idle budget) and at most 128 MiB.
+pub fn read_cache_default(total_ram: u64) -> u64 {
+    (total_ram / 64).clamp(16 << 20, 128 << 20)
+}
+
+/// The machine's total memory in bytes (the host's, not a container's limit),
+/// or `None` when it cannot be read or the platform is not supported.
+pub fn total_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kib: u64 = meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()?;
+        Some(kib * 1024)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+
+    #[test]
+    fn the_derived_size_is_a_64th_of_memory_between_16_and_128_mib() {
+        assert_eq!(read_cache_default(0), 16 * MIB);
+        assert_eq!(read_cache_default(GIB), 16 * MIB);
+        assert_eq!(read_cache_default(4 * GIB), 64 * MIB);
+        assert_eq!(read_cache_default(8 * GIB), 128 * MIB);
+        assert_eq!(read_cache_default(64 * GIB), 128 * MIB);
+    }
+
+    #[test]
+    fn a_configured_size_wins_whatever_the_memory() {
+        for ram in [None, Some(GIB), Some(64 * GIB)] {
+            let off = Config::parse("read_cache_bytes = 0").unwrap();
+            assert_eq!(off.read_cache_limit(ram), (0, false));
+            let set = Config::parse("read_cache_bytes = 1000").unwrap();
+            assert_eq!(set.read_cache_limit(ram), (1000, false));
+        }
+    }
+
+    #[test]
+    fn unset_it_is_derived_from_memory_or_32_mib_when_memory_is_unknown() {
+        let config = Config::default();
+        assert_eq!(config.read_cache_limit(Some(4 * GIB)), (64 * MIB, true));
+        assert_eq!(config.read_cache_limit(None), (32 * MIB, true));
     }
 }

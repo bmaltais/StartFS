@@ -208,7 +208,17 @@ impl Daemon {
             membership.my_offer(config.offer_bytes),
         ));
         fs.set_write_buffer_limit(config.write_buffer_bytes);
-        fs.set_read_cache_limit(config.read_cache_bytes);
+        let (read_cache, derived) = config.read_cache_limit(crate::config::total_ram_bytes());
+        eprintln!(
+            "startfs: read cache {} MiB ({})",
+            read_cache >> 20,
+            if derived {
+                "derived from memory"
+            } else {
+                "configured"
+            }
+        );
+        fs.set_read_cache_limit(read_cache);
         fs.set_compression(config.compression);
         if let Some(me) = membership.me() {
             fs.set_node(me);
