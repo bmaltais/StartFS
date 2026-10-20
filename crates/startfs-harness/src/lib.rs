@@ -5,7 +5,8 @@
 mod cluster;
 mod fixtures;
 mod network;
+mod releases;
 
-pub use cluster::{Cluster, NodeFs};
+pub use cluster::{Cluster, NodeFs, Restart};
 pub use fixtures::noise;
 pub use network::{SimNetwork, SimTransport};

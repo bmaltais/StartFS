@@ -9,6 +9,7 @@ use crate::fs::ConflictCopy;
 use crate::load::Load;
 use crate::members::MemberId;
 use crate::ops::Nanos;
+use crate::upgrade::Progress;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -59,6 +60,14 @@ pub enum Request {
     /// Remove a member that is gone for good; its data is re-replicated.
     Remove {
         member: MemberId,
+    },
+    /// Move the cluster to a release (the latest stable one when none is named), or,
+    /// with `force`, let this node restart on the release it has staged even though
+    /// its mount is in use.
+    Update {
+        release: Option<String>,
+        #[serde(default)]
+        force: bool,
     },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
@@ -112,6 +121,8 @@ pub enum NodeState {
     Lost,
     /// Handing its data to the others before it goes.
     Leaving,
+    /// Restarting on a new release: the others expect it back within its upgrade pause.
+    Upgrading,
 }
 
 /// One member of the filesystem, as `status` shows it.
@@ -150,6 +161,32 @@ pub struct MemberStatus {
     /// backed up. Up members that are behind get no new copies until they catch up.
     #[serde(default)]
     pub behind: Option<Load>,
+    /// The release the member runs, as it gossips it (this node's own for itself).
+    #[serde(default)]
+    pub release: Option<String>,
+    /// The protocol version it speaks, when known: members that are not up on this
+    /// node's protocol show the one they were seen to speak.
+    #[serde(default)]
+    pub protocol: Option<u8>,
+    /// How far the member has got with the upgrade under way, when it has work to do.
+    #[serde(default)]
+    pub upgrade: Option<Progress>,
+}
+
+/// The upgrade the cluster is carrying out, or the release it last moved to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeStatus {
+    /// The release the cluster is moving to.
+    pub release: String,
+    /// Whether it changes the protocol, so that every member swaps on one go-signal:
+    /// known once this node has staged it.
+    pub lockstep: Option<bool>,
+    /// The go-signal of a lockstep upgrade was sent.
+    pub go: bool,
+    /// Every member that is up runs the release.
+    pub complete: bool,
+    /// Members seen speaking another protocol than this node: the cluster is split.
+    pub split: Vec<MemberId>,
 }
 
 /// How long ago any member last heard from a member that is not up.
@@ -305,6 +342,15 @@ pub struct PurgeReport {
     pub asked: Vec<MemberId>,
 }
 
+/// What `update` set in motion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateReport {
+    /// The release the cluster is moving to, resolved to a concrete tag.
+    pub release: String,
+    /// Every member that is up already runs it, so nothing was started.
+    pub already_on_it: bool,
+}
+
 /// Garbage collection of chunks no file references any more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcStatus {
@@ -368,6 +414,9 @@ pub struct Status {
     pub cache: CacheStats,
     /// Members of the filesystem, by id.
     pub members: Vec<MemberStatus>,
+    /// The upgrade under way, or the release the cluster last moved to.
+    #[serde(default)]
+    pub upgrade: Option<UpgradeStatus>,
     pub nodes: u32,
     /// Best-effort redundancy: min(N, nodes) copies are actually possible.
     pub copies_possible: u32,
@@ -417,6 +466,7 @@ pub enum Response {
     Status(Box<Status>),
     Activity(Box<ActivityReport>),
     Purged(PurgeReport),
+    Updating(UpdateReport),
     NodeStats(Vec<NodeReport>),
     Error(String),
 }
@@ -661,6 +711,22 @@ impl Client {
             site: None,
         })? {
             Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Order the cluster to a release (the latest stable one for `None`).
+    pub fn update(&self, release: Option<&str>) -> Result<UpdateReport, Error> {
+        self.update_with(release, false)
+    }
+
+    /// Like [`update`](Self::update); with `force` this node also restarts when its mount is in use.
+    pub fn update_with(&self, release: Option<&str>, force: bool) -> Result<UpdateReport, Error> {
+        match self.call(&Request::Update {
+            release: release.map(str::to_string),
+            force,
+        })? {
+            Response::Updating(report) => Ok(report),
             other => Err(unexpected(other)),
         }
     }

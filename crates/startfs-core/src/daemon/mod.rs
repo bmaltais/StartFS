@@ -12,6 +12,7 @@ mod purge;
 mod requests;
 mod standing;
 mod status;
+mod upgrade;
 
 use self::standing::is_up;
 use crate::activity::{Activity, CountingTransport, Phase};
@@ -28,11 +29,12 @@ use crate::oplog::Entry;
 use crate::ops::FsResult;
 use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
-use crate::protocol::{Health, Message};
+use crate::protocol::{DecodeError, Health, Message};
 use crate::replication::{Replicator, View};
 use crate::resources::{ResourceSource, SystemResources};
 use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
+use crate::upgrade::{Installer, NoInstaller};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -149,6 +151,10 @@ pub struct Daemon {
     /// cutoff) are reclaimed without waiting out the retention, as the reclaim
     /// gate allows, until a pass holds none back. Later deletes keep their retention.
     purging: Mutex<Option<Nanos>>,
+    /// Fetches and swaps releases for an upgrade the cluster coordinates.
+    installer: Mutex<Arc<dyn Installer>>,
+    /// The upgrade under way and what the other members said about it.
+    upgrades: Mutex<upgrade::Upgrades>,
 }
 
 /// Garbage collection as `status` reports it.
@@ -249,6 +255,8 @@ impl Daemon {
                 power: Mutex::new(Arc::new(MainsPower)),
                 stopping: AtomicBool::new(false),
                 purging: Mutex::new(None),
+                installer: Mutex::new(Arc::new(NoInstaller)),
+                upgrades: Mutex::new(upgrade::Upgrades::open(dir)),
                 fs,
                 clock,
                 chunk_replies: Mutex::new(HashMap::new()),
@@ -388,7 +396,12 @@ impl Daemon {
                     }
                     self.handle_peer_message(&*transport, from, msg);
                 }
-                Err(e) => eprintln!("startfs: dropped a message from node {}: {e}", from.0),
+                Err(e) => {
+                    eprintln!("startfs: dropped a message from node {}: {e}", from.0);
+                    if let DecodeError::VersionMismatch { theirs, .. } = e {
+                        self.on_version_mismatch(from, theirs);
+                    }
+                }
             }
         }
         for (from, held) in entries {
@@ -409,6 +422,7 @@ impl Daemon {
             .unwrap_or(false);
         timer.phase(Phase::Replicate);
         busy |= self.finish_leaving(&*transport);
+        busy |= self.drive_upgrade();
         busy |= self.collect_garbage();
         busy |= self.compact_log();
         if !busy {
@@ -461,6 +475,7 @@ impl Daemon {
             let members_msg = Message::Members(members).encode();
             let tokens_msg = Message::Tokens(tokens).encode();
             let health_msg = Message::Health(self.local_health()).encode();
+            let upgrade_msg = Message::Upgrade(self.upgrade_gossip()).encode();
             let copies_msg = self
                 .membership
                 .lock()
@@ -474,6 +489,7 @@ impl Daemon {
                 transport.send(*p, members_msg.clone());
                 transport.send(*p, tokens_msg.clone());
                 transport.send(*p, health_msg.clone());
+                transport.send(*p, upgrade_msg.clone());
             }
             return !peers.is_empty();
         }
@@ -625,9 +641,14 @@ impl Daemon {
             )
         };
         let now = self.clock.now();
+        // A member that announced an upgrade pause is expected back: it is not counted
+        // down or asleep, and is sent nothing new meanwhile.
+        let paused = self.paused_members(now);
         let lost = self.unseen_members(&members, me, grace, now);
-        let down = self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), now);
-        let (sleeping, kept) = self.sleepers(&members, me, grace, standin_days, now);
+        let mut down = self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), now);
+        down.retain(|m| !paused.contains(m));
+        let (mut sleeping, kept) = self.sleepers(&members, me, grace, standin_days, now);
+        sleeping.retain(|m| !paused.contains(m));
         let heard: HashMap<MemberId, Nanos> = {
             let heard = self.heard.lock().unwrap();
             members
@@ -635,7 +656,8 @@ impl Daemon {
                 .filter_map(|m| Some((m.id, *heard.get(&m.endpoint)?)))
                 .collect()
         };
-        let behind = self.behind.lock().unwrap().clone();
+        let mut behind = self.behind.lock().unwrap().clone();
+        behind.extend(&paused);
         Some(f(&View {
             behind: &behind,
             me,

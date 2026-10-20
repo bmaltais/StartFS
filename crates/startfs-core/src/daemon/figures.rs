@@ -33,6 +33,7 @@ impl Daemon {
         let (chunks, in_flight, oldest_secs) = self.replicator.queue(now);
         let heard = self.heard.lock().unwrap().clone();
         let lost = self.with_view(|v| v.lost.clone()).unwrap_or_default();
+        let paused = self.paused_members(now);
         let peers = {
             let membership = self.membership.lock().unwrap();
             let me = membership.me();
@@ -44,7 +45,7 @@ impl Daemon {
                     let up = is_up(heard.get(&m.endpoint).copied(), now);
                     PeerActivity {
                         member: m.id,
-                        state: node_state(m.leaving, up, lost.contains(&m.id)),
+                        state: node_state(m.leaving, up, lost.contains(&m.id), paused.contains(&m.id)),
                         in_flight: in_flight.get(&m.id).copied().unwrap_or(0),
                         traffic: enabled
                             .then(|| totals.peers.get(&m.endpoint).copied().unwrap_or_default()),

@@ -52,6 +52,9 @@ impl Daemon {
                 self.join(&token, offer_bytes, site)?;
                 Response::Joined
             }
+            Request::Update { release, force } => {
+                Response::Updating(self.update(release, force)?)
+            }
             Request::Purge => Response::Purged(self.purge()?),
             Request::NodeStats => Response::NodeStats(self.node_reports()?),
             Request::Activity => Response::Activity(Box::new(self.activity_report()?)),

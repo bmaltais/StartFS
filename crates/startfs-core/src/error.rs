@@ -32,6 +32,10 @@ pub enum Error {
         "cannot purge while a member is unreachable ({0}): it would keep its copies and hand them back to the others when it returns; bring it back, or `startfs remove` it if it is gone for good"
     )]
     PurgeNeedsEveryMember(String),
+    #[error("{0} is not a release tag (expected something like v1.10.0)")]
+    BadRelease(String),
+    #[error("cannot find the latest release: {0}")]
+    NoRelease(String),
     #[error("no such token")]
     NoSuchToken,
     #[error("token not recognised")]
