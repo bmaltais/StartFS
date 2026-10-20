@@ -60,6 +60,7 @@ impl Daemon {
                         .lock()
                         .unwrap()
                         .insert((from, id), (at, data));
+                    self.prune_chunk_replies();
                 }
             }
             Message::ChunkPush(id, data) => {

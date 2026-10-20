@@ -45,6 +45,8 @@ commands:
 enum CliError {
     #[error("{USAGE}")]
     Usage,
+    #[error("unexpected argument {0}\n{USAGE}")]
+    UnexpectedArgument(String),
     #[error("missing {0}\n{USAGE}")]
     MissingFlag(String),
     #[error("missing value for {0}")]
@@ -137,6 +139,11 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         return Err(CliError::Usage);
     };
     let rest = &args[1..];
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    check_arguments(&command, rest)?;
     match command.as_str() {
         "daemon" => {
             let config_file = config_file
@@ -334,6 +341,40 @@ fn print_token(token: &str, rest: &[String]) {
     } else {
         println!("{token}");
     }
+}
+
+/// What a command accepts: flags that take a value, flags that stand alone, and
+/// how many bare arguments. Anything else is an error, so a mistyped flag never
+/// runs a command that ignores it.
+fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
+    let (valued, alone, positional): (&[&str], &[&str], usize) = match command {
+        "daemon" => (&["--mount"], &[], 0),
+        "create" => (&["--name", "--copies"], &["--example"], 0),
+        "status" | "activity" | "stats" => (&[], &["--json"], 0),
+        "join" => (&["--offer"], &[], 1),
+        "token" => (&[], &["--example"], 0),
+        "remove" | "revoke" => (&[], &[], 1),
+        "config" => (&["--offer", "--copies", "--activity"], &[], 0),
+        // purge, leave and unknown commands (reported as usage later)
+        _ => (&[], &[], 0),
+    };
+    let mut bare = 0;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if valued.contains(&arg.as_str()) {
+            args.next();
+        } else if alone.contains(&arg.as_str()) {
+            continue;
+        } else {
+            if !arg.starts_with('-') {
+                bare += 1;
+            }
+            if arg.starts_with('-') || bare > positional {
+                return Err(CliError::UnexpectedArgument(arg.clone()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn flag_value(args: &[String], name: &str) -> Result<String, CliError> {

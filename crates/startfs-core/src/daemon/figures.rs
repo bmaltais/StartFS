@@ -1,6 +1,6 @@
 //! The activity view: this node's recent rates, queues and resource use.
 
-use super::{DOWN_AFTER, Daemon};
+use super::{DOWN_AFTER, Daemon, UNCLAIMED_REPLY_BYTES, answer_bytes};
 use crate::activity::{ActivityReport, PeerActivity, QueueActivity, Structure, Structures};
 use crate::control::NodeState;
 use crate::error::Error;
@@ -67,10 +67,7 @@ impl Daemon {
         let (decoded_entries, decoded_bytes, decoded_limit) = self.fs.decoded_stats();
         let (reply_entries, reply_bytes) = {
             let replies = self.chunk_replies.lock().unwrap();
-            let bytes = replies
-                .values()
-                .map(|(_, a)| a.as_ref().map_or(0, |d| d.len() as u64))
-                .sum();
+            let bytes = replies.values().map(|(_, a)| answer_bytes(a)).sum();
             (replies.len() as u64, bytes)
         };
         let structures = Structures {
@@ -85,7 +82,7 @@ impl Daemon {
             chunk_replies: Some(Structure {
                 entries: reply_entries,
                 bytes: Some(reply_bytes),
-                limit_bytes: None,
+                limit_bytes: Some(UNCLAIMED_REPLY_BYTES),
             }),
             decoded_cache: Some(Structure {
                 entries: decoded_entries,

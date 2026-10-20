@@ -421,3 +421,30 @@ fn cli_purges_deleted_data_without_waiting_for_the_retention() {
     let status = stdout(&startfs(data, &["status"]));
     assert!(status.contains("purge in progress"), "{status}");
 }
+
+#[test]
+fn help_prints_usage_and_an_unknown_flag_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "1"],
+    ));
+
+    let help = stdout(&startfs(data, &["purge", "--help"]));
+    assert!(help.contains("usage: startfs"), "{help}");
+    let typo = startfs(data, &["purge", "--hlep"]);
+    assert!(!typo.status.success());
+    assert!(
+        String::from_utf8_lossy(&typo.stderr).contains("unexpected argument --hlep"),
+        "{}",
+        String::from_utf8_lossy(&typo.stderr)
+    );
+    let stray = startfs(data, &["leave", "now"]);
+    assert!(!stray.status.success());
+
+    let status = stdout(&startfs(data, &["status"]));
+    assert!(!status.contains("purge in progress"), "{status}");
+    assert!(!status.contains("leaving"), "{status}");
+}

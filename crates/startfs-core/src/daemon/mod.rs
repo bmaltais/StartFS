@@ -55,6 +55,13 @@ const DRAIN_MIN: usize = 16;
 /// The most a tick handles, so the entries it batches stay bounded when every message is cheap.
 const DRAIN_MAX: usize = 2048;
 
+/// How long a chunk reply that nobody fetched stays before it is dropped. A fetch
+/// gives up long before this, so a reply still here was late or a duplicate.
+const UNCLAIMED_REPLY_TTL: Duration = Duration::from_secs(60);
+
+/// The most chunk data unclaimed replies may hold together; the oldest go first.
+const UNCLAIMED_REPLY_BYTES: u64 = 16 << 20;
+
 /// How often the operation log is compacted.
 const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How often freed heap memory is handed back to the OS.
@@ -166,6 +173,11 @@ fn staging_limit(config: &Config, offer: u64) -> u64 {
 
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
 type ChunkAnswer = Option<Vec<u8>>;
+
+/// The chunk data an answer holds, for the unclaimed replies' byte figure and cap.
+fn answer_bytes(answer: &ChunkAnswer) -> u64 {
+    answer.as_ref().map_or(0, |d| d.len() as u64)
+}
 
 /// Fetches chunks from peers on behalf of the filesystem.
 struct PeerChunks(Weak<Daemon>);
@@ -297,6 +309,7 @@ impl Daemon {
         };
         let mut busy = false;
         let mut timer = self.activity.tick_timer();
+        self.prune_chunk_replies();
         // Peers and replication only see committed writes; a file still being
         // written keeps batching until it has been quiet for the commit delay.
         self.fs
@@ -705,6 +718,29 @@ impl Daemon {
             s.set_peers(&peers);
         }
     }
+    /// Drop the chunk replies nobody claimed in time, then the oldest ones until
+    /// what is left fits the byte cap.
+    fn prune_chunk_replies(&self) {
+        let now = self.clock.now();
+        let ttl = UNCLAIMED_REPLY_TTL.as_nanos() as Nanos;
+        let mut replies = self.chunk_replies.lock().unwrap();
+        replies.retain(|_, (at, _)| now.saturating_sub(*at) < ttl);
+        let mut total: u64 = replies.values().map(|(_, a)| answer_bytes(a)).sum();
+        if total <= UNCLAIMED_REPLY_BYTES {
+            return;
+        }
+        let mut by_age: Vec<_> = replies.iter().map(|(k, (at, _))| (*at, *k)).collect();
+        by_age.sort();
+        for (_, key) in by_age {
+            if total <= UNCLAIMED_REPLY_BYTES {
+                break;
+            }
+            if let Some((_, a)) = replies.remove(&key) {
+                total -= answer_bytes(&a);
+            }
+        }
+    }
+
     fn wait_for<T>(&self, mut poll: impl FnMut() -> Option<T>) -> Option<T> {
         let hook = self.wait.lock().unwrap().clone();
         for _ in 0..WAIT_ROUNDS {
