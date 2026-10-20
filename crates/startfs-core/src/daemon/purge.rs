@@ -1,6 +1,7 @@
 //! `startfs purge`: reclaim deleted data now instead of after the retention period.
 
-use super::{DOWN_AFTER, Daemon};
+use super::Daemon;
+use super::standing::is_up;
 use crate::control::PurgeReport;
 use crate::error::Error;
 use crate::protocol::Message;
@@ -26,11 +27,7 @@ impl Daemon {
             let m = self.membership.lock().unwrap();
             (m.me(), m.members())
         };
-        let up = |endpoint| {
-            heard
-                .get(&endpoint)
-                .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64)
-        };
+        let up = |endpoint| is_up(heard.get(&endpoint).copied(), now);
         let away: Vec<String> = members
             .iter()
             .filter(|m| Some(m.id) != me && !up(m.endpoint))

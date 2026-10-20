@@ -1,6 +1,7 @@
 //! The status report: this node's view of the filesystem and its health.
 
-use super::{DOWN_AFTER, Daemon};
+use super::Daemon;
+use super::standing::{is_up, node_state};
 use crate::control::{
     GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
     Shortfall, Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
@@ -163,11 +164,7 @@ impl Daemon {
             let membership = self.membership.lock().unwrap();
             let heard = self.heard.lock().unwrap();
             let peers = self.peer_health.lock().unwrap();
-            let up = |endpoint: &NodeId| {
-                heard
-                    .get(endpoint)
-                    .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64)
-            };
+            let up = |endpoint: &NodeId| is_up(heard.get(endpoint).copied(), now);
             membership
                 .members()
                 .iter()
@@ -261,11 +258,7 @@ impl Daemon {
             (m.members(), m.me())
         };
         let heard = self.heard.lock().unwrap().clone();
-        let up = |m: &Member| {
-            heard
-                .get(&m.endpoint)
-                .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64)
-        };
+        let up = |m: &Member| is_up(heard.get(&m.endpoint).copied(), now);
         let asked: Vec<NodeId> = members
             .iter()
             .filter(|m| Some(m.id) != me && up(m))
@@ -313,6 +306,7 @@ impl Daemon {
         let now = self.clock.now();
         let heard = self.heard.lock().unwrap();
         let peer_health = self.peer_health.lock().unwrap();
+        let behind_now = self.behind.lock().unwrap().clone();
         let transport = self.transport();
         let standin_days = filesystem.as_ref().map_or(0, |f| f.standin_days);
         let mut unheard = Vec::new();
@@ -322,10 +316,7 @@ impl Daemon {
             .into_iter()
             .map(|m| {
                 let is_self = membership.me() == Some(m.id);
-                let up = is_self
-                    || heard
-                        .get(&m.endpoint)
-                        .is_some_and(|t| now.saturating_sub(*t) < DOWN_AFTER.as_nanos() as u64);
+                let up = is_self || is_up(heard.get(&m.endpoint).copied(), now);
                 if !is_self {
                     // Only a member that is up speaks for its own chunks.
                     match peer_health.get(&m.endpoint) {
@@ -342,15 +333,7 @@ impl Daemon {
                 MemberStatus {
                     id: m.id,
                     addr: m.addr,
-                    state: if m.leaving {
-                        NodeState::Leaving
-                    } else if up {
-                        NodeState::Online
-                    } else if lost.contains(&m.id) {
-                        NodeState::Lost
-                    } else {
-                        NodeState::Down
-                    },
+                    state: node_state(m.leaving, up, lost.contains(&m.id)),
                     offer_bytes: m.offer_bytes,
                     weight_bytes: m.weight_bytes,
                     site: m.site,
@@ -362,7 +345,15 @@ impl Daemon {
                     } else {
                         peer_health.get(&m.endpoint).map(|(_, h)| h.load)
                     }
-                    .filter(|l| l.is_behind(self.config.behind_inbox_messages, false)),
+                    .filter(|l| {
+                        // A peer is behind by the same verdict the replicator acts on
+                        // (with its hysteresis); this node has no gossiped verdict.
+                        if is_self {
+                            l.is_behind(self.config.behind_inbox_messages, false)
+                        } else {
+                            behind_now.contains(&m.id)
+                        }
+                    }),
                     standin_secs_left: self.standin_secs_left(m.id, standin_days, now),
                     last_seen: (!up).then(|| {
                         last_seen(
@@ -409,7 +400,7 @@ impl Daemon {
         let storage_nodes = membership
             .members()
             .iter()
-            .filter(|m| m.share() > 0 && !m.leaving && !full.contains(&m.id))
+            .filter(|m| m.takes_copies() && !full.contains(&m.id))
             .count() as u32;
         let copies_possible = filesystem
             .as_ref()
@@ -461,17 +452,12 @@ impl Daemon {
             };
             let all = membership.members();
             // A site only counts if some member there offers space; a full or lost one still does.
-            let offering = |m: &&crate::members::Member| m.offer_bytes > 0 && !m.leaving;
+            let offering = |m: &&crate::members::Member| m.takes_copies();
             let declared: std::collections::HashSet<String> =
                 all.iter().filter(offering).map(&site).collect();
             let reachable: std::collections::HashSet<String> = all
                 .iter()
-                .filter(|m| {
-                    m.offer_bytes > 0
-                        && !m.leaving
-                        && !full.contains(&m.id)
-                        && !lost.contains(&m.id)
-                })
+                .filter(|m| m.takes_copies() && !full.contains(&m.id) && !lost.contains(&m.id))
                 .map(&site)
                 .collect();
             let wanted = (f.copies as usize).min(declared.len());
