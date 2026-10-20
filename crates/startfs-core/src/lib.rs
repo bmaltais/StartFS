@@ -22,5 +22,6 @@ pub mod resources;
 pub mod scrub;
 pub mod sync;
 pub mod upgrade;
+pub mod wake;
 
 pub use error::Error;

@@ -3,7 +3,8 @@
 use crate::identity::{TailscaleWhois, Whois};
 use crate::quic::QuicTransport;
 use startfs_core::config::Config;
-use startfs_core::daemon::Daemon;
+use startfs_core::daemon::{BUSY_WAIT, Daemon};
+use startfs_core::wake::Waker;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -51,18 +52,27 @@ const SLOW_TICK: Duration = Duration::from_secs(2);
 /// Drives [`Daemon::tick`] on a background thread until dropped, and
 /// [`Daemon::keepalive`] on another so a slow tick does not make the node look
 /// down to its peers.
+///
+/// Neither polls. The tick sleeps until a message arrives, a write leaves work, or
+/// [`Daemon::idle_wait`] is up, so a quiet node wakes a few times a second instead
+/// of a hundred.
 pub struct Ticker {
     stop: Arc<AtomicBool>,
+    wakers: [Arc<Waker>; 2],
     threads: Vec<JoinHandle<()>>,
 }
 
 impl Ticker {
     /// Attach the transport to the daemon and start ticking.
     pub fn start(daemon: Arc<Daemon>, transport: Arc<QuicTransport>) -> Self {
+        let tick_waker = Arc::new(Waker::default());
+        let keepalive_waker = Arc::new(Waker::default());
+        transport.set_waker(tick_waker.clone());
+        daemon.fs().set_waker(tick_waker.clone());
         daemon.attach(transport);
         let stop = Arc::new(AtomicBool::new(false));
         let tick = {
-            let (stop, daemon) = (stop.clone(), daemon.clone());
+            let (stop, daemon, waker) = (stop.clone(), daemon.clone(), tick_waker.clone());
             std::thread::Builder::new()
                 .name("startfs-tick".into())
                 .spawn(move || {
@@ -75,25 +85,32 @@ impl Ticker {
                                 started.elapsed().as_secs_f64()
                             );
                         }
-                        std::thread::sleep(Duration::from_millis(if busy { 1 } else { 10 }));
+                        if busy {
+                            std::thread::sleep(Duration::from_millis(1));
+                        } else if waker.wait(daemon.idle_wait()) {
+                            // Woken: rounds still come no closer than 10 ms, so a stream of
+                            // writes or messages is handled in batches, not one round each.
+                            std::thread::sleep(BUSY_WAIT.saturating_sub(started.elapsed()));
+                        }
                     }
                 })
                 .expect("spawn tick thread")
         };
         let keepalive = {
-            let stop = stop.clone();
+            let (stop, waker) = (stop.clone(), keepalive_waker.clone());
             std::thread::Builder::new()
                 .name("startfs-keepalive".into())
                 .spawn(move || {
                     while !stop.load(Ordering::SeqCst) {
                         let _hello_sent = daemon.keepalive();
-                        std::thread::sleep(Duration::from_millis(250));
+                        waker.wait(daemon.keepalive_wait());
                     }
                 })
                 .expect("spawn keepalive thread")
         };
         Self {
             stop,
+            wakers: [tick_waker, keepalive_waker],
             threads: vec![tick, keepalive],
         }
     }
@@ -106,6 +123,9 @@ const TICK_GRACE: Duration = Duration::from_secs(3);
 impl Drop for Ticker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        for w in &self.wakers {
+            w.wake();
+        }
         let started = Instant::now();
         for t in self.threads.drain(..) {
             while !t.is_finished() && started.elapsed() < TICK_GRACE {

@@ -425,6 +425,29 @@ impl Replicator {
         busy | self.poll_heal(view, transport)
     }
 
+    /// When the replicator next has something to do without a peer's answer arriving: zero if it
+    /// is due now, `None` if there is nothing to wait for.
+    pub fn next_wake(&self) -> Option<Nanos> {
+        let tracks = self
+            .state
+            .lock()
+            .unwrap()
+            .tracks
+            .values()
+            .filter(|t| !t.settled)
+            .map(|t| t.wake)
+            .min();
+        // A heal that has not asked yet is due now; one that has asked retries after RETRY.
+        let heals = self
+            .heal
+            .lock()
+            .unwrap()
+            .values()
+            .map(|h| h.asked.map_or(0, |at| at + RETRY.as_nanos() as u64))
+            .min();
+        tracks.into_iter().chain(heals).min()
+    }
+
     fn work(
         &self,
         st: &mut State,

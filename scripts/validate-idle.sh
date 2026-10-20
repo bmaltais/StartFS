@@ -14,19 +14,19 @@ sf B join "$TOKEN" --offer 10G >/dev/null
 sleep 2
 
 sample() { # label
-  local t0 c0a c0b
-  c0a=$(cpu_ticks "$PID_A"); c0b=$(cpu_ticks "$PID_B"); t0=$(now)
+  local t0 c0a c0b w0
+  c0a=$(cpu_ticks "$PID_A"); c0b=$(cpu_ticks "$PID_B"); w0=$(wakeups "$PID_A"); t0=$(now)
   sleep "$SECS"
   local dt; dt=$(elapsed "$t0")
   python3 - "$1" "$dt" "$c0a" "$(cpu_ticks "$PID_A")" "$c0b" "$(cpu_ticks "$PID_B")" \
     "$(rss_kb "$PID_A")" "$(hwm_kb "$PID_A")" "$(rss_kb "$PID_B")" "$(hwm_kb "$PID_B")" \
-    "$(ls /proc/$PID_A/task | wc -l)" <<'PY'
+    "$(ls /proc/$PID_A/task | wc -l)" "$w0" "$(wakeups "$PID_A")" <<'PY'
 import sys
-l, dt, a0, a1, b0, b1, ra, ha, rb, hb, th = sys.argv[1:]
+l, dt, a0, a1, b0, b1, ra, ha, rb, hb, th, w0, w1 = sys.argv[1:]
 dt = float(dt)
 print(f"{l}: A rss={int(ra)/1024:.1f}MiB (peak {int(ha)/1024:.1f}) cpu={(int(a1)-int(a0))/100/dt*100:.2f}% | "
       f"B rss={int(rb)/1024:.1f}MiB (peak {int(hb)/1024:.1f}) cpu={(int(b1)-int(b0))/100/dt*100:.2f}% | "
-      f"threads(A)={th} window={dt:.0f}s")
+      f"threads(A)={th} wakeups(A)={(int(w1)-int(w0))/dt:.0f}/s window={dt:.0f}s")
 PY
 }
 

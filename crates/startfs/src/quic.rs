@@ -22,11 +22,12 @@ use rustls::crypto::{CryptoProvider, ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use startfs_core::net::{Inbox, NodeId, Transport};
 use startfs_core::protocol::{Message, NOTICE_BYTE, PROTOCOL_VERSION};
+use startfs_core::wake::Waker;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -101,6 +102,8 @@ struct Shared {
     /// restarted: the first is dead and so is our own link to it.
     dialed: Mutex<HashMap<NodeId, quinn::Connection>>,
     inbox: Mutex<Sender<(NodeId, Vec<u8>)>>,
+    /// Woken when something arrives that the daemon should not leave waiting.
+    waker: OnceLock<Arc<Waker>>,
     /// Messages and bytes sent into the inbox and not yet taken out.
     inbox_messages: AtomicU64,
     inbox_bytes: AtomicU64,
@@ -146,6 +149,7 @@ impl Drop for Held {
 impl Shared {
     /// Hand the daemon a message as if `from` had sent it over a working connection.
     fn deliver(&self, from: NodeId, body: Vec<u8>) {
+        let background = Message::is_background(&body);
         self.inbox_messages.fetch_add(1, Ordering::Relaxed);
         self.inbox_bytes
             .fetch_add(body.len() as u64, Ordering::Relaxed);
@@ -154,6 +158,16 @@ impl Shared {
             reason = "best-effort: the daemon may have stopped receiving"
         )]
         let _ = self.inbox.lock().unwrap().send((from, body));
+        if !background {
+            self.wake();
+        }
+    }
+
+    /// Cut the daemon's idle wait short: a message is waiting for it.
+    fn wake(&self) {
+        if let Some(w) = self.waker.get() {
+            w.wake();
+        }
     }
 
     /// Look a peer up with `tailscaled` and apply the tag policy.
@@ -234,6 +248,7 @@ impl QuicTransport {
             links: Mutex::new(HashMap::new()),
             dialed: Mutex::new(HashMap::new()),
             inbox: Mutex::new(tx),
+            waker: OnceLock::new(),
             inbox_messages: AtomicU64::new(0),
             inbox_bytes: AtomicU64::new(0),
             backlog: Mutex::new(HashMap::new()),
@@ -254,6 +269,12 @@ impl QuicTransport {
     /// The address this node listens on (and advertises).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Wake `waker` when a message arrives that the daemon should not leave waiting.
+    pub fn set_waker(&self, waker: Arc<Waker>) {
+        // Set once, when the tick starts; a second call keeps the first.
+        let _kept = self.shared.waker.set(waker);
     }
 
     fn runtime(&self) -> &tokio::runtime::Runtime {
@@ -509,6 +530,7 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
         if stream.read_exact(&mut body[head.len()..]).await.is_err() {
             return;
         }
+        let background = Message::is_background(&body);
         shared.inbox_messages.fetch_add(1, Ordering::Relaxed);
         shared
             .inbox_bytes
@@ -518,6 +540,9 @@ async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::Rec
             reason = "best-effort: the daemon may have stopped receiving"
         )]
         let _ = shared.inbox.lock().unwrap().send((from, body));
+        if !background {
+            shared.wake();
+        }
         shared.heard.lock().unwrap().insert(from, Instant::now());
     }
 }

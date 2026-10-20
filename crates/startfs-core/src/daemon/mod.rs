@@ -66,6 +66,15 @@ const UNCLAIMED_REPLY_TTL: Duration = Duration::from_secs(60);
 /// The most chunk data unclaimed replies may hold together; the oldest go first.
 const UNCLAIMED_REPLY_BYTES: u64 = 16 << 20;
 
+/// How soon the tick comes back when it has work that nothing will announce.
+pub const BUSY_WAIT: Duration = Duration::from_millis(10);
+/// The longest the tick sleeps with nothing to do. Every timer in a tick is seconds long, so
+/// this only bounds how late a change made outside it (a control command, a peer that went
+/// quiet) is noticed.
+pub const IDLE_WAIT: Duration = Duration::from_millis(500);
+/// The longest the keepalive sleeps between looks at what peers were last heard.
+pub const KEEPALIVE_WAIT: Duration = Duration::from_secs(1);
+
 /// How often the operation log is compacted.
 const COMPACT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How often freed heap memory is handed back to the OS.
@@ -440,6 +449,32 @@ impl Daemon {
         self.release_freed_memory();
         timer.finish();
         busy
+    }
+
+    /// How long the tick may sleep after a round that found nothing to do. Short while this
+    /// node has writes to commit or a chunk due, since nothing wakes the tick for those; when
+    /// it is quiet, until the next replicator deadline or [`IDLE_WAIT`]. A message, a write or
+    /// a shutdown cuts it short.
+    pub fn idle_wait(&self) -> Duration {
+        if self.fs.has_pending_writes() {
+            return BUSY_WAIT;
+        }
+        let Some(at) = self.replicator.next_wake() else {
+            return IDLE_WAIT;
+        };
+        Duration::from_nanos(at.saturating_sub(self.clock.now())).clamp(BUSY_WAIT, IDLE_WAIT)
+    }
+
+    /// How long the keepalive may sleep: until the next hello is due, but at most
+    /// [`KEEPALIVE_WAIT`] so it still refreshes what peers were last heard.
+    pub fn keepalive_wait(&self) -> Duration {
+        let since = self
+            .last_gossip
+            .lock()
+            .unwrap()
+            .map_or(u64::MAX, |t| self.clock.now().saturating_sub(t));
+        let left = (HELLO_INTERVAL.as_nanos() as u64).saturating_sub(since);
+        Duration::from_nanos(left).clamp(BUSY_WAIT, KEEPALIVE_WAIT)
     }
 
     /// A burst leaves the allocator holding most of what it freed; give it back.

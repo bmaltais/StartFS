@@ -104,6 +104,8 @@ impl LocalFs {
                 };
             }
             None => {
+                // The first buffered write of a file: the tick commits it once it is quiet.
+                self.wake_tick();
                 dirty.insert(
                     ino,
                     Dirty {
