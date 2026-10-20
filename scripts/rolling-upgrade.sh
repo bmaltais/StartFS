@@ -7,17 +7,21 @@
 # Run it in a terminal you can watch: the installer asks before restarting a daemon whose mount is
 # in use (STARTFS_FORCE=1 skips the question). Needs ssh access (keys) to every remote node.
 #
-# Usage: rolling-upgrade.sh vX.Y.Z NODE...
+# Usage: rolling-upgrade.sh [--fixpath] vX.Y.Z NODE...
+#   --fixpath: pass it to the installer on every node, so a missing PATH entry is added to the
+#   shell profile as it goes (a node already on vX.Y.Z gets the installer run for that alone).
 #   NODE is an ssh host, or `local` for this machine. Put the node that matters most last:
 #   it is upgraded with the most evidence from the others.
 # Environment: BUSY_MAX=50  QUIET_SECS=60  GOOD=1  TIMEOUT=900  STARTFS_BIN='~/.local/bin/startfs'
 set -uo pipefail
-[ $# -ge 2 ] || { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+FIXPATH=
+if [ "${1:-}" = --fixpath ]; then FIXPATH=--fixpath; shift; fi
+[ $# -ge 2 ] || { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 TAG=$1; shift
 WANT=${TAG#v}
 BUSY_MAX=${BUSY_MAX:-50}; QUIET_SECS=${QUIET_SECS:-60}; GOOD=${GOOD:-1}; TIMEOUT=${TIMEOUT:-900}
 BIN=${STARTFS_BIN:-'~/.local/bin/startfs'}
-INSTALL="curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | STARTFS_VERSION=$TAG sh"
+INSTALL="curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | STARTFS_VERSION=$TAG sh -s -- $FIXPATH"
 T0=$(date +%s)
 say() { printf '[%4ds] %s\n' $(( $(date +%s) - T0 )) "$*"; }
 
@@ -66,7 +70,12 @@ for n in "$@"; do
   # Ready at the old version or the new: a node upgraded by hand meanwhile is not stuck here.
   wait_ready "$n" 0 "$old|$WANT" || exit 1
   old=$(on "$n" "$BIN --version" | awk '{print $2}')
-  if [ "$old" = "$WANT" ]; then say "=== $n: already on $WANT"; continue; fi
+  if [ "$old" = "$WANT" ]; then
+    say "=== $n: already on $WANT"
+    # Nothing is restarted: the installer sees the version is current and only fixes the PATH.
+    [ -z "$FIXPATH" ] || ont "$n" "$INSTALL" || say "$n: --fixpath failed, going on"
+    continue
+  fi
   say "=== $n: upgrading $old -> $WANT"
   ont "$n" "$INSTALL" || { say "$n: INSTALL FAILED, stopping here"; exit 1; }
   say "$n: installed; waiting for it to be ready"

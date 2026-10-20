@@ -4,13 +4,15 @@
 # Run it again on every machine to upgrade; the README ("Upgrading") explains each step.
 #
 # Environment:
-#   STARTFS_VERSION=v1.5.9   install this release instead of the latest (may be a downgrade)
+#   STARTFS_VERSION=v1.6.0   install this release instead of the latest (may be a downgrade)
 #   INSTALL_DIR=DIR          where the binary goes (default ~/.local/bin)
 #   STARTFS_NO_SERVICE=1     install files only; never stop, start or enable the service
 #   STARTFS_BASE_URL=URL     download releases from URL/<tag>/ (testing)
 #   STARTFS_VERIFY_SECS=15   how long to wait for the new daemon to answer before rolling back
 #   STARTFS_FORCE=1          never ask before restarting a daemon whose mount is in use
 #   STARTFS_MOUNTPOINT=DIR   the mount to check for users before a restart (default ~/StartFS)
+# Flags (pipe form: ... | sh -s -- --fixpath):
+#   --fixpath                add INSTALL_DIR to PATH in your shell profile when it is missing
 set -eu
 
 repo=bmaltais/StartFS
@@ -21,6 +23,38 @@ label=com.startfs.daemon
 
 die() { echo "install: $*" >&2; exit 1; }
 say() { echo "install: $*"; }
+
+fixpath=
+for arg in "$@"; do
+  case "$arg" in
+    --fixpath) fixpath=1 ;;
+    *) die "unknown option: $arg (only --fixpath)" ;;
+  esac
+done
+
+# When install_dir is not on PATH: with --fixpath append the export to the login profile
+# (once), otherwise print the line to run. Last thing printed, so it is read before the next command.
+path_note() {
+  case ":$PATH:" in *":$install_dir:"*) return 0 ;; esac
+  line="export PATH=\"$install_dir:\$PATH\""
+  if [ -n "$fixpath" ]; then
+    case "$(basename "${SHELL:-sh}")" in
+      zsh) profile=${ZDOTDIR:-$HOME}/.zprofile ;;
+      *) if [ -e "$HOME/.bash_profile" ]; then profile=$HOME/.bash_profile; else profile=$HOME/.profile; fi ;;
+    esac
+    if grep -qxF "$line" "$profile" 2>/dev/null; then
+      say "$install_dir is already added to PATH in $profile."
+    else
+      printf '\n# Added by the startfs installer\n%s\n' "$line" >>"$profile"
+      say "Added $install_dir to PATH in $profile."
+    fi
+    say "It takes effect at your next login. In this shell, run:"
+  else
+    say "Note: $install_dir is not on your PATH, so 'startfs' will not be found yet. In this shell, run:"
+  fi
+  say "  $line"
+  [ -n "$fixpath" ] || say "To keep it, rerun the installer with --fixpath, or add that line to your shell profile."
+}
 
 # "startfs 1.0.1 (protocol 4)" -> 1.0.1 / 4 (older builds print no protocol).
 version_of() { "$1" --version 2>/dev/null | awk '{print $2}'; }
@@ -58,6 +92,7 @@ installed=
 if [ -n "$installed" ]; then
   if [ "v$installed" = "$version" ]; then
     say "startfs $installed is already up to date"
+    path_note
     exit 0
   fi
   if [ "$(newest_of "v$installed" "$version")" = "v$installed" ]; then
@@ -192,8 +227,6 @@ fi
 install -m755 "$new" "$bin.new"
 mv -f "$bin.new" "$bin"
 say "Installed $("$bin" --version) to $bin"
-path_missing=
-case ":$PATH:" in *":$install_dir:"*) ;; *) path_missing=1 ;; esac
 
 if [ "$os" = linux ]; then
   mkdir -p "$(dirname "$unit")"
@@ -237,10 +270,5 @@ else
   say "launchd agent (com.startfs.daemon.plist) is in the release tarball and is not set up for you."
 fi
 [ -n "$installed" ] && say "Upgraded $installed -> ${version#v}. Check the cluster with: startfs status"
-# Last, so it is the thing read before the next command (`startfs join ...`) is pasted.
-if [ -n "$path_missing" ]; then
-  say "Note: $install_dir is not on your PATH, so 'startfs' will not be found yet. In this shell, run:"
-  say "  export PATH=\"$install_dir:\$PATH\""
-  say "To keep it, add that line to ~/.profile (Ubuntu and Debian add ~/.local/bin by themselves at your next login)."
-fi
+path_note
 exit 0

@@ -75,6 +75,15 @@ echo "ok   fresh install enables and starts the service"
 tail -n 3 "$work/out" | grep -q 'export PATH="'"$HOME"'/.local/bin:\$PATH"' || fail "no PATH fix at the end"
 echo "ok   a missing PATH entry comes with the command that fixes it, as the last thing printed"
 
+# --fixpath writes the profile once and still prints the line for this shell.
+fix() { STARTFS_BASE_URL=file://$work/rel STARTFS_VERSION=v1.0.0 sh "$here/install.sh" --fixpath >"$work/out" 2>&1; }
+SHELL=/bin/bash fix || fail "--fixpath"
+fix || fail "--fixpath again"
+[ "$(grep -cF 'export PATH="'"$HOME"'/.local/bin:$PATH"' "$HOME/.profile")" = 1 ] || fail "profile line missing or duplicated"
+expect "already added to PATH" "$work/out"
+if sh "$here/install.sh" --bogus >"$work/out" 2>&1; then fail "unknown flag must fail"; fi
+echo "ok   --fixpath adds the PATH line to the profile once; unknown flags are rejected"
+
 PATH=$HOME/.local/bin:$PATH install_version v1.0.1 || fail "upgrade"
 refute "not on your PATH" "$work/out"
 expect "stop startfs.service" "$work/state/calls"
