@@ -16,7 +16,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
        startfs --version
@@ -535,21 +535,42 @@ fn daemon(
     Ok(())
 }
 
-static STOP: AtomicBool = AtomicBool::new(false);
+/// The write end of the pipe the signal handler wakes `wait_for_stop` through.
+static STOP_PIPE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn on_signal(_: libc::c_int) {
-    STOP.store(true, Ordering::SeqCst);
+    let fd = STOP_PIPE.load(Ordering::SeqCst);
+    // SAFETY: write(2) is async-signal-safe; a failed or short write only loses a wake-up
+    // that the pipe already holds.
+    unsafe {
+        libc::write(fd, [0u8].as_ptr().cast(), 1);
+    }
 }
 
 /// Block until SIGTERM or SIGINT arrives.
 fn wait_for_stop() {
-    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` has room for the two descriptors pipe(2) writes.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        eprintln!("startfs: cannot wait for a signal without a pipe");
+        return;
+    }
+    STOP_PIPE.store(fds[1], Ordering::SeqCst);
+    // SAFETY: the handler only writes to a pipe, which is async-signal-safe.
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
-    while !STOP.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    let mut byte = [0u8; 1];
+    loop {
+        // SAFETY: reads one byte into a buffer of one; an interrupted read is retried.
+        let n = unsafe { libc::read(fds[0], byte.as_mut_ptr().cast(), 1) };
+        if n > 0 {
+            return;
+        }
+        if n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
     }
 }
 

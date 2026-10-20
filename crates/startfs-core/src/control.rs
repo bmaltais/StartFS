@@ -12,6 +12,7 @@ use crate::ops::Nanos;
 use crate::upgrade::Progress;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -476,6 +477,8 @@ pub enum Response {
 /// A running control server; the socket is removed when this is dropped.
 pub struct Server {
     path: PathBuf,
+    /// A handle on the listening socket, to wake the thread blocked in accept on it.
+    listener: UnixListener,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -487,18 +490,17 @@ pub fn serve(daemon: Arc<Daemon>, path: &Path) -> std::io::Result<Server> {
     )]
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
-    listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
+    let wake_handle = listener.try_clone()?;
     let thread = std::thread::spawn(move || {
         while !flag.load(Ordering::SeqCst) {
+            // Blocks until a client connects; `Server::drop` connects once to end the wait.
             match listener.accept() {
                 Ok((stream, _)) => {
-                    #[allow(
-                        clippy::let_underscore_must_use,
-                        reason = "a failure here surfaces as a read error in answer"
-                    )]
-                    let _ = stream.set_nonblocking(false);
+                    if flag.load(Ordering::SeqCst) {
+                        break;
+                    }
                     let d = daemon.clone();
                     std::thread::spawn(move || {
                         #[allow(
@@ -508,12 +510,16 @@ pub fn serve(daemon: Arc<Daemon>, path: &Path) -> std::io::Result<Server> {
                         let _ = answer(&d, stream);
                     });
                 }
-                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                // A failed accept (a client that left before it was taken, no descriptors
+                // left) would otherwise spin: let it pass.
+                Err(_) if flag.load(Ordering::SeqCst) => break,
+                Err(_) => std::thread::sleep(Duration::from_millis(100)),
             }
         }
     });
     Ok(Server {
         path: path.to_path_buf(),
+        listener: wake_handle,
         stop,
         thread: Some(thread),
     })
@@ -546,6 +552,17 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // The server thread is blocked in accept. On Linux shutting the socket down ends that
+        // wait; elsewhere a connection of its own does, if the socket file is still there.
+        // SAFETY: the descriptor is open for as long as `self.listener` is.
+        unsafe {
+            libc::shutdown(self.listener.as_raw_fd(), libc::SHUT_RD);
+        }
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "teardown: if nobody can connect, the thread is not blocked on the socket"
+        )]
+        let _ = UnixStream::connect(&self.path);
         if let Some(t) = self.thread.take() {
             #[allow(
                 clippy::let_underscore_must_use,

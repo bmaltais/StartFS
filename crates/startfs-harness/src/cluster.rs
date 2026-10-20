@@ -306,6 +306,12 @@ impl Cluster {
         }
     }
 
+    /// How long node `i`'s tick would sleep after a round that found nothing to do.
+    pub fn idle_wait(&self, i: usize) -> Duration {
+        let daemon = self.nodes[i].daemon.lock().unwrap().clone();
+        daemon.expect("node is up").idle_wait()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

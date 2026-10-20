@@ -190,6 +190,14 @@ impl Message {
         raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(7 | 8))
     }
 
+    /// Whether an encoded message is periodic gossip that nothing waits on, so a node that is
+    /// idle need not wake for it: it reads it at its next round.
+    pub fn is_background(raw: &[u8]) -> bool {
+        // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`
+        // and `Upgrade`.
+        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16))
+    }
+
     /// What an encoded message is for, as the activity view groups traffic.
     pub fn category(raw: &[u8]) -> Category {
         // The variant index again; see `is_bulk`.
@@ -414,5 +422,40 @@ mod tests {
         ];
         assert!(bulk.iter().all(|m| Message::is_bulk(&m.encode())));
         assert!(small.iter().all(|m| !Message::is_bulk(&m.encode())));
+    }
+
+    #[test]
+    fn only_periodic_gossip_is_background() {
+        let id = [1u8; 32];
+        let background = [
+            Message::Members(vec![]),
+            Message::Tokens(vec![]),
+            Message::Health(Health::default()),
+            Message::Copies { copies: 3, rev: 2 },
+            Message::Upgrade(UpgradeGossip {
+                running: crate::upgrade::Release {
+                    version: "1.10.0".into(),
+                    protocol: 15,
+                },
+                intent: None,
+                progress: None,
+                pause_secs: None,
+            }),
+        ];
+        let urgent = [
+            Message::Hello(Frontier::default()),
+            Message::Entries(vec![]),
+            Message::ChunkRequest(id),
+            Message::ChunkReply(id, None),
+            Message::ChunkAck(id, Replica::Stored),
+            Message::StatsRequest,
+            Message::Purge,
+        ];
+        assert!(
+            background
+                .iter()
+                .all(|m| Message::is_background(&m.encode()))
+        );
+        assert!(urgent.iter().all(|m| !Message::is_background(&m.encode())));
     }
 }

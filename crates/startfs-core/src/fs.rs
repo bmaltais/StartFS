@@ -10,6 +10,7 @@ use crate::clock::Clock;
 use crate::members::MemberId;
 use crate::oplog::{Entry, Frontier, Hlc, Op, Snapshot};
 use crate::ops::*;
+use crate::wake::Waker;
 use redb::{
     Database, Durability, ReadOnlyTable, ReadableDatabase, ReadableTable, Table, TableDefinition,
 };
@@ -18,7 +19,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Files up to this size live inside their metadata record, with no chunk.
 pub const INLINE_MAX: usize = 2048;
@@ -294,6 +295,8 @@ pub struct LocalFs {
     unsynced: AtomicBool,
     /// When the last lazy commit happened.
     last_lazy: AtomicU64,
+    /// Woken when a write leaves work for the background tick.
+    waker: OnceLock<Arc<Waker>>,
     /// Whether applying a peer's entries leaves the tree to [`Self::end_batch`].
     batching: AtomicBool,
     /// Whether a batch left the tree to rebuild.
@@ -356,6 +359,7 @@ impl LocalFs {
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
             last_lazy: AtomicU64::new(0),
+            waker: OnceLock::new(),
             batching: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             lock: Mutex::new(()),
@@ -501,6 +505,8 @@ impl LocalFs {
                 }
                 // A durable commit also persists the lazy ones before it.
                 self.unsynced.store(lazy, Ordering::SeqCst);
+                // Peers are waiting for the entry this commit logged.
+                self.wake_tick();
                 Ok(v)
             }
             other => {
@@ -519,6 +525,24 @@ impl LocalFs {
             self.run_as(true, Durability::Immediate, |_| Ok(()))?;
         }
         Ok(())
+    }
+
+    /// Wake `waker` when a write leaves work for the background tick.
+    pub fn set_waker(&self, waker: Arc<Waker>) {
+        // Set once, when the tick starts; a second call keeps the first.
+        let _kept = self.waker.set(waker);
+    }
+
+    pub(super) fn wake_tick(&self) {
+        if let Some(w) = self.waker.get() {
+            w.wake();
+        }
+    }
+
+    /// Whether the tick has writes of this node to commit or make durable, and
+    /// so has to come back soon even if nobody wakes it.
+    pub fn has_pending_writes(&self) -> bool {
+        !self.dirty.lock().unwrap().is_empty() || self.has_unsynced()
     }
 
     /// Whether commits are waiting for a durable one.

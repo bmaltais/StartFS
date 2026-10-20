@@ -87,3 +87,5 @@ trap cleanup EXIT
 rss_kb() { awk '/^VmRSS/{print $2}' "/proc/$1/status"; }
 hwm_kb() { awk '/^VmHWM/{print $2}' "/proc/$1/status"; }
 cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat"; }
+# Voluntary context switches of every thread of PID: one per wake-up from a sleep or a wait.
+wakeups() { cat /proc/"$1"/task/*/status 2>/dev/null | awk '/^voluntary_ctxt_switches/ {n += $2} END {print n + 0}'; }
