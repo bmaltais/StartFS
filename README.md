@@ -165,6 +165,12 @@ lags by about a minute), prints one status line every 10 s, and stops without to
 a node is not ready after 15 minutes. Run it in a terminal you can watch: the installer asks before
 restarting a daemon whose mount is in use.
 
+A release that changes the protocol (the installer warns `protocol N -> M`) cannot be rolled out
+that way: members on different protocols cannot see each other, so the first node never gets to
+`data: SAFE` with every member up. Add `--lockstep`: it installs on every node in turn, waiting
+only until the daemon answers at the new version, then waits for each node to be ready. The
+cluster cannot sync for those few minutes, and nothing is lost; rerunning skips nodes already done.
+
 ## Quickstart
 
 The daemon is already running after the Linux install (on macOS or a manual install, run

@@ -40,6 +40,9 @@ installs, then waits for `data: SAFE`, every member up, an empty inbox (`startfs
 quiet tick, and stops on a node that does not get there. Never restart a node that is still
 catching up: a restarted node re-checks all the chunks it holds (`status` shows `re-checking: N chunks`
 while it waits for answers; that is not a shortfall), the others only those whose placement changed.
+When the installer warns that the protocol changed, add `--lockstep` (`scripts/rolling-upgrade.sh
+--lockstep vX.Y.Z local HOST...`): the nodes cannot be calm one by one while the protocols differ, so it
+installs on all of them first, then waits for the cluster. Without it the run stalls on the first node.
 Expect a member that is down to show as `DEGRADED` until it is back.
 
 ## Create a filesystem (first machine)
