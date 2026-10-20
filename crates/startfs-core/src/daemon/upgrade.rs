@@ -170,6 +170,10 @@ impl Upgrades {
 struct Peer {
     id: MemberId,
     up: bool,
+    /// Heard from within the asleep threshold: not absent. A member is only left out
+    /// of an upgrade's counting once it is that long gone, so a pause in this node's own
+    /// hearing (it slept, it restarted) does not leave everyone out.
+    present: bool,
     /// When anything was last heard from it, when ever.
     heard: Option<Nanos>,
     gossip: Option<UpgradeGossip>,
@@ -191,7 +195,9 @@ impl Peer {
 enum Action {
     Nothing,
     /// Swap the release in; a rolling upgrade announces a pause first.
-    Swap { pause: bool },
+    Swap {
+        pause: bool,
+    },
     /// Send the go-signal of a lockstep upgrade.
     Go,
     /// The issuer is gone and the stage expired.
@@ -260,11 +266,8 @@ impl Daemon {
             None => installer.latest_stable().map_err(Error::NoRelease)?,
         };
         let views = self.peer_views(now);
-        let already = running.tag() == tag
-            && views
-                .iter()
-                .filter(|p| p.up)
-                .all(|p| p.runs(&tag));
+        let already =
+            running.tag() == tag && views.iter().filter(|p| p.present).all(|p| p.runs(&tag));
         if already {
             return Ok(UpdateReport {
                 release: tag,
@@ -311,9 +314,11 @@ impl Daemon {
             .filter(|m| Some(m.id) != me)
             .map(|m| {
                 let state = up.peers.get(&m.endpoint);
+                let seen = heard.get(&m.endpoint).copied().unwrap_or(self.started);
                 Peer {
                     id: m.id,
                     up: is_up(heard.get(&m.endpoint).copied(), now),
+                    present: now.saturating_sub(seen) < STANDIN_AFTER.as_nanos() as u64,
                     heard: heard.get(&m.endpoint).copied(),
                     gossip: state.map(|s| s.gossip.clone()),
                     paused: state.is_some_and(|s| s.pause_until.is_some_and(|t| t > now)),
@@ -599,17 +604,35 @@ impl Daemon {
             return Action::Nothing;
         };
         let lockstep = staged.protocol != running.protocol;
-        // A mount in use holds the restart until the user frees it or forces it.
-        let waiting = !up.forced && {
-            let recheck = up.mount.is_none_or(|(at, _)| {
-                now.saturating_sub(at) >= MOUNT_RECHECK.as_nanos() as u64
+        // A lockstep stage is kept only while the member that ordered it is around to
+        // give the go-signal; otherwise nothing has restarted and it is dropped.
+        let lapsed = intent
+            .issuer
+            .filter(|issuer| *issuer != me)
+            .is_some_and(|issuer| {
+                views.iter().find(|p| p.id == issuer).is_none_or(|p| {
+                    !p.up
+                        && now.saturating_sub(p.heard.unwrap_or(self.started))
+                            >= STAGE_LEASE.as_nanos() as u64
+                })
             });
-            if recheck {
-                up.mount = Some((now, installer.mount_in_use()));
-            }
-            up.mount.is_some_and(|(_, busy)| busy)
-        };
-        up.progress = Some(if waiting {
+        if lockstep && !intent.go && lapsed {
+            return Action::Cancel;
+        }
+        // A mount in use holds the restart until the user frees it or forces it. Until
+        // the installer has said, nothing restarts either.
+        let recheck = up
+            .mount
+            .is_none_or(|(at, _)| now.saturating_sub(at) >= MOUNT_RECHECK.as_nanos() as u64);
+        if !up.forced
+            && recheck
+            && let Some(busy) = installer.mount_in_use()
+        {
+            up.mount = Some((now, busy));
+        }
+        let waiting = !up.forced && up.mount.is_none_or(|(_, busy)| busy);
+        let unknown = !up.forced && up.mount.is_none();
+        up.progress = Some(if waiting && !unknown {
             Progress::WaitingOnMount
         } else {
             Progress::Staged
@@ -628,7 +651,7 @@ impl Daemon {
             return Action::Swap { pause: false };
         }
         if intent.issuer == Some(me) {
-            let ready = views.iter().filter(|p| p.up).all(|p| {
+            let ready = views.iter().filter(|p| p.present).all(|p| {
                 p.runs(&intent.tag)
                     || p.gossip.as_ref().is_some_and(|g| {
                         g.intent.as_ref().is_some_and(|i| i.rev == intent.rev)
@@ -637,18 +660,7 @@ impl Daemon {
             });
             return if ready { Action::Go } else { Action::Nothing };
         }
-        let lapsed = intent.issuer.is_some_and(|issuer| {
-            views.iter().find(|p| p.id == issuer).is_none_or(|p| {
-                !p.up
-                    && now.saturating_sub(p.heard.unwrap_or(self.started))
-                        >= STAGE_LEASE.as_nanos() as u64
-            })
-        });
-        if lapsed {
-            Action::Cancel
-        } else {
-            Action::Nothing
-        }
+        Action::Nothing
     }
 
     /// Whether the data is safe enough for the next member to restart: nothing is
@@ -729,10 +741,16 @@ impl Daemon {
             _ => None,
         };
         let complete = running.tag() == intent.tag
-            && views.iter().filter(|p| p.up).all(|p| p.runs(&intent.tag));
+            && views
+                .iter()
+                .filter(|p| p.present)
+                .all(|p| p.runs(&intent.tag));
         let split = views
             .iter()
-            .filter(|p| self.protocol_of(&up, p.id).is_some_and(|n| n != running.protocol))
+            .filter(|p| {
+                self.protocol_of(&up, p.id)
+                    .is_some_and(|n| n != running.protocol)
+            })
             .map(|p| p.id)
             .collect();
         Some(UpgradeStatus {
@@ -753,7 +771,11 @@ impl Daemon {
         let up = self.upgrades.lock().unwrap();
         if is_self {
             let running = self.installer().current();
-            return (Some(running.tag()), Some(running.protocol), up.progress.clone());
+            return (
+                Some(running.tag()),
+                Some(running.protocol),
+                up.progress.clone(),
+            );
         }
         match up.peers.get(&endpoint) {
             Some(p) => (
@@ -805,7 +827,7 @@ fn rolling_turn(
     }
     let next = views
         .iter()
-        .filter(|p| p.up && !p.runs(&intent.tag))
+        .filter(|p| p.present && !p.runs(&intent.tag))
         .filter(|p| {
             !matches!(
                 p.progress(),

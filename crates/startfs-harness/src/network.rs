@@ -180,7 +180,8 @@ impl SimTransport {
 impl Transport for SimTransport {
     fn send(&self, to: NodeId, mut msg: Vec<u8>) {
         let wire = self.wire.load(Ordering::SeqCst);
-        if let Some(version) = msg.first_mut()
+        if wire != PROTOCOL_VERSION
+            && let Some(version) = msg.first_mut()
             && *version != NOTICE_BYTE
         {
             *version = wire;

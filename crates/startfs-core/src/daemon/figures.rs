@@ -45,7 +45,12 @@ impl Daemon {
                     let up = is_up(heard.get(&m.endpoint).copied(), now);
                     PeerActivity {
                         member: m.id,
-                        state: node_state(m.leaving, up, lost.contains(&m.id), paused.contains(&m.id)),
+                        state: node_state(
+                            m.leaving,
+                            up,
+                            lost.contains(&m.id),
+                            paused.contains(&m.id),
+                        ),
                         in_flight: in_flight.get(&m.id).copied().unwrap_or(0),
                         traffic: enabled
                             .then(|| totals.peers.get(&m.endpoint).copied().unwrap_or_default()),

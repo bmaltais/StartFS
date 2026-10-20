@@ -346,12 +346,7 @@ impl Daemon {
                 MemberStatus {
                     id: m.id,
                     addr: m.addr,
-                    state: node_state(
-                        m.leaving,
-                        up,
-                        lost.contains(&m.id),
-                        paused.contains(&m.id),
-                    ),
+                    state: node_state(m.leaving, up, lost.contains(&m.id), paused.contains(&m.id)),
                     release,
                     protocol,
                     upgrade,
@@ -500,13 +495,15 @@ impl Daemon {
                 &stranded,
             )
         });
-        // Members that are down hold nothing back from the next restart: the data is
-        // safe when nothing is short of copies among the rest.
-        let present: Vec<MemberStatus> = members
-            .iter()
-            .filter(|m| m.state != NodeState::Down)
-            .cloned()
-            .collect();
+        // Members that are gone hold nothing back from the next restart: the data is
+        // safe when nothing is short of copies among the rest. One that is only briefly
+        // unseen may be back at once, so it still counts.
+        let gone = |m: &MemberStatus| {
+            m.state == NodeState::Down
+                && m.last_seen
+                    .is_some_and(|l| l.secs_ago >= super::STANDIN_AFTER.as_secs())
+        };
+        let present: Vec<MemberStatus> = members.iter().filter(|m| !gone(m)).cloned().collect();
         let gate = filesystem.as_ref().is_some_and(|f| {
             matches!(
                 verdict_of(
@@ -520,66 +517,68 @@ impl Daemon {
                 Verdict::Safe | Verdict::BestEffort
             )
         });
-        Ok((Status {
-            stopping: self.stopping.load(Ordering::SeqCst),
-            verdict,
-            filesystem,
-            node_state: NodeState::Online,
-            // A failed survey should not hide the rest of the report.
-            efficiency: self.fs.efficiency().unwrap_or_default(),
-            usage: Usage {
-                chunks: stats.chunks,
-                stored_bytes: stats.stored_bytes,
-                offer_bytes: membership.my_offer(self.config.offer_bytes),
+        Ok((
+            Status {
+                stopping: self.stopping.load(Ordering::SeqCst),
+                verdict,
+                filesystem,
+                node_state: NodeState::Online,
+                // A failed survey should not hide the rest of the report.
+                efficiency: self.fs.efficiency().unwrap_or_default(),
+                usage: Usage {
+                    chunks: stats.chunks,
+                    stored_bytes: stats.stored_bytes,
+                    offer_bytes: membership.my_offer(self.config.offer_bytes),
+                },
+                staging: {
+                    let s = self.fs.staging_stats()?;
+                    Staging {
+                        chunks: s.chunks,
+                        bytes: s.stored_bytes,
+                    }
+                },
+                cache: self.fs.cache_stats(),
+                members,
+                upgrade,
+                nodes,
+                copies_possible,
+                usable_bytes,
+                unreplicated,
+                repair,
+                rechecking,
+                unheard,
+                stranded,
+                log: LogStatus {
+                    entries: self.fs.log_len().unwrap_or(0),
+                    objects: self.fs.object_count().unwrap_or(0),
+                },
+                scrub: self.scrubber.status(
+                    now,
+                    Duration::from_secs(self.config.scrub_period_secs),
+                    self.on_battery(),
+                    self.replicator.healing(),
+                ),
+                gc: {
+                    let gc = self.gc.lock().unwrap();
+                    GcStatus {
+                        pending_chunks: gc.last.pending_chunks,
+                        pending_bytes: gc.last.pending_bytes,
+                        reclaimed_chunks: gc.reclaimed_chunks,
+                        reclaimed_bytes: gc.reclaimed_bytes,
+                        waiting_on: gc_waiting_on,
+                        purging: self.purging.lock().unwrap().is_some(),
+                    }
+                },
+                warnings,
+                conflicts: self.fs.conflicts()?,
+                tick_busy: self.tick_busy().filter(|(busy, _)| *busy > 0.8).map(
+                    |(busy, avg_ms)| TickBusy {
+                        percent: (busy * 100.0).round() as u32,
+                        avg_ms: avg_ms.round() as u64,
+                    },
+                ),
             },
-            staging: {
-                let s = self.fs.staging_stats()?;
-                Staging {
-                    chunks: s.chunks,
-                    bytes: s.stored_bytes,
-                }
-            },
-            cache: self.fs.cache_stats(),
-            members,
-            upgrade,
-            nodes,
-            copies_possible,
-            usable_bytes,
-            unreplicated,
-            repair,
-            rechecking,
-            unheard,
-            stranded,
-            log: LogStatus {
-                entries: self.fs.log_len().unwrap_or(0),
-                objects: self.fs.object_count().unwrap_or(0),
-            },
-            scrub: self.scrubber.status(
-                now,
-                Duration::from_secs(self.config.scrub_period_secs),
-                self.on_battery(),
-                self.replicator.healing(),
-            ),
-            gc: {
-                let gc = self.gc.lock().unwrap();
-                GcStatus {
-                    pending_chunks: gc.last.pending_chunks,
-                    pending_bytes: gc.last.pending_bytes,
-                    reclaimed_chunks: gc.reclaimed_chunks,
-                    reclaimed_bytes: gc.reclaimed_bytes,
-                    waiting_on: gc_waiting_on,
-                    purging: self.purging.lock().unwrap().is_some(),
-                }
-            },
-            warnings,
-            conflicts: self.fs.conflicts()?,
-            tick_busy: self
-                .tick_busy()
-                .filter(|(busy, _)| *busy > 0.8)
-                .map(|(busy, avg_ms)| TickBusy {
-                    percent: (busy * 100.0).round() as u32,
-                    avg_ms: avg_ms.round() as u64,
-                }),
-        }, gate))
+            gate,
+        ))
     }
 }

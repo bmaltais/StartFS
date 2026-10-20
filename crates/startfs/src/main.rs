@@ -1,5 +1,6 @@
 //! The `startfs` binary: the daemon (`startfs daemon`) and the CLI that talks to it.
 
+use startfs::installer::ScriptInstaller;
 use startfs::mount;
 use startfs::node::{self, Ticker};
 use startfs_core::activity::{ActivityReport, Traffic};
@@ -10,6 +11,7 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
+use startfs_core::upgrade::Progress;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -35,6 +37,11 @@ commands:
                                       node lives (home, cloud) so copies are spread across sites
   token [--example]                   print a new join token (--example: the full join
                                       command to paste on the other machine)
+  update [vX.Y.Z] [--force]           move every member to a release (the latest stable one when
+                                      none is named): each stages it, then they restart one at a
+                                      time, or all together when the protocol changes; follow it
+                                      with `status`. --force: restart this node although its
+                                      mount is in use
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
@@ -174,6 +181,26 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         }
         "token" => {
             print_token(&Client::new(socket).new_token()?, rest);
+            Ok(())
+        }
+        "update" => {
+            let release = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(String::as_str);
+            let force = rest.iter().any(|a| a == "--force");
+            let report = Client::new(socket).update_with(release, force)?;
+            if report.already_on_it {
+                println!(
+                    "the cluster is already on {}; nothing to do",
+                    report.release
+                );
+            } else {
+                println!(
+                    "moving the cluster to {}: the members stage it, then restart (see `startfs status`)",
+                    report.release
+                );
+            }
             Ok(())
         }
         "leave" => {
@@ -365,6 +392,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "status" | "activity" | "stats" => (&[], &["--json"], 0),
         "join" => (&["--offer", "--site"], &[], 1),
         "token" => (&[], &["--example"], 0),
+        "update" => (&[], &["--force"], 1),
         "remove" | "revoke" => (&[], &[], 1),
         "config" => (
             &["--offer", "--weight", "--copies", "--activity", "--site"],
@@ -470,9 +498,14 @@ fn daemon(
         Arc::new(SystemClock),
         advertised_host(host),
     )?;
+    let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
+    // Before the first tick: what an earlier swap left open is settled here.
+    d.set_installer(Arc::new(ScriptInstaller::new(
+        &data_dir,
+        mountpoint.clone(),
+    )));
     let ticker = Ticker::start(d.clone(), transport);
     d.set_power_source(Arc::new(SystemPower));
-    let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
     let server = control::serve(d.clone(), socket).map_err(|source| CliError::Listen {
         addr: socket.display().to_string(),
         source,
@@ -566,6 +599,9 @@ fn members_table(members: &[control::MemberStatus]) -> String {
             if let Some(load) = &m.behind {
                 state = format!("{state}, {}", load.behind_text());
             }
+            if let Some(step) = &m.upgrade {
+                state = format!("{state}, {}", upgrade_step_text(step));
+            }
             let mut offered = format!("{} offered", human(m.offer_bytes));
             if m.weight_bytes > 0 {
                 offered = format!("{offered}, weight {}", human(m.weight_bytes));
@@ -601,6 +637,16 @@ fn members_table(members: &[control::MemberStatus]) -> String {
         if let Some(why) = &m.problem {
             out.push_str(&format!("  {:<wid$}  cannot reach: {why}\n", ""));
         }
+        match &m.upgrade {
+            Some(Progress::Failed(why)) => {
+                out.push_str(&format!("  {:<wid$}  upgrade failed: {why}\n", ""));
+            }
+            Some(Progress::WaitingOnMount) => out.push_str(&format!(
+                "  {:<wid$}  processes are using its mount: free it, or run `startfs update --force` on that node\n",
+                ""
+            )),
+            _ => {}
+        }
         if let Some(seen) = m.last_seen {
             out.push_str(&format!(
                 "  {:<wid$}  last seen {}{} ago\n",
@@ -618,6 +664,17 @@ fn members_table(members: &[control::MemberStatus]) -> String {
         }
     }
     out
+}
+
+/// What a member has got to in the upgrade, for the members table.
+fn upgrade_step_text(step: &Progress) -> &'static str {
+    match step {
+        Progress::Staging => "staging a release",
+        Progress::Staged => "release staged",
+        Progress::WaitingOnMount => "release staged, waiting on its mount",
+        Progress::Restarting => "restarting on a new release",
+        Progress::Failed(_) => "upgrade failed",
+    }
 }
 
 /// "2d 4h", "5h 10m" or "12m": the two largest units of `secs`.
@@ -724,6 +781,38 @@ fn efficiency_lines(s: &Status, copies: u32) -> String {
     out
 }
 
+/// The upgrade under way, or the release the cluster last moved to, and a split cluster.
+fn upgrade_lines(u: &control::UpgradeStatus, members: &[control::MemberStatus]) -> String {
+    let mut out = if u.complete {
+        format!(
+            "release: {}, which every member that is up runs\n",
+            u.release
+        )
+    } else {
+        let how = match (u.lockstep, u.go) {
+            (Some(true), false) => {
+                " (the protocol changes: every member swaps together once all have staged it)"
+            }
+            (Some(true), true) => " (the protocol changes: every member swaps together, now)",
+            (Some(false), _) => " (one member at a time)",
+            (None, _) => "",
+        };
+        format!("upgrade: moving to {}{how}\n", u.release)
+    };
+    if !u.split.is_empty() {
+        let names: Vec<&str> = members
+            .iter()
+            .filter(|m| u.split.contains(&m.id))
+            .map(|m| m.addr.as_str())
+            .collect();
+        out.push_str(&format!(
+            "split: {} speak another protocol than this node and cannot sync with it until they run the same release\n",
+            names.join(", ")
+        ));
+    }
+    out
+}
+
 fn render(s: &Status) -> String {
     let stopping = if s.stopping {
         "stopping: the daemon is shutting down\n"
@@ -777,6 +866,9 @@ fn render(s: &Status) -> String {
     ));
     out.push_str("members:\n");
     out.push_str(&members_table(&s.members));
+    if let Some(u) = &s.upgrade {
+        out.push_str(&upgrade_lines(u, &s.members));
+    }
     if let Some(r) = &s.repair {
         out.push_str(&format!(
             "repair: {} at risk, {} degraded chunks left to re-replicate\n",

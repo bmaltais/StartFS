@@ -157,23 +157,59 @@ startfs.service` instead.
 
 ### Upgrading a whole cluster
 
-Upgrade one machine at a time and let it settle before the next, because a restart makes every
-member re-check its chunks. `scripts/rolling-upgrade.sh vX.Y.Z local HOST...` does that over ssh
-(`local` is this machine; list the one that matters most last). After each install it waits for
-`data: SAFE`, every member up, an empty inbox and a quiet tick (`BUSY_MAX`, a 60 s average, so it
-lags by about a minute), prints one status line every 10 s, and stops without touching the rest if
-a node is not ready after 15 minutes. Run it in a terminal you can watch: the installer asks before
-restarting a daemon whose mount is in use.
+`startfs update` on any member moves every member to a release, with no ssh and no host list:
 
-A release that changes the protocol (the installer warns `protocol N -> M`) cannot be rolled out
-that way: members on different protocols cannot see each other, so the first node never gets to
-`data: SAFE` with every member up. Add `--lockstep`: it installs on every node in turn, waiting
-only until the daemon answers at the new version, then waits for each node to be ready. The
-cluster cannot sync for those few minutes, and nothing is lost; rerunning skips nodes already done.
+```sh
+startfs update            # the latest stable release (never a pre-release)
+startfs update v1.10.0    # or a release you name
+```
 
-Protocol 14 (release 1.8.0) adds each member's site to the member list. It
-is a protocol change, so use `--lockstep`; members on protocol 13 show as incompatible until
-they are upgraded. Nothing changes in placement until you declare a site.
+The command picks the release once, so one published while the cluster is moving cannot split
+it, and says so, doing nothing, when every member that is up already runs it. The members then
+carry it out among themselves, using the installer's own fetch, checksum, swap and rollback
+logic (a daemon has no download path of its own). Follow it with `startfs status`, which shows
+each member as staging, staged, waiting on its mount, restarting or failed, and says whether the
+upgrade is rolling or lockstep.
+
+First every member **stages** the release: it fetches and checks it and keeps it next to the
+binary (`startfs.staged/`) without swapping it. Running the staged binary's `--version` tells the
+member the release's protocol, which decides how the cluster moves:
+
+- **Same protocol: a rolling upgrade.** One member at a time, lowest member number first. Before
+  restarting, a member announces an *upgrade pause*: the others send it nothing new, make no
+  stand-in copies for it and keep the verdict as it was (`status` shows it as `upgrading`). The
+  pause lasts as long as it takes a member to be taken for asleep (5 minutes); after that it is
+  simply asleep. The next member starts only when nobody is paused or still away, and nothing is
+  short of copies. A member that went down to restart and does not come back stops the upgrade.
+- **Different protocol: a lockstep upgrade.** Members on different protocols cannot talk, so the
+  member that ran `update` waits until every member that is up has staged, then sends one
+  go-signal and all swap together. If it disappears first, the stages expire after 10 minutes and
+  nothing has restarted. After the go-signal each member rolls back only itself if its new
+  daemon does not answer, and `status` lists the members on another protocol as a split.
+
+Members that are away do not hold either mode up. One that returns on an older release is told
+which release the cluster is on, even when it can no longer be reached in the ordinary way (an
+*upgrade notice*, in a fixed form every release reads) and catches up by itself. A member only
+ever moves to a later release than its own, and only on word from a member it knows.
+
+**A mount in use.** A member whose mount is in use (a shell inside `~/StartFS`, an open file)
+stages the release but does not restart; `status` says it is waiting. Free the mount and it
+goes on within seconds, or run `startfs update --force` on that node to restart it anyway. A
+rolling upgrade carries on past it; a lockstep one waits for it.
+
+Any member can order every member to move to a release: that is fine on a tailnet whose members
+you all trust (see Known limits), which StartFS already assumes. The mount still drops while a
+daemon restarts.
+
+**The first hop is manual.** Releases before the one that introduced `startfs update` do not
+understand it, and that release changes the protocol (15). Upgrade every member to it with
+`scripts/rolling-upgrade.sh --lockstep vX.Y.Z local HOST...` (it installs on every node over ssh,
+waiting for each to answer at the new version, then for each to be ready, and is safe to rerun), or
+run the installer on each machine in turn. After that, use `startfs update`. The script will be
+retired a release or two later.
+
+Protocol 14 (release 1.8.0) added each member's site to the member list. It was a protocol
+change, so it too needed `--lockstep`.
 
 ## Quickstart
 

@@ -103,8 +103,9 @@ pub trait Installer: Send + Sync {
     fn staged(&self) -> Option<Result<Release, InstallError>>;
     /// Drop what was staged.
     fn discard(&self);
-    /// Whether processes are using the mount, which a restart would take from them.
-    fn mount_in_use(&self) -> bool;
+    /// Whether processes are using the mount, which a restart would take from them:
+    /// `None` while the installer is still looking. Never waits.
+    fn mount_in_use(&self) -> Option<bool>;
     /// Swap the staged release in and restart the daemon on it. Returns once the swap
     /// has been handed off; the process is replaced, so on success the caller is
     /// about to disappear. The installer rolls the node back by itself if the new
@@ -135,8 +136,8 @@ impl Installer for NoInstaller {
 
     fn discard(&self) {}
 
-    fn mount_in_use(&self) -> bool {
-        false
+    fn mount_in_use(&self) -> Option<bool> {
+        Some(false)
     }
 
     fn swap(&self) -> Result<(), InstallError> {

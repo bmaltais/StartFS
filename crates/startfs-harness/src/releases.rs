@@ -176,8 +176,8 @@ impl Installer for NodeRelease {
         *self.last.lock().unwrap() = None;
     }
 
-    fn mount_in_use(&self) -> bool {
-        self.mount_in_use.load(Ordering::SeqCst)
+    fn mount_in_use(&self) -> Option<bool> {
+        Some(self.mount_in_use.load(Ordering::SeqCst))
     }
 
     fn swap(&self) -> Result<(), InstallError> {

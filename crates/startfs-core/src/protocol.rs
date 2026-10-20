@@ -272,8 +272,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        14,
-        "b4fc671a2a69c38829213aed8deec77d0455b1ac577d813058b8c86265b5105a",
+        15,
+        "62f3cf254cd69c0145033e6342fbf4a1351e4581cc6275da8079957f1769f735",
     );
 
     #[test]

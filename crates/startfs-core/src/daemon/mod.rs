@@ -387,8 +387,16 @@ impl Daemon {
                 break;
             };
             busy = true;
-            self.heard.lock().unwrap().insert(from, self.clock.now());
-            match Message::decode(&raw) {
+            let decoded = Message::decode(&raw);
+            // A peer in another protocol version cannot talk to this node, however much
+            // it sends: it is not heard from, and a notice only tells where to catch up.
+            if !matches!(
+                decoded,
+                Err(DecodeError::VersionMismatch { .. }) | Ok(Message::UpgradeNotice(_))
+            ) {
+                self.heard.lock().unwrap().insert(from, self.clock.now());
+            }
+            match decoded {
                 Ok(Message::Entries(more)) => entries.entry(from).or_default().extend(more),
                 Ok(msg) => {
                     if let Some(held) = entries.remove(&from) {

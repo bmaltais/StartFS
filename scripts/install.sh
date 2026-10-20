@@ -11,6 +11,12 @@
 #   STARTFS_VERIFY_SECS=15   how long to wait for the new daemon to answer before rolling back
 #   STARTFS_FORCE=1          never ask before restarting a daemon whose mount is in use
 #   STARTFS_MOUNTPOINT=DIR   the mount to check for users before a restart (default ~/StartFS)
+# Modes the daemon uses to upgrade itself (`startfs update`); the steps are the ones below:
+#   STARTFS_STAGE=1          fetch and check the release and keep it next to the binary (in
+#                            INSTALL_DIR/startfs.staged/) without swapping it
+#   STARTFS_APPLY_STAGED=1   swap in the release staged earlier instead of downloading one
+#   STARTFS_LATEST=1         print the tag of the latest stable release and stop
+#   STARTFS_CHECK_MOUNT=1    list the processes using the mount and exit 3, or exit 0 when none
 # Flags (pipe form: ... | sh -s -- --fixpath):
 #   --fixpath                add INSTALL_DIR to PATH in your shell profile when it is missing
 set -eu
@@ -61,6 +67,33 @@ version_of() { "$1" --version 2>/dev/null | awk '{print $2}'; }
 protocol_of() { "$1" --version 2>/dev/null | sed -n 's/.*(protocol \([0-9][0-9]*\)).*/\1/p'; }
 newest_of() { printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1; }
 
+# Processes of this user with their working directory or an open file on the mount, as
+# "name (pid N)" lines. They lose the mount when the daemon restarts. Linux only (/proc).
+mount_users() {
+  [ -d /proc/self ] || return 0
+  mnt=${STARTFS_MOUNTPOINT:-$HOME/StartFS}
+  for p in /proc/[0-9]*; do
+    pid=${p#/proc/}
+    [ "$pid" != "$$" ] || continue
+    for link in "$p/cwd" "$p"/fd/*; do
+      target=$(readlink "$link" 2>/dev/null) || continue
+      case "$target" in
+        "$mnt" | "$mnt"/*)
+          echo "$(cat "$p/comm" 2>/dev/null || echo '?') (pid $pid)"
+          break ;;
+      esac
+    done
+  done
+}
+
+# Only asked whether the mount is in use: answer and leave.
+if [ -n "${STARTFS_CHECK_MOUNT:-}" ]; then
+  users=$(mount_users)
+  [ -z "$users" ] && exit 0
+  echo "$users"
+  exit 3
+fi
+
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
@@ -80,12 +113,22 @@ command -v tar >/dev/null || die "tar is required"
 # 1. Choose the release.
 pinned=${STARTFS_VERSION:-}
 version=$pinned
-if [ -z "$version" ]; then
+staged=$bin.staged
+if [ -n "${STARTFS_APPLY_STAGED:-}" ]; then
+  # The release was fetched and checked earlier; only the swap is left.
+  [ -x "$staged/startfs" ] && [ -f "$staged/TAG" ] || die "no release is staged"
+  version=$(cat "$staged/TAG")
+  [ -z "$pinned" ] || [ "$pinned" = "$version" ] || die "the staged release is $version, not $pinned"
+elif [ -z "$version" ]; then
   url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") ||
     die "cannot look up the latest release"
   version=${url##*/}
 fi
 case "$version" in v[0-9]*) ;; *) die "no release found (got '$version')" ;; esac
+if [ -n "${STARTFS_LATEST:-}" ]; then
+  echo "$version"
+  exit 0
+fi
 
 installed=
 [ -x "$bin" ] && installed=$(version_of "$bin")
@@ -101,20 +144,29 @@ if [ -n "$installed" ]; then
   fi
 fi
 
-# 2. Download, verify and unpack.
+# 2. Download, verify and unpack (unless it is staged already).
 name=startfs-$version-$target
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-say "Downloading $name"
-curl -fsSL "$base_url/$version/$name.tar.gz" -o "$tmp/$name.tar.gz" || die "no $target build in release $version"
-curl -fsSL "$base_url/$version/$name.tar.gz.sha256" -o "$tmp/$name.tar.gz.sha256" || die "missing checksum for $name"
-(
-  cd "$tmp"
-  if command -v sha256sum >/dev/null; then sha256sum -c "$name.tar.gz.sha256" >/dev/null
-  else shasum -a 256 -c "$name.tar.gz.sha256" >/dev/null; fi
-) || die "checksum mismatch"
-tar xzf "$tmp/$name.tar.gz" -C "$tmp"
-new=$tmp/$name/startfs
+if [ -n "${STARTFS_APPLY_STAGED:-}" ]; then
+  new=$staged/startfs
+  unit_src=$staged/startfs.service
+elif [ -n "${STARTFS_STAGE:-}" ] && [ -x "$staged/startfs" ] && [ "$(cat "$staged/TAG" 2>/dev/null)" = "$version" ]; then
+  say "$version is already staged"
+  exit 0
+else
+  say "Downloading $name"
+  curl -fsSL "$base_url/$version/$name.tar.gz" -o "$tmp/$name.tar.gz" || die "no $target build in release $version"
+  curl -fsSL "$base_url/$version/$name.tar.gz.sha256" -o "$tmp/$name.tar.gz.sha256" || die "missing checksum for $name"
+  (
+    cd "$tmp"
+    if command -v sha256sum >/dev/null; then sha256sum -c "$name.tar.gz.sha256" >/dev/null
+    else shasum -a 256 -c "$name.tar.gz.sha256" >/dev/null; fi
+  ) || die "checksum mismatch"
+  tar xzf "$tmp/$name.tar.gz" -C "$tmp"
+  new=$tmp/$name/startfs
+  unit_src=$tmp/$name/startfs.service
+fi
 
 # 3. Warn when members must be upgraded together.
 old_protocol=
@@ -123,6 +175,18 @@ new_protocol=$(protocol_of "$new")
 if [ -n "$old_protocol" ] && [ -n "$new_protocol" ] && [ "$old_protocol" != "$new_protocol" ]; then
   say "WARNING: protocol $old_protocol -> $new_protocol. Members on different protocols cannot sync."
   say "         Upgrade every member; until they all match, 'startfs status' lists the others as unreachable."
+fi
+
+# Staging stops here: the release is checked and kept, and nothing is swapped.
+if [ -n "${STARTFS_STAGE:-}" ]; then
+  mkdir -p "$install_dir"
+  rm -rf "$staged.new"
+  cp -R "$tmp/$name" "$staged.new"
+  echo "$version" >"$staged.new/TAG"
+  rm -rf "$staged"
+  mv "$staged.new" "$staged"
+  say "Staged $version ($("$staged/startfs" --version))"
+  exit 0
 fi
 
 # 4. Service handling: what is managed, and is it running now?
@@ -142,25 +206,6 @@ if [ -z "${STARTFS_NO_SERVICE:-}" ]; then
     was_running=1
   fi
 fi
-
-# Processes of this user with their working directory or an open file on the mount, as
-# "name (pid N)" lines. They lose the mount when the daemon restarts. Linux only (/proc).
-mount_users() {
-  [ -d /proc/self ] || return 0
-  mnt=${STARTFS_MOUNTPOINT:-$HOME/StartFS}
-  for p in /proc/[0-9]*; do
-    pid=${p#/proc/}
-    [ "$pid" != "$$" ] || continue
-    for link in "$p/cwd" "$p"/fd/*; do
-      target=$(readlink "$link" 2>/dev/null) || continue
-      case "$target" in
-        "$mnt" | "$mnt"/*)
-          echo "$(cat "$p/comm" 2>/dev/null || echo '?') (pid $pid)"
-          break ;;
-      esac
-    done
-  done
-}
 
 # Say who will lose the mount, and on a terminal let the user back out first.
 warn_mount_users() {
@@ -230,7 +275,7 @@ say "Installed $("$bin" --version) to $bin"
 
 if [ "$os" = linux ]; then
   mkdir -p "$(dirname "$unit")"
-  install -m644 "$tmp/$name/startfs.service" "$unit"
+  install -m644 "$unit_src" "$unit"
   [ "$manage" != systemd ] || systemctl --user daemon-reload
   command -v fusermount3 >/dev/null || say "Warning: fuse3 is not installed; the mount will fail until it is."
   command -v tailscale >/dev/null || say "Warning: Tailscale is not installed; see the README."
@@ -269,6 +314,7 @@ else
   say "macOS: FUSE-T (brew install --cask fuse-t) and Tailscale are required. The adapter is untested; the"
   say "launchd agent (com.startfs.daemon.plist) is in the release tarball and is not set up for you."
 fi
+[ -z "${STARTFS_APPLY_STAGED:-}" ] || rm -rf "$staged"
 [ -n "$installed" ] && say "Upgraded $installed -> ${version#v}. Check the cluster with: startfs status"
 path_note
 exit 0
