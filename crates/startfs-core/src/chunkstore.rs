@@ -404,18 +404,26 @@ impl ChunkStore {
 
     /// Fetch a chunk, verifying its BLAKE3 hash. Corruption is an I/O error.
     pub fn get(&self, id: &ChunkId) -> FsResult<Vec<u8>> {
-        let mut raw = fs::read(self.path(id)).map_err(io)?;
         let corrupt = || FsError::Io("chunk is corrupt".into());
-        if raw.len() < HEADER_LEN || raw[0] != FORMAT_VERSION || raw[1] != CIPHER_NONE {
+        let mut file = fs::File::open(self.path(id)).map_err(io)?;
+        let mut header = [0u8; HEADER_LEN];
+        file.read_exact(&mut header).map_err(|_| corrupt())?;
+        if header[0] != FORMAT_VERSION || header[1] != CIPHER_NONE {
             return Err(corrupt());
         }
-        let len = plain_len(&raw) as usize;
-        let data = match raw[2] {
-            CODEC_RAW => {
-                raw.drain(..HEADER_LEN);
-                raw
-            }
-            CODEC_ZSTD => zstd::bulk::decompress(&raw[HEADER_LEN..], len).map_err(|_| corrupt())?,
+        let len = plain_len(&header) as usize;
+        // The body goes straight into its own buffer: reading the whole file and dropping the
+        // header shifted every byte of a raw chunk down by eight.
+        let body_len = file
+            .metadata()
+            .map_err(io)?
+            .len()
+            .saturating_sub(HEADER_LEN as u64);
+        let mut body = Vec::with_capacity(body_len as usize);
+        file.read_to_end(&mut body).map_err(io)?;
+        let data = match header[2] {
+            CODEC_RAW => body,
+            CODEC_ZSTD => zstd::bulk::decompress(&body, len).map_err(|_| corrupt())?,
             _ => return Err(corrupt()),
         };
         if data.len() != len || blake3::hash(&data).as_bytes() != id {
