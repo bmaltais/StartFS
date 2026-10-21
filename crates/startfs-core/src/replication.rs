@@ -753,6 +753,22 @@ impl Replicator {
             .count() as u64
     }
 
+    /// The member most staged chunks are waiting on (asked, not yet holding the chunk), and how
+    /// many, so a backlog can be blamed on the slow member behind it.
+    pub fn staged_waiting_on(&self) -> Option<(MemberId, u64)> {
+        let st = self.state.lock().unwrap();
+        let mut by_member: HashMap<MemberId, u64> = HashMap::new();
+        for (id, t) in st.tracks.iter().filter(|(_, t)| !t.settled) {
+            if t.sent.is_empty() || !self.fs.has_staged(id) {
+                continue;
+            }
+            for m in t.sent.keys().filter(|m| !t.holders.contains(m)) {
+                *by_member.entry(*m).or_default() += 1;
+            }
+        }
+        by_member.into_iter().max_by_key(|(m, n)| (*n, *m))
+    }
+
     /// Chunks on fewer than `view.copies` nodes, as far as this node knows,
     /// counted by their copies. Each chunk is counted by one member (once its
     /// holders agree who), so the counts of all members add up.

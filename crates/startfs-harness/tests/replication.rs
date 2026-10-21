@@ -176,19 +176,20 @@ fn a_write_is_refused_only_when_the_local_node_has_no_space() {
 }
 
 #[test]
-fn a_storage_node_is_not_refused_just_because_the_staging_cap_is_reached() {
-    // The cap holds just over one 100 KB file, but this node offers space and
-    // replication has not yet moved the first file out of staging.
+fn a_set_staging_cap_holds_whether_or_not_the_node_offers_space() {
+    // The cap holds just over one 100 KB file. The node offers space, but a cap that was set
+    // is a cap: only the default is left to the free space of the partition (#148).
     let c = Cluster::start_with_config(1, "staging_bytes = 150000");
     c.control(0).create("home", 1).unwrap();
     let fs = c.fs(0);
 
-    let first = noise(100_000, 1);
-    let second = noise(100_000, 2);
-    let a = put(&fs, "a", &first);
-    let b = put(&fs, "b", &second);
-    assert_eq!(fs.read(a, 0, u32::MAX).unwrap(), first);
-    assert_eq!(fs.read(b, 0, u32::MAX).unwrap(), second);
+    let a = put(&fs, "a", &noise(100_000, 1));
+    let f = fs.create(ROOT_INO, "b", 0o644).unwrap();
+    let err = fs
+        .write(f.ino, 0, &noise(100_000, 2))
+        .and_then(|_| fs.flush(f.ino));
+    assert_eq!(err, Err(FsError::NoSpace));
+    assert_eq!(fs.read(a, 0, 16).map(|d| d.len()), Ok(16));
 }
 
 #[test]

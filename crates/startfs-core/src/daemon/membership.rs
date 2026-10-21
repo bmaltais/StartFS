@@ -250,10 +250,7 @@ impl Daemon {
         if let Some(site) = site {
             membership.set_site(site.trim())?;
         }
-        self.fs.set_staging_limit(super::staging_limit(
-            &self.config,
-            membership.my_offer(self.config.offer_bytes),
-        ));
+        self.refresh_staging_limit();
         Ok(())
     }
 }

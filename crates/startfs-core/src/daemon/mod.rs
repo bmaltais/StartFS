@@ -36,7 +36,7 @@ use crate::scrub::Scrubber;
 use crate::sync::{HELLO_INTERVAL, Syncer};
 use crate::upgrade::{Installer, NoInstaller};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -124,6 +124,8 @@ const _: () = assert!(DOWN_AFTER.as_secs() <= STANDIN_AFTER.as_secs());
 
 pub struct Daemon {
     fs: Arc<LocalFs>,
+    /// Where the daemon keeps its data; its partition holds the staging area.
+    dir: PathBuf,
     config: Config,
     /// Our address on the tailnet, as resolved by the caller.
     advertise_host: String,
@@ -204,14 +206,19 @@ fn caught_up(synced: &BTreeMap<NodeId, Option<Nanos>>, peer: &NodeId, since: Nan
         .is_some_and(|t| t >= since)
 }
 
-/// The most the staging area may hold. A node offering space is limited by its
-/// disk alone; one offering none keeps what it writes in staging, so it is capped.
-fn staging_limit(config: &Config, offer: u64) -> u64 {
-    if offer > 0 {
-        u64::MAX
-    } else {
-        config.staging_bytes
-    }
+/// Free space on the staging partition left alone for the system and everything else on it.
+const DISK_HEADROOM: u64 = 2 << 30;
+
+/// The most the staging area may hold, given the free space of its partition and what it holds
+/// now. Staging is the buffer that lets writers run at local speed while chunks trickle out to
+/// slower members, so it is bounded by the room on the disk (four fifths of what is free above
+/// [`DISK_HEADROOM`]) and by `staging_bytes` when that is set, never by the node's offer or by
+/// how fast replication is.
+fn staging_limit(config: &Config, free: Option<u64>, stored: u64) -> u64 {
+    let by_disk = free.map_or(u64::MAX, |free| {
+        stored.saturating_add(free.saturating_sub(DISK_HEADROOM) / 5 * 4)
+    });
+    config.staging_bytes.map_or(by_disk, |cap| cap.min(by_disk))
 }
 
 /// A peer's answer to a chunk request: the bytes, or `None` if it lacks them.
@@ -256,10 +263,7 @@ impl Daemon {
     ) -> FsResult<Arc<Self>> {
         let membership = Membership::load(&dir.join("membership.json"));
         let fs = Arc::new(LocalFs::open(dir, node, config.cache_bytes, clock.clone())?);
-        fs.set_staging_limit(staging_limit(
-            &config,
-            membership.my_offer(config.offer_bytes),
-        ));
+        fs.set_staging_limit(staging_limit(&config, None, 0));
         fs.set_write_buffer_limit(config.write_buffer_bytes);
         let (read_cache, derived) = config.read_cache_limit(crate::config::total_ram_bytes());
         eprintln!(
@@ -290,6 +294,7 @@ impl Daemon {
                 stopping: AtomicBool::new(false),
                 purging: Mutex::new(None),
                 installer: Mutex::new(Arc::new(NoInstaller)),
+                dir: dir.to_path_buf(),
                 upgrades: Mutex::new(upgrade::Upgrades::open(dir)),
                 fs,
                 clock,
@@ -337,6 +342,14 @@ impl Daemon {
     }
 
     /// Where to read the OS figures the activity view shows.
+    /// Bound the staging area by the free space of its partition as it is now.
+    pub(super) fn refresh_staging_limit(&self) {
+        let free = self.resources.lock().unwrap().disk_free(&self.dir);
+        let stored = self.fs.staging_stats().map_or(0, |s| s.stored_bytes);
+        self.fs
+            .set_staging_limit(staging_limit(&self.config, free, stored));
+    }
+
     pub fn set_resource_source(&self, resources: Arc<dyn ResourceSource>) {
         *self.resources.lock().unwrap() = resources;
     }
@@ -398,13 +411,7 @@ impl Daemon {
         }
         timer.phase(Phase::Flush);
         self.sync_peers();
-        let offer = self
-            .membership
-            .lock()
-            .unwrap()
-            .my_offer(self.config.offer_bytes);
-        self.fs
-            .set_staging_limit(staging_limit(&self.config, offer));
+        self.refresh_staging_limit();
         self.fs
             .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
         timer.phase(Phase::Sync);

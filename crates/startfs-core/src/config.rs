@@ -27,8 +27,9 @@ pub struct Config {
     /// smaller). Only affects chunks stored from now on.
     pub compression: Compression,
     /// Most bytes of not-yet-replicated writes this node holds; writes are
-    /// refused beyond it.
-    pub staging_bytes: u64,
+    /// refused beyond it. Unset: only the free space of the staging partition
+    /// bounds it (see `daemon::staging_limit`).
+    pub staging_bytes: Option<u64>,
     /// Most bytes of one file's writes held in memory before a batch is
     /// committed (at least 8 MiB is used). Buffered writes are lost if the
     /// daemon dies before the file is flushed, fsynced or closed.
@@ -87,7 +88,7 @@ impl Default for Config {
             cache_bytes: 1 << 30,
             read_cache_bytes: None,
             compression: Compression::Auto,
-            staging_bytes: 4 << 30,
+            staging_bytes: None,
             write_buffer_bytes: crate::fs::DEFAULT_WRITE_BUFFER,
             write_commit_delay_ms: 1000,
             sync_quiet_ms: 1000,

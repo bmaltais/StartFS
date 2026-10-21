@@ -909,10 +909,19 @@ fn render(s: &Status) -> String {
     out.push_str(&efficiency_lines(s, fs.copies));
     if s.staging.chunks > 0 {
         out.push_str(&format!(
-            "staging: {} in {} chunks waiting for replication\n",
+            "staging: {} in {} chunks waiting for replication",
             human(s.staging.bytes),
             s.staging.chunks
         ));
+        if let Some((id, chunks)) = s.staging.waiting_on {
+            let name = s
+                .members
+                .iter()
+                .find(|m| m.id == id)
+                .map_or_else(|| id.0.to_string(), |m| m.addr.clone());
+            out.push_str(&format!(", most on {name} ({chunks} chunks)"));
+        }
+        out.push('\n');
     }
     out.push_str(&format!(
         "cache: {} used of {}\n",
