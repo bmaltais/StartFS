@@ -376,3 +376,84 @@ fn a_name_with_both_ipv4_and_ipv6_addresses_resolves_to_the_ipv4_one() {
     assert!(addr.is_ipv4(), "{addr}");
     assert_eq!(addr.port(), 7600);
 }
+
+/// Both nodes send to each other every `step` for `span`, as hellos do.
+fn chat(a: &QuicTransport, b: &QuicTransport, span: Duration, step: Duration) {
+    let (b_at_a, a_at_b) = (b.local(), a.local());
+    let start = Instant::now();
+    while start.elapsed() < span {
+        a.send(b_at_a, b"a".to_vec());
+        b.send(a_at_b, b"b".to_vec());
+        std::thread::sleep(step);
+    }
+    while a.recv().is_some() || b.recv().is_some() {}
+}
+
+#[test]
+fn two_nodes_sending_to_each_other_at_once_settle_on_one_link() {
+    let whois = tailnet();
+    let a = node(1, &whois, &[]);
+    let b = node(2, &whois, &[]);
+    a.resolve(&b.local_addr().to_string()).unwrap();
+    b.resolve(&a.local_addr().to_string()).unwrap();
+
+    chat(&a, &b, Duration::from_secs(8), Duration::from_millis(250));
+
+    assert!(
+        a.connects() + b.connects() <= 4,
+        "links kept being redialed: a opened {}, b opened {}",
+        a.connects(),
+        b.connects()
+    );
+}
+
+#[test]
+fn a_restarted_peer_does_not_set_the_two_nodes_redialing_each_other() {
+    let whois = tailnet();
+    let a = node(1, &whois, &[]);
+    let b = node(2, &whois, &[]);
+    let b_addr = b.local_addr();
+    a.resolve(&b_addr.to_string()).unwrap();
+    b.resolve(&a.local_addr().to_string()).unwrap();
+    chat(&a, &b, Duration::from_secs(2), Duration::from_millis(250));
+
+    drop(b);
+    let b = QuicTransport::start(b_addr, whois.clone(), vec![]).unwrap();
+    b.resolve(&a.local_addr().to_string()).unwrap();
+    let before = a.connects() + b.connects();
+    // Hearing from the new b drops a's link to the old one, so a reaches b at once rather
+    // than after the idle timeout.
+    b.send(a.local(), b"back".to_vec());
+    assert!(recv_within(&a, Duration::from_secs(5)).is_some());
+    a.send(b.local(), b"welcome".to_vec());
+    assert!(recv_within(&b, Duration::from_secs(5)).is_some());
+    chat(&a, &b, Duration::from_secs(12), Duration::from_millis(250));
+
+    assert!(
+        a.connects() + b.connects() - before <= 4,
+        "links kept being redialed after the restart: a opened {}, b opened {}",
+        a.connects(),
+        b.connects()
+    );
+}
+
+#[test]
+fn one_dropped_link_does_not_set_the_two_nodes_redialing_each_other() {
+    let whois = tailnet();
+    let a = node(1, &whois, &[]);
+    let b = node(2, &whois, &[]);
+    a.resolve(&b.local_addr().to_string()).unwrap();
+    b.resolve(&a.local_addr().to_string()).unwrap();
+    chat(&a, &b, Duration::from_secs(2), Duration::from_millis(250));
+
+    a.sever_link(b.local());
+    let before = a.connects() + b.connects();
+    chat(&a, &b, Duration::from_secs(12), Duration::from_millis(250));
+
+    assert!(
+        a.connects() + b.connects() - before <= 2,
+        "links kept being redialed after one dropped: a opened {}, b opened {}",
+        a.connects(),
+        b.connects()
+    );
+}
