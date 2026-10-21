@@ -114,6 +114,11 @@ slower than local disk) and daemon peak RSS was 206 to 222 MiB for a 128 MiB wri
 - **Reads of cached data are near disk speed** when both sides bypass the page cache (0.8x to
   1.9x, about 0.9 GB/s). Compared with a warm kernel page cache FUSE reads are 7x to 16x slower
   in wall time, still about 0.9 GB/s in absolute terms, which is fast in practice.
+- **Repeat reads come from the kernel's page cache.** `open` used to drop the kernel's cached
+  pages every time. It now keeps them while the file's size, mtime and ctime are those of the
+  last open (`FuseAdapter::op_open`), so a change here or by a peer still drops them. Reading a
+  128 MiB file a second time through the mount: 0.048 s before, 0.017 s after (`ab.sh`, two
+  rounds, same on a third read). The first read after a write is still cold.
 - **Writes are now roughly linear.** FUSE writes are buffered per file and committed in batches
   that re-chunk only the affected region (`crates/startfs-core/src/fs/writebuf.rs`). Across the
   four runs, 128 MiB took 4x to 9x as long as 16 MiB (8x is linear), where before it took 39x.

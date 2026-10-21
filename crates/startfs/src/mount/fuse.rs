@@ -17,9 +17,10 @@ use fuser::{
 };
 use startfs_core::clock::{Clock, SystemClock};
 use startfs_core::ops::{Attr, FsError, FsOps, Ino, SetAttr};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How long the kernel may cache attributes and names. Short, because other
@@ -39,7 +40,17 @@ pub enum XattrReply {
 pub struct FuseAdapter {
     fs: Arc<dyn FsOps>,
     clock: Arc<dyn Clock>,
+    /// What each file looked like the last time it was opened, to tell whether the kernel's
+    /// cached pages of it are still good.
+    opened: Mutex<HashMap<Ino, FileStamp>>,
 }
+
+/// A file's size and times: when all three are as they were, its content is.
+type FileStamp = (u64, u64, u64);
+
+/// Files remembered between opens. Past this the table starts over; a file then misses the
+/// kernel cache once, which costs a read, not correctness.
+const OPENED_LIMIT: usize = 65_536;
 
 fn name(n: &OsStr) -> Result<&str, Errno> {
     n.to_str().ok_or(Errno::EINVAL)
@@ -55,7 +66,26 @@ impl FuseAdapter {
     }
 
     pub fn with_clock(fs: Arc<dyn FsOps>, clock: Arc<dyn Clock>) -> Self {
-        Self { fs, clock }
+        Self {
+            fs,
+            clock,
+            opened: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether the kernel may keep the pages it cached of this file: only when its size and
+    /// times are those of the last open, so a change made here or by a peer since then drops
+    /// the cache, as every open did before.
+    pub fn op_open(&self, ino: u64) -> bool {
+        let Ok(a) = self.fs.getattr(ino) else {
+            return false;
+        };
+        let now = (a.size, a.mtime, a.ctime);
+        let mut opened = self.opened.lock().unwrap();
+        if opened.len() >= OPENED_LIMIT {
+            opened.clear();
+        }
+        opened.insert(ino, now) == Some(now)
     }
 
     pub fn op_lookup(&self, parent: u64, n: &OsStr) -> Result<Attr, Errno> {
@@ -334,8 +364,13 @@ impl Filesystem for FuseAdapter {
         entry(self.op_link(ino.0, newparent.0, newname), reply);
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        reply.opened(FileHandle(0), FopenFlags::empty());
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let flags = if self.op_open(ino.0) {
+            FopenFlags::FOPEN_KEEP_CACHE
+        } else {
+            FopenFlags::empty()
+        };
+        reply.opened(FileHandle(0), flags);
     }
 
     fn read(
@@ -669,6 +704,19 @@ mod tests {
         assert_eq!(a.op_write(f.ino, 0, b"hello").unwrap(), 5);
         assert_eq!(a.op_read(f.ino, 1, 100).unwrap(), b"ello");
         assert_eq!(a.op_lookup(ROOT_INO, os("a.txt")).unwrap().size, 5);
+    }
+
+    #[test]
+    fn the_kernel_keeps_a_files_pages_across_opens_until_the_file_changes() {
+        let (a, _d) = adapter();
+        let f = a.op_create(ROOT_INO, os("c.txt"), 0o644, 0).unwrap();
+        a.op_write(f.ino, 0, b"one").unwrap();
+        assert!(!a.op_open(f.ino), "nothing is cached before a first open");
+        assert!(a.op_open(f.ino), "unchanged since the last open");
+        a.op_write(f.ino, 0, b"two!").unwrap();
+        assert!(!a.op_open(f.ino), "written since the last open");
+        assert!(a.op_open(f.ino));
+        assert!(!a.op_open(999_999), "a file that is gone keeps nothing");
     }
 
     #[test]
