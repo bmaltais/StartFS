@@ -128,8 +128,17 @@ impl LocalFs {
         self.store_replica(&data, offer)
     }
 
-    /// Release a chunk from staging: it is on every node chosen for it.
+    /// Release a chunk from staging: it is on every node chosen for it. One
+    /// this node does not hold as a replica moves to the read cache, since a
+    /// file just written is often rewritten, and re-reading its chunks would
+    /// otherwise need a peer.
     pub fn release(&self, id: &ChunkId) {
+        if !self.has_replica(id)
+            && !self.cache.touch(id)
+            && let Ok(data) = self.staging.get(id)
+        {
+            self.cache.put(&data);
+        }
         self.staging.remove(id);
     }
 
