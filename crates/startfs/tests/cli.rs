@@ -571,3 +571,92 @@ fn cli_update_says_when_the_release_is_not_a_tag() {
     let out = startfs(data, &["update", "--forced"]);
     assert!(!out.status.success(), "an unknown flag runs nothing");
 }
+
+/// A directory to use as the daemon's whole `PATH`, holding a `tailscale` that runs `script`
+/// (or no `tailscale` at all when `script` is `None`).
+fn path_with_tailscale(dir: &Path, script: Option<&str>) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    if let Some(script) = script {
+        let stub = bin.join("tailscale");
+        std::fs::write(&stub, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+fn daemon_with_path(data: &Path, path: &Path, wait_secs: &str) -> Child {
+    std::fs::create_dir_all(data).unwrap();
+    let config = data.join("test-config.toml");
+    std::fs::write(&config, "port = 0\n").unwrap();
+    Command::new(env!("CARGO_BIN_EXE_startfs"))
+        .arg("--data-dir")
+        .arg(data)
+        .arg("--config")
+        .arg(&config)
+        .arg("daemon")
+        .env("PATH", path)
+        .env("STARTFS_TAILNET_WAIT", wait_secs)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn a_daemon_whose_tailscale_never_answers_exits_instead_of_listening_on_loopback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path_with_tailscale(dir.path(), Some("exit 1"));
+    let out = daemon_with_path(&dir.path().join("data"), &path, "1")
+        .wait_with_output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no tailnet address"), "{err}");
+}
+
+#[test]
+fn a_daemon_waits_for_tailscale_to_come_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let up = dir.path().join("up");
+    // 127.0.0.2 stands in for the tailnet address: bindable anywhere on Linux.
+    let script = format!(
+        "[ -f {} ] && [ \"$1\" = ip ] && echo 127.0.0.2 || exit 1",
+        up.display()
+    );
+    let path = path_with_tailscale(dir.path(), Some(&script));
+    let data = dir.path().join("data");
+    let daemon = Daemon(daemon_with_path(&data, &path, "30"));
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        !data.join("control.sock").exists(),
+        "started before tailscale was up"
+    );
+    std::fs::write(&up, "").unwrap();
+    let started = Instant::now();
+    while !data.join("control.sock").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "daemon did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(daemon);
+}
+
+#[test]
+fn a_daemon_without_tailscale_installed_runs_on_loopback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path_with_tailscale(dir.path(), None);
+    let data = dir.path().join("data");
+    let daemon = Daemon(daemon_with_path(&data, &path, "1"));
+    let started = Instant::now();
+    while !data.join("control.sock").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "daemon did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(daemon);
+}
