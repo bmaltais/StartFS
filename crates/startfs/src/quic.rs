@@ -98,12 +98,17 @@ struct Shared {
     errors: Mutex<HashMap<NodeId, String>>,
     /// The live connection we dialed to each peer, for its round-trip time.
     links: Mutex<HashMap<NodeId, quinn::Connection>>,
-    /// The live connection each peer dialed to us. A second one from the same peer means it
-    /// restarted: the first is dead and so is our own link to it.
-    dialed: Mutex<HashMap<NodeId, quinn::Connection>>,
+    /// The live connection each peer dialed to us, with the instance the dialer named. A
+    /// second one from a different instance means the peer restarted: the first is dead and so
+    /// is our own link to it. One from the same instance is a redial, and our link is fine.
+    dialed: Mutex<HashMap<NodeId, (quinn::Connection, Option<Instance>)>>,
+    /// Names this run of the daemon to the peers it dials.
+    instance: Instance,
     inbox: Mutex<Sender<(NodeId, Vec<u8>)>>,
     /// Woken when something arrives that the daemon should not leave waiting.
     waker: OnceLock<Arc<Waker>>,
+    /// Connections this node has opened to peers, successful or not.
+    connects: AtomicU64,
     /// Messages and bytes sent into the inbox and not yet taken out.
     inbox_messages: AtomicU64,
     inbox_bytes: AtomicU64,
@@ -114,6 +119,10 @@ struct Shared {
     /// The upgrade notice to hand to a peer refused for its protocol version.
     notice: Mutex<Option<Vec<u8>>>,
 }
+
+/// Random bytes naming one run of a daemon, sent in the handshake so an acceptor can tell a
+/// peer that dials again from one that restarted.
+type Instance = [u8; 8];
 
 /// A message queued for a peer, with its claim on the backlog when it carries chunk bytes.
 type Outgoing = (Vec<u8>, Option<Held>);
@@ -247,8 +256,10 @@ impl QuicTransport {
             errors: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             dialed: Mutex::new(HashMap::new()),
+            instance: new_instance()?,
             inbox: Mutex::new(tx),
             waker: OnceLock::new(),
+            connects: AtomicU64::new(0),
             inbox_messages: AtomicU64::new(0),
             inbox_bytes: AtomicU64::new(0),
             backlog: Mutex::new(HashMap::new()),
@@ -264,6 +275,22 @@ impl QuicTransport {
             endpoint,
             runtime: Some(runtime),
         })
+    }
+
+    /// How many connections this node has opened to peers, successful or not. Each costs a
+    /// whois lookup and a TLS handshake, so a count that keeps climbing on a quiet node means
+    /// links are being torn down and redialed.
+    pub fn connects(&self) -> u64 {
+        self.shared.connects.load(Ordering::Relaxed)
+    }
+
+    /// Drop the connection this node dialed to `peer`, as a network blip would, so the next
+    /// message redials. For tests.
+    #[doc(hidden)]
+    pub fn sever_link(&self, peer: NodeId) {
+        if let Some(link) = self.shared.links.lock().unwrap().get(&peer) {
+            link.close(0u32.into(), b"severed");
+        }
     }
 
     /// The address this node listens on (and advertises).
@@ -432,20 +459,33 @@ async fn serve_connection(shared: Arc<Shared>, incoming: quinn::Incoming) {
     let Ok(conn) = incoming.await else { return };
     let remote = conn.remote_address();
     let peer = node_id_for(remote);
-    match handshake_accept(&shared, &conn, remote).await {
-        Ok(()) => {}
+    let instance = match handshake_accept(&shared, &conn, remote).await {
+        Ok(instance) => instance,
         Err(why) => {
             conn.close(CLOSE_REFUSED.into(), why.refusal_text().as_bytes());
             shared.fail(peer, why);
             return;
         }
-    }
+    };
     shared.addrs.lock().unwrap().insert(peer, remote);
-    if let Some(old) = shared.dialed.lock().unwrap().insert(peer, conn.clone()) {
-        // The peer restarted. Our link to it would otherwise sit on a dead path until the
-        // idle timeout, so its hellos would reach the new daemon half a minute late.
+    let previous = shared
+        .dialed
+        .lock()
+        .unwrap()
+        .insert(peer, (conn.clone(), instance));
+    if let Some((old, old_instance)) = previous {
         old.close(CLOSE_SUPERSEDED.into(), b"superseded");
-        if let Some(link) = shared.links.lock().unwrap().remove(&peer) {
+        // A restarted peer leaves our link to it on a dead path until the idle timeout, so
+        // its hellos would reach the new daemon half a minute late: drop the link. A peer
+        // that merely dialed again (its own link broke) has the same instance and our link
+        // is fine; closing it would make the peer redial in turn, and the two would keep
+        // closing each other's links. A peer that does not name its instance cannot be told
+        // apart, and is left alone.
+        let restarted = instance != old_instance;
+        if restarted
+            && instance.or(old_instance).is_some()
+            && let Some(link) = shared.links.lock().unwrap().remove(&peer)
+        {
             link.close(CLOSE_SUPERSEDED.into(), b"peer restarted");
         }
     }
@@ -459,12 +499,20 @@ async fn handshake_accept(
     shared: &Arc<Shared>,
     conn: &quinn::Connection,
     remote: SocketAddr,
-) -> Result<(), Error> {
+) -> Result<Option<Instance>, Error> {
     let (mut reply, mut hello) = conn.accept_bi().await?;
     let mut raw = [0u8; 4];
     tokio::time::timeout(CONNECT_TIMEOUT, hello.read_exact(&mut raw))
         .await
         .map_err(|_| Error::NoHandshake)??;
+    // What follows the version, if anything, names the dialer's run. Dialers from before it
+    // was added send nothing more, and ones from after it send nothing a refusal needs.
+    let rest = tokio::time::timeout(CONNECT_TIMEOUT, hello.read_to_end(64))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let instance = Instance::try_from(rest.as_slice()).ok();
     let verdict = if &raw[..3] != MAGIC {
         Err(Error::NotAPeer)
     } else if raw[3] != shared.version {
@@ -499,7 +547,7 @@ async fn handshake_accept(
         )]
         let _ = tokio::time::timeout(Duration::from_secs(1), reply.stopped()).await;
     }
-    verdict
+    verdict.map(|()| instance)
 }
 
 async fn read_messages(shared: Arc<Shared>, from: NodeId, mut stream: quinn::RecvStream) {
@@ -560,12 +608,13 @@ async fn connect(
     peer: NodeId,
     addr: SocketAddr,
 ) -> Result<Link, Error> {
+    shared.connects.fetch_add(1, Ordering::Relaxed);
     shared.authorize(addr).await?;
     let attempt = async {
         let conn = endpoint.connect(addr, "startfs")?.await?;
         let (mut hello, mut reply) = conn.open_bi().await?;
         hello
-            .write_all(&[MAGIC[0], MAGIC[1], MAGIC[2], shared.version])
+            .write_all(&[&MAGIC[..], &[shared.version], &shared.instance[..]].concat())
             .await?;
         hello.finish()?;
         let answer = reply.read_to_end(1024).await.map_err(|_| {
@@ -677,6 +726,15 @@ async fn peer_sender(
 }
 
 // ---- TLS: throwaway certificates, identity comes from whois ----
+
+fn new_instance() -> std::io::Result<Instance> {
+    let mut instance = Instance::default();
+    ring::default_provider()
+        .secure_random
+        .fill(&mut instance)
+        .map_err(|_| std::io::Error::other("no random bytes for the instance"))?;
+    Ok(instance)
+}
 
 fn crypto() -> Result<(QuicServerConfig, QuicClientConfig), Error> {
     let provider = Arc::new(ring::default_provider());
