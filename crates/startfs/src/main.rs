@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
        startfs --version
@@ -88,6 +89,8 @@ enum CliError {
         addr: String,
         source: std::io::Error,
     },
+    #[error("tailscale gave no tailnet address within {0:?} (is tailscaled up and logged in?)")]
+    NoTailnet(Duration),
     #[error("mounting is not supported here")]
     MountUnsupported,
     #[error(transparent)]
@@ -485,7 +488,7 @@ fn daemon(
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
     };
-    let host = tailnet_address();
+    let host = tailnet_address()?;
     let whois = node::tailscale_whois(&config);
     let transport = node::bind(&mut config, host, whois).map_err(|source| CliError::Listen {
         addr: format!("{host}:{}", config.port),
@@ -596,11 +599,40 @@ fn advertised_host(ip: IpAddr) -> String {
     })
 }
 
-/// This machine's tailnet address, or loopback when Tailscale is unavailable.
-fn tailnet_address() -> IpAddr {
-    tailscale(&["ip", "-4"])
-        .and_then(|s| s.lines().next().and_then(|l| l.trim().parse().ok()))
-        .unwrap_or(IpAddr::from([127, 0, 0, 1]))
+/// How long a daemon waits for Tailscale to give this machine an address before giving
+/// up, so a boot where `tailscaled` starts alongside us does not leave us on loopback.
+const TAILNET_WAIT: Duration = Duration::from_secs(60);
+
+/// This machine's tailnet address; loopback when Tailscale is not installed at all.
+///
+/// With Tailscale installed but not answering (still starting, logged out) this waits,
+/// then fails: a node bound to loopback advertises an address no peer can dial, and
+/// nothing would ever correct it. Failing lets the service manager retry.
+/// `STARTFS_TAILNET_WAIT` (seconds) overrides how long to wait.
+fn tailnet_address() -> Result<IpAddr, CliError> {
+    let wait = std::env::var("STARTFS_TAILNET_WAIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(TAILNET_WAIT, Duration::from_secs);
+    let started = Instant::now();
+    loop {
+        match Command::new("tailscale").args(["ip", "-4"]).output() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(IpAddr::from([127, 0, 0, 1]));
+            }
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Some(ip) = text.lines().next().and_then(|l| l.trim().parse().ok()) {
+                    return Ok(ip);
+                }
+            }
+            _ => {}
+        }
+        if started.elapsed() >= wait {
+            return Err(CliError::NoTailnet(wait));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// One line per member, in columns sized to the longest entry.
