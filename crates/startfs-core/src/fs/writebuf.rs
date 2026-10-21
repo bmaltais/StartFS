@@ -16,11 +16,15 @@ use std::sync::atomic::Ordering;
 /// Default cap on a file's buffered bytes before a batch is committed.
 pub const DEFAULT_WRITE_BUFFER: u64 = 8 << 20;
 
-/// Writes held for one file: `data` is the file's bytes from `start`.
+/// Writes held for one file: `data` is the file's bytes from `start`. While
+/// `busy`, a commit of these bytes is running without the buffers' lock (it may
+/// be waiting on a peer): readers still see them, writers wait for it to end.
+#[derive(Clone)]
 pub(super) struct Dirty {
     start: u64,
     data: Vec<u8>,
     mtime: Nanos,
+    busy: bool,
 }
 
 impl Dirty {
@@ -68,21 +72,27 @@ impl LocalFs {
         self.admit(&dirty, data.len() as u64)?;
         let now = self.clock.now();
         let end = offset + data.len() as u64;
-        let touches = |dirty: &HashMap<Ino, Dirty>| {
-            dirty
-                .get(&ino)
-                .is_none_or(|d| offset <= d.end() && end >= d.start)
-        };
+        let (mut tried_full, mut tried_apart) = (false, false);
         // Commit before merging, so a commit that fails rejects this write
-        // and leaves the buffer as it was.
-        if dirty
-            .get(&ino)
-            .is_some_and(|d| d.data.len() as u64 + data.len() as u64 >= self.buffer_cap())
-        {
-            self.commit(&mut dirty, ino, false)?;
-        }
-        if !touches(&dirty) {
-            self.commit(&mut dirty, ino, true)?;
+        // and leaves the buffer as it was. A commit runs without the lock, so
+        // the buffer is looked at again once it is done.
+        loop {
+            while dirty.get(&ino).is_some_and(|d| d.busy) {
+                dirty = self.committed.wait(dirty).unwrap();
+            }
+            let Some(d) = dirty.get(&ino) else { break };
+            if !tried_full && d.data.len() as u64 + data.len() as u64 >= self.buffer_cap() {
+                tried_full = true;
+                drop(dirty);
+                self.commit(ino, false, true)?;
+            } else if !tried_apart && !(offset <= d.end() && end >= d.start) {
+                tried_apart = true;
+                drop(dirty);
+                self.commit(ino, true, true)?;
+            } else {
+                break;
+            }
+            dirty = self.dirty.lock().unwrap();
         }
         match dirty.get_mut(&ino) {
             Some(d) if offset >= d.start => {
@@ -101,6 +111,7 @@ impl LocalFs {
                     start: offset,
                     data: merged,
                     mtime: now,
+                    busy: false,
                 };
             }
             None => {
@@ -112,6 +123,7 @@ impl LocalFs {
                         start: offset,
                         data: data.to_vec(),
                         mtime: now,
+                        busy: false,
                     },
                 );
             }
@@ -134,10 +146,24 @@ impl LocalFs {
     }
 
     /// Commit one file's buffer. `last` commits everything; otherwise the
-    /// final chunk stays buffered, since more data may still change it.
-    fn commit(&self, dirty: &mut HashMap<Ino, Dirty>, ino: Ino, last: bool) -> FsResult<()> {
-        let Some(d) = dirty.remove(&ino) else {
-            return Ok(());
+    /// final chunk stays buffered, since more data may still change it. The
+    /// buffers' lock is not held while it runs, since it can wait on a peer:
+    /// the file's entry stays, marked busy, so reads see its bytes and writes
+    /// to it wait. With `wait` false a file already being committed is skipped.
+    fn commit(&self, ino: Ino, last: bool, wait: bool) -> FsResult<()> {
+        let d = {
+            let mut dirty = self.dirty.lock().unwrap();
+            loop {
+                match dirty.get_mut(&ino) {
+                    None => return Ok(()),
+                    Some(d) if !d.busy => {
+                        d.busy = true;
+                        break d.clone();
+                    }
+                    Some(_) if !wait => return Ok(()),
+                    Some(_) => dirty = self.committed.wait(dirty).unwrap(),
+                }
+            }
         };
         let dropped = Cell::new(false);
         let done = self.fetching_as(true, Durability::None, |t, spill| {
@@ -161,23 +187,38 @@ impl LocalFs {
             Ok(Some(rest)) if dropped.get() => self.sync().map(|()| Some(rest)),
             other => other,
         };
-        match done {
+        let mut dirty = self.dirty.lock().unwrap();
+        let out = match done {
             Ok(Some(rest)) => {
-                if let Some(rest) = rest {
-                    dirty.insert(ino, rest);
-                }
+                match rest {
+                    Some(rest) => dirty.insert(ino, rest),
+                    None => dirty.remove(&ino),
+                };
                 Ok(())
             }
             Ok(None) => {
-                dirty.insert(ino, d);
+                Self::release_buffer(&mut dirty, ino);
                 Ok(())
             }
             // The file was removed since it was written to.
-            Err(FsError::NotFound) => Ok(()),
+            Err(FsError::NotFound) => {
+                dirty.remove(&ino);
+                Ok(())
+            }
             Err(e) => {
-                dirty.insert(ino, d);
+                Self::release_buffer(&mut dirty, ino);
                 Err(e)
             }
+        };
+        drop(dirty);
+        self.committed.notify_all();
+        out
+    }
+
+    /// Mark a file's buffer as no longer being committed.
+    fn release_buffer(dirty: &mut HashMap<Ino, Dirty>, ino: Ino) {
+        if let Some(d) = dirty.get_mut(&ino) {
+            d.busy = false;
         }
     }
 
@@ -274,6 +315,7 @@ impl LocalFs {
                         start: at,
                         data: win[(at - sa) as usize..].to_vec(),
                         mtime: d.mtime,
+                        busy: false,
                     });
                 }
             }
@@ -300,12 +342,11 @@ impl LocalFs {
 
     /// Commit what is buffered for `ino`.
     pub(super) fn flush_ino(&self, ino: Ino) -> FsResult<()> {
-        let mut dirty = self.dirty.lock().unwrap();
-        self.commit(&mut dirty, ino, true)
+        self.commit(ino, true, true)
     }
 
-    /// Commit every file's buffer. With `wait` false a busy buffer is skipped
-    /// (a commit waiting on a peer may be what is running this).
+    /// Commit every file's buffer. With `wait` false a buffer already being
+    /// committed is skipped (a commit waiting on a peer may be what is running this).
     pub fn flush_all(&self, wait: bool) -> FsResult<()> {
         self.flush_idle(wait, 0)
     }
@@ -313,20 +354,14 @@ impl LocalFs {
     /// Commit the buffers of files not written to for `idle` nanoseconds, so
     /// a file still being written keeps batching.
     fn flush_idle(&self, wait: bool, idle: Nanos) -> FsResult<()> {
-        let mut dirty = match self.dirty.try_lock() {
-            Ok(g) => g,
-            Err(_) if !wait => return Ok(()),
-            Err(_) => self.dirty.lock().unwrap(),
-        };
         let now = self.clock.now();
-        let inos: Vec<Ino> = dirty
-            .iter()
+        let inos: Vec<Ino> = (self.dirty.lock().unwrap().iter())
             .filter(|(_, d)| now.saturating_sub(d.mtime) >= idle)
             .map(|(ino, _)| *ino)
             .collect();
         let mut first_err = Ok(());
         for ino in inos {
-            if let Err(e) = self.commit(&mut dirty, ino, true) {
+            if let Err(e) = self.commit(ino, true, wait) {
                 first_err = first_err.and(Err(e));
             }
         }
@@ -336,7 +371,6 @@ impl LocalFs {
     /// [`Self::flush_all`] for callers with nobody to return the error to: it
     /// is logged, once per distinct message, since the commit is retried each tick.
     pub fn flush_all_logged(&self, wait: bool, idle: Nanos) {
-        // Not held across the commit, which can re-enter through a peer wait.
         let result = self.flush_idle(wait, idle);
         self.log_failure(result, "could not commit buffered writes");
     }
