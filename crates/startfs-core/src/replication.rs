@@ -44,6 +44,10 @@ const POLL_BATCH: usize = 1024;
 /// tried again, so it does not take a place in every round from chunks that can proceed.
 const BLOCKED_WAIT: Duration = Duration::from_secs(1);
 
+/// How often the staged chunks are checked for ones no file refers to any more. Each check
+/// reads every inode, so it is not done every round.
+const SWEEP: Duration = Duration::from_secs(2);
+
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
     pub me: MemberId,
@@ -145,6 +149,8 @@ struct State {
     /// Whether staging has been listed since the last epoch change. After
     /// that, new chunks are learned of as they are staged.
     scanned: bool,
+    /// When staged chunks were last checked against the files that refer to them.
+    swept: Option<Nanos>,
 }
 
 /// A replica this node lost to corruption and is fetching afresh.
@@ -322,6 +328,35 @@ impl Replicator {
         }
     }
 
+    /// Drop the staged chunks no file refers to any more (a build's temporary files, an
+    /// overwritten file): pushing them to peers only for the garbage collector to remove them
+    /// there is wasted work. Like the collector, this counts only the chunks the visible tree
+    /// refers to, so the retention that keeps a deleted file recoverable does not apply to a
+    /// chunk that never left staging.
+    fn sweep_unreferenced(&self, st: &mut State, now: Nanos) {
+        if st
+            .swept
+            .is_some_and(|at| now.saturating_sub(at) < SWEEP.as_nanos() as u64)
+        {
+            return;
+        }
+        let staged: Vec<ChunkId> = st
+            .tracks
+            .keys()
+            .filter(|id| self.fs.has_staged(id))
+            .copied()
+            .collect();
+        if staged.is_empty() {
+            return;
+        }
+        st.swept = Some(now);
+        for id in self.fs.drop_unreferenced(&staged).unwrap_or_default() {
+            if !self.fs.has_replica(&id) {
+                st.tracks.remove(&id);
+            }
+        }
+    }
+
     /// Membership, offers or reachability changed: check again the chunks the change touches.
     /// What was learned about the chunks being worked on is kept; of the others (held and
     /// complete) only those whose targets moved, or that need stand-ins or a hand-off now, are
@@ -394,6 +429,7 @@ impl Replicator {
             self.replan(&mut st, view, epoch);
         }
         self.track_staged(&mut st);
+        self.sweep_unreferenced(&mut st, view.now);
         // Earn this round's share of the repair rate (at most one second's worth).
         let earned = st.allowance_at.map_or(i64::MAX, |at| {
             (view.now.saturating_sub(at) as u128 * view.repair_rate as u128 / 1_000_000_000)

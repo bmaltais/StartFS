@@ -95,4 +95,28 @@ impl LocalFs {
             Ok(report)
         })
     }
+
+    /// Remove from staging those of `ids` that no file in the visible tree refers to, and
+    /// return them. A chunk is staged in the same transaction that makes a file refer to it,
+    /// and this reads the tree under the same lock, so a chunk that is about to be referenced
+    /// is never taken for an orphan.
+    pub fn drop_unreferenced(&self, ids: &[ChunkId]) -> FsResult<Vec<ChunkId>> {
+        self.run(false, |t| {
+            let mut referenced: HashSet<ChunkId> = HashSet::new();
+            for row in t.inodes.iter().map_err(db)? {
+                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
+                    referenced.extend(refs.into_iter().map(|r| r.id));
+                }
+            }
+            let orphans: Vec<ChunkId> = ids
+                .iter()
+                .filter(|id| !referenced.contains(*id))
+                .copied()
+                .collect();
+            for id in &orphans {
+                self.staging.remove(id);
+            }
+            Ok(orphans)
+        })
+    }
 }
