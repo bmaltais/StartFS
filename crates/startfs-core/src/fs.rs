@@ -714,10 +714,16 @@ impl LocalFs {
                 self.cache.put(&data);
                 Ok(data)
             }
-            // A damaged local copy that no peer could replace is an I/O error.
-            _ if self.chunks.size_of(id).is_some() => Err(FsError::Io("chunk is corrupt".into())),
-            _ if source.is_some_and(|s| s.silent()) => Err(FsError::TimedOut),
-            _ => Err(FsError::Unavailable),
+            // A local copy is damaged only if reading it says so: a copy that could not be
+            // opened (out of descriptors, or replaced since the read missed it) is no reason
+            // to report damage, and one that reads fine is the answer.
+            _ => match self.chunks.get(id) {
+                Ok(data) => Ok(data),
+                // A damaged local copy that no peer could replace is an I/O error.
+                Err(FsError::Io(why)) if why == crate::chunkstore::CORRUPT => Err(FsError::Io(why)),
+                Err(_) if source.is_some_and(|s| s.silent()) => Err(FsError::TimedOut),
+                Err(_) => Err(FsError::Unavailable),
+            },
         }
     }
 

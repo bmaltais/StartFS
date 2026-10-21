@@ -126,6 +126,9 @@ fn plain_len(envelope: &[u8]) -> u32 {
     u32::from_le_bytes(envelope[4..8].try_into().unwrap())
 }
 
+/// What an I/O error says when a chunk file was read but is not the chunk it is named for.
+pub const CORRUPT: &str = "chunk is corrupt";
+
 fn io(e: std::io::Error) -> FsError {
     // A full disk is the one failure the user can act on: report it as ENOSPC.
     if e.raw_os_error() == Some(libc::ENOSPC) {
@@ -404,7 +407,7 @@ impl ChunkStore {
 
     /// Fetch a chunk, verifying its BLAKE3 hash. Corruption is an I/O error.
     pub fn get(&self, id: &ChunkId) -> FsResult<Vec<u8>> {
-        let corrupt = || FsError::Io("chunk is corrupt".into());
+        let corrupt = || FsError::Io(CORRUPT.into());
         let mut file = fs::File::open(self.path(id)).map_err(io)?;
         let mut header = [0u8; HEADER_LEN];
         file.read_exact(&mut header).map_err(|_| corrupt())?;
