@@ -5,3 +5,10 @@ members = ["crates/startfs-core", "crates/startfs-harness", "crates/startfs"]
 [workspace.lints.clippy]
 # Ignoring a Result needs an explicit allow with a reason (CODING_STANDARDS.md, Errors).
 let_underscore_must_use = "deny"
+
+# The simulated-clock tests run for minutes of CPU unoptimised.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
