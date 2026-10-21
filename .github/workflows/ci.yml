@@ -17,8 +17,9 @@ jobs:
       - name: Install FUSE headers
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 pkg-config
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo nextest run --workspace
       - run: scripts/check-helpers.sh
       - run: scripts/test-install.sh
