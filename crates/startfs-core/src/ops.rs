@@ -90,6 +90,8 @@ pub enum FsError {
     NoData,
     #[error("file contents are not available: no reachable peer holds them")]
     Unavailable,
+    #[error("file contents are not available: a peer that may hold them did not answer in time")]
+    TimedOut,
     #[error("no space left on this node")]
     NoSpace,
     #[error("node is not running")]
@@ -112,7 +114,7 @@ impl FsError {
             FsError::NotSupported => libc::ENOTSUP,
             FsError::NotPermitted => libc::EPERM,
             FsError::NoData => libc::ENODATA,
-            FsError::Unavailable => libc::EHOSTUNREACH,
+            FsError::Unavailable | FsError::TimedOut => libc::EHOSTUNREACH,
             FsError::NoSpace => libc::ENOSPC,
             FsError::NodeDown => libc::ENOTCONN,
             FsError::Io(_) => libc::EIO,

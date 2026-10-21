@@ -12,6 +12,7 @@ use crate::chunker::MAX_CHUNK;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 /// Default cap on a file's buffered bytes before a batch is committed.
 pub const DEFAULT_WRITE_BUFFER: u64 = 8 << 20;
@@ -25,6 +26,10 @@ pub(super) struct Dirty {
     data: Vec<u8>,
     mtime: Nanos,
     busy: bool,
+    /// Commits of these bytes have failed `failures` times in a row; a background commit waits
+    /// until `retry_at` before trying again.
+    failures: u32,
+    retry_at: Nanos,
 }
 
 impl Dirty {
@@ -39,6 +44,12 @@ struct Spliced {
     content: Content,
     size: u64,
     rest: Option<Dirty>,
+}
+
+/// How long a background commit leaves a file alone after its `failures`th failure in a row:
+/// doubling from a second to a minute.
+fn retry_delay(failures: u32) -> Nanos {
+    Duration::from_secs(1 << failures.saturating_sub(1).min(6)).as_nanos() as Nanos
 }
 
 /// Whether `new` stops referring to a chunk that `old` referred to.
@@ -112,6 +123,8 @@ impl LocalFs {
                     data: merged,
                     mtime: now,
                     busy: false,
+                    failures: 0,
+                    retry_at: 0,
                 };
             }
             None => {
@@ -124,6 +137,8 @@ impl LocalFs {
                         data: data.to_vec(),
                         mtime: now,
                         busy: false,
+                        failures: 0,
+                        retry_at: 0,
                     },
                 );
             }
@@ -149,13 +164,16 @@ impl LocalFs {
     /// final chunk stays buffered, since more data may still change it. The
     /// buffers' lock is not held while it runs, since it can wait on a peer:
     /// the file's entry stays, marked busy, so reads see its bytes and writes
-    /// to it wait. With `wait` false a file already being committed is skipped.
+    /// to it wait. With `wait` false (the background tick) a file already being
+    /// committed is skipped, and so is one whose last commits failed until its
+    /// retry time: an explicit flush always tries.
     fn commit(&self, ino: Ino, last: bool, wait: bool) -> FsResult<()> {
         let d = {
             let mut dirty = self.dirty.lock().unwrap();
             loop {
                 match dirty.get_mut(&ino) {
                     None => return Ok(()),
+                    Some(d) if !wait && self.clock.now() < d.retry_at => return Ok(()),
                     Some(d) if !d.busy => {
                         d.busy = true;
                         break d.clone();
@@ -207,6 +225,10 @@ impl LocalFs {
             }
             Err(e) => {
                 Self::release_buffer(&mut dirty, ino);
+                if let Some(d) = dirty.get_mut(&ino) {
+                    d.failures = d.failures.saturating_add(1);
+                    d.retry_at = self.clock.now().saturating_add(retry_delay(d.failures));
+                }
                 Err(e)
             }
         };
@@ -316,6 +338,8 @@ impl LocalFs {
                         data: win[(at - sa) as usize..].to_vec(),
                         mtime: d.mtime,
                         busy: false,
+                        failures: 0,
+                        retry_at: 0,
                     });
                 }
             }
@@ -363,6 +387,10 @@ impl LocalFs {
         for ino in inos {
             if let Err(e) = self.commit(ino, true, wait) {
                 first_err = first_err.and(Err(e));
+                if !wait {
+                    // One file waiting on peers is all a tick can afford.
+                    break;
+                }
             }
         }
         first_err
