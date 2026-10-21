@@ -49,6 +49,27 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 /// How many times a request waits (calling the hook each time) for an answer.
 const WAIT_ROUNDS: usize = 300;
 
+/// The most a tick spends waiting on peers for the chunks a commit of buffered writes needs: a
+/// commit that cannot get them is retried later, but a tick that waits longer stalls
+/// replication and everything else it does.
+const TICK_FETCH_BUDGET: Duration = Duration::from_secs(2);
+
+thread_local! {
+    /// When the fetches this thread makes must stop waiting, if they must, and whether the last
+    /// one left a peer unanswered.
+    static FETCH: std::cell::Cell<(Option<Nanos>, bool)> = const { std::cell::Cell::new((None, false)) };
+}
+
+/// Ends the fetch budget of the thread that made it, restoring the one it found (a wait for a
+/// peer can run a tick inside itself).
+struct FetchBudget((Option<Nanos>, bool));
+
+impl Drop for FetchBudget {
+    fn drop(&mut self) {
+        FETCH.with(|f| f.set(self.0));
+    }
+}
+
 /// A member not heard from for this long is shown as down.
 /// A tick handles peer messages until this much time has passed, then moves on to its other
 /// work: a count cannot tell a cheap acknowledgement from a chunk to hash and store (about
@@ -219,6 +240,10 @@ impl ChunkSource for PeerChunks {
             None => vec![None; ids.len()],
         }
     }
+
+    fn silent(&self) -> bool {
+        FETCH.with(|f| f.get().1)
+    }
 }
 
 impl Daemon {
@@ -361,8 +386,11 @@ impl Daemon {
         self.prune_chunk_replies();
         // Peers and replication only see committed writes; a file still being
         // written keeps batching until it has been quiet for the commit delay.
-        self.fs
-            .flush_all_logged(false, self.config.write_commit_delay_ms * 1_000_000);
+        {
+            let _budget = self.fetch_budget(TICK_FETCH_BUDGET);
+            self.fs
+                .flush_all_logged(false, self.config.write_commit_delay_ms * 1_000_000);
+        }
         // Lazy commits reach disk once quiet, and always before peers or
         // replication can build on them.
         if !self.membership.lock().unwrap().peers().is_empty() {
@@ -846,9 +874,31 @@ impl Daemon {
             if let Some(v) = poll() {
                 return Some(v);
             }
+            if self.fetch_over_budget() {
+                break;
+            }
             hook();
         }
         poll()
+    }
+
+    /// Make the fetches this thread does stop waiting for peers after `by`.
+    fn fetch_budget(&self, by: Duration) -> FetchBudget {
+        let until = self.clock.now().saturating_add(by.as_nanos() as u64);
+        let before = FETCH.with(|f| f.get());
+        // An enclosing budget keeps its own end.
+        FETCH.with(|f| f.set((before.0.or(Some(until)), false)));
+        FetchBudget(before)
+    }
+
+    fn fetch_over_budget(&self) -> bool {
+        FETCH
+            .with(|f| f.get().0)
+            .is_some_and(|until| self.clock.now() >= until)
+    }
+
+    fn fetch_found_silence(&self) {
+        FETCH.with(|f| f.set((f.get().0, true)));
     }
 
     /// The peers to ask for chunks, the ones that answer fastest first, those not yet timed
@@ -902,6 +952,7 @@ impl Daemon {
                     self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
                 if reply.is_none() {
                     self.activity.timed_out(peer);
+                    self.fetch_found_silence();
                 }
                 let answered = reply
                     .as_ref()
@@ -928,13 +979,19 @@ impl Daemon {
     fn fetch_chunk(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
         let transport = self.transport()?;
         let (peers, _) = self.ranked_peers();
+        FETCH.with(|f| f.set((f.get().0, false)));
         for peer in peers {
+            if self.fetch_over_budget() {
+                self.fetch_found_silence();
+                break;
+            }
             self.chunk_replies.lock().unwrap().remove(&(peer, *id));
             let sent = self.clock.now();
             transport.send(peer, Message::ChunkRequest(*id).encode());
             let reply = self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
             if reply.is_none() {
                 self.activity.timed_out(peer);
+                self.fetch_found_silence();
             }
             let answered = reply
                 .as_ref()

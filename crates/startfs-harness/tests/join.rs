@@ -335,7 +335,7 @@ fn file_contents_are_fetched_from_a_peer_when_read() {
     let on_b = b.lookup(ROOT_INO, "big").unwrap();
     assert_eq!(on_b.size, 300_000);
     c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
-    assert_eq!(b.read(on_b.ino, 0, u32::MAX), Err(FsError::Unavailable));
+    assert_eq!(b.read(on_b.ino, 0, u32::MAX), Err(FsError::TimedOut));
 
     c.network().heal();
     assert_eq!(b.read(on_b.ino, 0, u32::MAX).unwrap(), data);
@@ -359,7 +359,7 @@ fn recently_read_files_stay_readable_offline_and_unread_ones_do_not() {
     c.crash(1);
     c.restart(1);
     assert_eq!(b.read(on_b("seen"), 0, u32::MAX).unwrap(), seen);
-    assert_eq!(b.read(on_b("unseen"), 0, 10), Err(FsError::Unavailable));
+    assert_eq!(b.read(on_b("unseen"), 0, 10), Err(FsError::TimedOut));
 }
 
 #[test]
@@ -403,7 +403,7 @@ fn the_cache_is_bounded_and_drops_the_least_recently_used_file() {
     c.network().partition(&[&[NodeId(0)], &[NodeId(1)]]);
     assert_eq!(b.read(ino(0), 0, u32::MAX).unwrap(), files[0]);
     assert_eq!(b.read(ino(2), 0, u32::MAX).unwrap(), files[2]);
-    assert_eq!(b.read(ino(1), 0, 10), Err(FsError::Unavailable));
+    assert_eq!(b.read(ino(1), 0, 10), Err(FsError::TimedOut));
 }
 
 #[test]

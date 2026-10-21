@@ -54,7 +54,7 @@ fn a_commit_waiting_on_a_peer_does_not_stop_other_files() {
     assert_eq!(c.fs(0).getattr(big).unwrap().size, FILE as u64);
 
     // The commit fails and keeps the write; it goes through once the peer is back.
-    assert_eq!(committing.join().unwrap(), Err(FsError::Unavailable));
+    assert_eq!(committing.join().unwrap(), Err(FsError::TimedOut));
     c.network().heal();
     c.fs(0).flush(big).unwrap();
     assert_eq!(c.fs(0).read(big, 0, 7), Ok(b"patched".to_vec()));

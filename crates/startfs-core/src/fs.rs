@@ -237,6 +237,12 @@ pub trait ChunkSource: Send + Sync {
             .map(|id| self.fetch(id, &|d| accept(id, d)))
             .collect()
     }
+
+    /// Whether, in the last fetch this thread made, a peer did not answer in time (as opposed
+    /// to every peer asked saying it lacks the chunk).
+    fn silent(&self) -> bool {
+        false
+    }
 }
 
 /// Most chunks a read fetches beyond the one it is waiting for, and the most bytes they add up to
@@ -702,13 +708,15 @@ impl LocalFs {
     fn fetch_remote(&self, id: &ChunkId) -> FsResult<Vec<u8>> {
         let source = self.source.lock().unwrap().clone();
         let is_chunk = |d: &[u8]| blake3::hash(d).as_bytes() == id;
-        match source.and_then(|s| s.fetch(id, &is_chunk)) {
+        let fetched = source.as_ref().and_then(|s| s.fetch(id, &is_chunk));
+        match fetched {
             Some(data) if is_chunk(&data) => {
                 self.cache.put(&data);
                 Ok(data)
             }
             // A damaged local copy that no peer could replace is an I/O error.
             _ if self.chunks.size_of(id).is_some() => Err(FsError::Io("chunk is corrupt".into())),
+            _ if source.is_some_and(|s| s.silent()) => Err(FsError::TimedOut),
             _ => Err(FsError::Unavailable),
         }
     }
