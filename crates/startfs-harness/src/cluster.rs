@@ -455,6 +455,16 @@ impl Cluster {
         corrupt_files(&self.nodes[i].dir.path().join("chunks"));
     }
 
+    /// Fault injection: the node's replica chunk files can (not) be opened, as when it runs out
+    /// of file descriptors, though they are on disk and undamaged.
+    pub fn set_chunks_readable(&self, i: usize, readable: bool) {
+        self.commit_writes(i);
+        set_mode(
+            &self.nodes[i].dir.path().join("chunks"),
+            if readable { 0o644 } else { 0o000 },
+        );
+    }
+
     /// Fault injection: the same for the node's cache of fetched chunks.
     pub fn corrupt_cache(&self, i: usize) {
         self.commit_writes(i);
@@ -540,6 +550,18 @@ fn corrupt_files(dir: &std::path::Path) {
                 *last ^= 0xFF;
             }
             std::fs::write(&p, b).unwrap();
+        }
+    }
+}
+
+fn set_mode(dir: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            set_mode(&p, mode);
+        } else {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
         }
     }
 }
