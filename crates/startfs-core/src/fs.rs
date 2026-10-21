@@ -19,7 +19,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// Files up to this size live inside their metadata record, with no chunk.
 pub const INLINE_MAX: usize = 2048;
@@ -286,8 +286,11 @@ pub struct LocalFs {
     config: NodeConfig,
     /// This node's member id; changes once, when it joins a filesystem.
     node: AtomicU32,
-    /// Writes not yet committed, per file. Lock order: this, then `lock`.
+    /// Writes not yet committed, per file. Never held while a commit runs (it
+    /// can wait on a peer): a commit marks its file busy and writers wait on `committed`.
     dirty: Mutex<HashMap<Ino, writebuf::Dirty>>,
+    /// Signalled when a commit of a file's buffer ends.
+    committed: Condvar,
     write_buffer_limit: AtomicU64,
     /// The last commit failure logged by `flush_all_logged`.
     flush_error: Mutex<Option<String>>,
@@ -355,6 +358,7 @@ impl LocalFs {
             node: AtomicU32::new(config.node.0),
             config,
             dirty: Mutex::new(HashMap::new()),
+            committed: Condvar::new(),
             write_buffer_limit: AtomicU64::new(DEFAULT_WRITE_BUFFER),
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
