@@ -418,7 +418,19 @@ fn a_restarted_peer_does_not_set_the_two_nodes_redialing_each_other() {
     chat(&a, &b, Duration::from_secs(2), Duration::from_millis(250));
 
     drop(b);
-    let b = QuicTransport::start(b_addr, whois.clone(), vec![]).unwrap();
+    // The old socket may take a moment to release the port.
+    let mut tries = 0;
+    let b = loop {
+        match QuicTransport::start(b_addr, whois.clone(), vec![]) {
+            Ok(b) => break b,
+            Err(e) if tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+                drop(e);
+            }
+            Err(e) => panic!("cannot rebind {b_addr}: {e}"),
+        }
+    };
     b.resolve(&a.local_addr().to_string()).unwrap();
     let before = a.connects() + b.connects();
     // Hearing from the new b drops a's link to the old one, so a reaches b at once rather
