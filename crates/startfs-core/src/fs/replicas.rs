@@ -124,6 +124,17 @@ impl LocalFs {
 
     /// Turn a staged chunk into a replica held here.
     pub fn promote(&self, id: &ChunkId, offer: u64) -> FsResult<Replica> {
+        if self.has_replica(id) {
+            return Ok(Replica::Stored);
+        }
+        let size = self.staging.size_of(id).ok_or(FsError::NotFound)?;
+        if self.chunks.stats()?.stored_bytes + size > offer {
+            return Ok(Replica::Full);
+        }
+        // The staged file is the chunk, already hashed and encoded: link it rather than copy it.
+        if self.chunks.adopt(&self.staging, id).is_ok() {
+            return Ok(Replica::Stored);
+        }
         let data = self.staging.get(id)?;
         self.store_replica(&data, offer)
     }

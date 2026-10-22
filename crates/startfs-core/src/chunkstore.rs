@@ -435,6 +435,34 @@ impl ChunkStore {
         Ok(data)
     }
 
+    /// Take the chunk `id` that `from` holds, as a second name for the same file: a chunk that
+    /// is already stored once is not read, hashed, compressed and written a second time. The
+    /// file is made durable first, so the stored chunk is complete whatever happens to `from`.
+    /// Both stores must be on one filesystem; otherwise this fails and the caller copies.
+    pub fn adopt(&self, from: &ChunkStore, id: &ChunkId) -> FsResult<()> {
+        let source = from.path(id);
+        let path = self.path(id);
+        if path.exists() {
+            return Ok(());
+        }
+        fs::File::open(&source)
+            .and_then(|f| f.sync_all())
+            .map_err(io)?;
+        let len = fs::metadata(&source).map_err(io)?.len();
+        fs::create_dir_all(path.parent().expect("chunk path has a parent")).map_err(io)?;
+        let _publish = self.publish.lock().unwrap();
+        if path.exists() {
+            return Ok(());
+        }
+        fs::hard_link(&source, &path).map_err(io)?;
+        self.chunks.fetch_add(1, Ordering::SeqCst);
+        self.bytes.fetch_add(len, Ordering::SeqCst);
+        if let Some(added) = &self.added {
+            added.lock().unwrap().push(*id);
+        }
+        Ok(())
+    }
+
     /// Delete a chunk; absent chunks are fine.
     pub fn remove(&self, id: &ChunkId) {
         let path = self.path(id);
