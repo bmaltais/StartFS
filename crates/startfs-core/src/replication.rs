@@ -51,6 +51,10 @@ const SWEEP: Duration = Duration::from_secs(2);
 /// A sweep may take one part in this many of the time.
 const SWEEP_SHARE: u32 = 20;
 
+/// A chunk's bytes are sent again to a peer that has not acknowledged them only after this many
+/// retry delays (see [`retry_delay`]); asks that carry no bytes are repeated after one.
+const BYTES_RETRY: u64 = 6;
+
 /// Most asks (pushes and probes) a peer may have unanswered at once. Past it the chunks wait
 /// without being visited, so a peer that answers slowly is not buried and a round does not
 /// cost more the longer the queue is.
@@ -118,6 +122,10 @@ struct Track {
     sent: HashMap<MemberId, Nanos>,
     /// Members that just said they lack the chunk and have not been sent it yet.
     answered: BTreeSet<MemberId>,
+    /// When the chunk's bytes were last sent, per member. A slow answer is not a lost push, so
+    /// the bytes wait several retry delays before they are sent again (asks are cheap and
+    /// are repeated sooner).
+    pushed: HashMap<MemberId, Nanos>,
     /// Every node placement allows holds it, yet there are fewer than N.
     settled: bool,
     /// Some peer has answered about this chunk, so the holders are known.
@@ -403,6 +411,7 @@ impl Replicator {
             track.missing.clear();
             track.answered.clear();
             track.sent.clear();
+            track.pushed.clear();
             track.settled = false;
             track.wake = 0;
         }
@@ -604,7 +613,18 @@ impl Replicator {
                     .get(t)
                     .is_some_and(|at| view.now.saturating_sub(*at) >= retry);
             let mut data = None;
-            if steward && track.missing.contains(t) {
+            // The bytes of an earlier push may still be queued at the peer: a resend then only
+            // adds to the queue of the member that is behind.
+            let bytes_due = track
+                .pushed
+                .get(t)
+                .is_none_or(|at| view.now.saturating_sub(*at) >= BYTES_RETRY * retry);
+            if steward && track.missing.contains(t) && !bytes_due && track.answered.contains(t) {
+                // It answered an ask while our bytes are still on their way: wait for them.
+                track.answered.remove(t);
+                continue;
+            }
+            if steward && track.missing.contains(t) && bytes_due {
                 if transport.backlog(to) >= BACKLOG_LIMIT {
                     blocked = true;
                     continue;
@@ -623,6 +643,7 @@ impl Replicator {
             }
             if let Some(bytes) = &data {
                 self.activity.chunk_replicated(bytes.len());
+                track.pushed.insert(*t, view.now);
             }
             if timed_out {
                 self.activity.resent_after_timeout(to);
@@ -644,7 +665,15 @@ impl Replicator {
                 .filter(|t| **t != view.me && !track.holders.contains(*t))
                 .filter_map(|t| {
                     let at = track.sent.get(t)?;
-                    Some(at.saturating_add(retry_delay(&st.silent, view, *t)))
+                    let retry = retry_delay(&st.silent, view, *t);
+                    let ask = at.saturating_add(retry);
+                    // Bytes already pushed are not pushed again before their own, longer, wait.
+                    Some(match track.pushed.get(t) {
+                        Some(p) if track.missing.contains(t) => {
+                            ask.max(p.saturating_add(BYTES_RETRY * retry))
+                        }
+                        _ => ask,
+                    })
                 })
                 .min()
                 .unwrap_or(0);
@@ -708,6 +737,7 @@ impl Replicator {
         track.wake = 0;
         match standing {
             Replica::Stored => {
+                track.pushed.remove(&member);
                 track.sent.remove(&member);
                 track.answered.remove(&member);
                 track.holders.insert(member);
