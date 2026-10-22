@@ -397,7 +397,7 @@ fn links_survive_a_node_crash_and_restart() {
 }
 
 #[test]
-fn only_dropping_the_last_name_of_a_chunk_backed_file_is_durable_at_once() {
+fn deleting_a_chunk_backed_file_does_not_wait_for_disk() {
     let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
     let fs = c.fs(0);
     let f = fs.create(ROOT_INO, "f", 0o600).unwrap();
@@ -405,17 +405,29 @@ fn only_dropping_the_last_name_of_a_chunk_backed_file_is_durable_at_once() {
     fs.fsync(f.ino).unwrap();
     assert!(!fs.has_unsynced());
 
-    fs.link(f.ino, ROOT_INO, "g").unwrap();
-    assert!(fs.has_unsynced(), "a link does not wait for disk");
+    fs.unlink(ROOT_INO, "f").unwrap();
+    assert!(fs.has_unsynced(), "`rm -rf` pays no fsync per file");
+}
+
+#[test]
+fn a_crash_after_a_lazy_delete_never_leaves_a_file_without_its_chunks() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let data = vec![7u8; 200_000];
+    let f = fs.create(ROOT_INO, "f", 0o600).unwrap();
+    fs.write(f.ino, 0, &data).unwrap();
     fs.fsync(f.ino).unwrap();
     fs.unlink(ROOT_INO, "f").unwrap();
-    assert!(fs.has_unsynced(), "no chunk reference was dropped");
-    fs.fsync(f.ino).unwrap();
-    fs.unlink(ROOT_INO, "g").unwrap();
-    assert!(
-        !fs.has_unsynced(),
-        "the last name drops the chunk references"
-    );
+
+    // Whatever the background work did with the file's chunks, the delete was made durable
+    // before it removed any.
+    c.tick();
+    c.power_cut(0);
+    c.restart(0);
+    match fs.lookup(ROOT_INO, "f") {
+        Ok(back) => assert_eq!(fs.read(back.ino, 0, u32::MAX).unwrap(), data),
+        Err(e) => assert_eq!(e, FsError::NotFound),
+    }
 }
 
 #[test]
@@ -485,21 +497,6 @@ fn deletes_are_lazy_and_become_durable_after_the_quiet_period() {
 }
 
 #[test]
-fn deleting_a_chunk_backed_file_is_durable_when_unlink_returns() {
-    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
-    let fs = c.fs(0);
-    let f = fs.create(ROOT_INO, "big", 0o600).unwrap();
-    fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
-    fs.flush(f.ino).unwrap();
-
-    fs.unlink(ROOT_INO, "big").unwrap();
-    assert!(
-        !fs.has_unsynced(),
-        "dropping chunk references keeps its durability"
-    );
-}
-
-#[test]
 fn closing_a_new_chunk_backed_file_waits_for_the_quiet_period_like_any_create() {
     let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
     let fs = c.fs(0);
@@ -519,18 +516,30 @@ fn closing_a_new_chunk_backed_file_waits_for_the_quiet_period_like_any_create() 
 }
 
 #[test]
-fn overwriting_chunk_backed_data_is_durable_when_the_close_returns() {
+fn overwriting_chunk_backed_data_waits_for_disk_but_never_loses_the_old_chunk_first() {
     let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
     let fs = c.fs(0);
+    let old = vec![7u8; 200_000];
     let f = fs.create(ROOT_INO, "big", 0o600).unwrap();
-    fs.write(f.ino, 0, &vec![7u8; 200_000]).unwrap();
+    fs.write(f.ino, 0, &old).unwrap();
     fs.fsync(f.ino).unwrap();
 
     fs.write(f.ino, 0, &[8u8; 100]).unwrap();
     fs.flush(f.ino).unwrap();
     assert!(
-        !fs.has_unsynced(),
-        "the old chunk may be collected, so dropping it is durable"
+        fs.has_unsynced(),
+        "the old chunk is removed only after a durable commit"
+    );
+
+    c.tick();
+    c.power_cut(0);
+    c.restart(0);
+    let mut new = old.clone();
+    new[..100].fill(8);
+    let got = fs.read(f.ino, 0, u32::MAX).unwrap();
+    assert!(
+        got == old || got == new,
+        "neither the old nor the new content"
     );
 }
 

@@ -9,8 +9,6 @@
 
 use super::*;
 use crate::chunker::MAX_CHUNK;
-use std::cell::Cell;
-use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -50,18 +48,6 @@ struct Spliced {
 /// doubling from a second to a minute.
 fn retry_delay(failures: u32) -> Nanos {
     Duration::from_secs(1 << failures.saturating_sub(1).min(6)).as_nanos() as Nanos
-}
-
-/// Whether `new` stops referring to a chunk that `old` referred to.
-fn drops_chunks(old: &Content, new: &Content) -> bool {
-    let Content::Chunks(old) = old else {
-        return false;
-    };
-    let kept: HashSet<ChunkId> = match new {
-        Content::Chunks(refs) => refs.iter().map(|r| r.id).collect(),
-        Content::Inline(_) => HashSet::new(),
-    };
-    old.iter().any(|r| !kept.contains(&r.id))
 }
 
 impl LocalFs {
@@ -183,13 +169,11 @@ impl LocalFs {
                 }
             }
         };
-        let dropped = Cell::new(false);
         let done = self.fetching_as(true, Durability::None, |t, spill| {
             let mut i = Self::file(t, ino)?;
             let Some(spliced) = self.splice(&i, &d, last, spill)? else {
                 return Ok(None);
             };
-            dropped.set(drops_chunks(&i.content, &spliced.content));
             i.content = spliced.content;
             i.size = spliced.size;
             i.mtime = d.mtime;
@@ -198,13 +182,6 @@ impl LocalFs {
             self.emit_set_at(t, ino, &i, d.mtime)?;
             Ok(Some(spliced.rest))
         });
-        // A commit that drops chunk references stays durable, since the old chunks
-        // may be collected; one that only adds them waits for the periodic sync,
-        // an fsync or shutdown, like any other lazy commit.
-        let done = match done {
-            Ok(Some(rest)) if dropped.get() => self.sync().map(|()| Some(rest)),
-            other => other,
-        };
         let mut dirty = self.dirty.lock().unwrap();
         let out = match done {
             Ok(Some(rest)) => {

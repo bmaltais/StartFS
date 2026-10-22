@@ -105,10 +105,13 @@ same code with a different membership scope.
     above 2 GiB (or `staging_bytes`, when set), and resume as replication frees staged chunks.
     `status` names the member most staged chunks are waiting on. "Durable" means after
     `fsync`, the periodic sync tick or shutdown; `close` alone does not wait for disk, as on a
-    local filesystem. That holds for a file of any size that is only being added to. Deleting an
-    inline file or an empty directory is lazy in the same way, so a crash may bring it back;
-    deleting a chunk-backed file, or overwriting or truncating one so that chunks are dropped, is
-    durable before it returns, since the dropped chunks may be collected. Chunks written without a
+    local filesystem. That holds for a file of any size that is only being added to. Deleting a
+    file (chunk-backed or not), an empty directory, or overwriting a file so that chunks are
+    dropped is lazy in the same way, so a crash may bring it back: `rm -rf` pays no fsync per
+    entry (it cost a durable metadata commit, about 64 KiB written, per file). The chunks it
+    drops are removed only after a durable commit (garbage collection and the replicator's
+    sweep of unreferenced staged chunks make one first), so a file a crash brings back always
+    finds its chunks. Chunks written without a
     sync are flagged on disk, and a store opened after a crash drops any of them that were cut
     short, so a later write of the same content stores it afresh.
 
