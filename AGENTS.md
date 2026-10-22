@@ -21,4 +21,5 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 - Idle cost (CPU, wakeups/s): `scripts/validate-idle.sh`; a live node's tick count and per-phase cost: `startfs activity`.
 - Before/after on `main` for any `scripts/` profile: `scripts/ab.sh`.
 - Where the suite's time goes (slowest binaries, or slowest tests in one): `scripts/test-times.sh`.
+- Write amplification (bytes written to storage per byte of payload: copies, a patch, a delete; the daemon's figure and the disk's): `scripts/profile-amplification.sh`, with `scripts/ab.sh -r REF` to compare.
 - Write-path speed (large file, many small files, syscall counts): `scripts/profile-write.sh`; the syscall counts need `strace` and `sudo` (`ptrace_scope` blocks attaching to the daemon).
