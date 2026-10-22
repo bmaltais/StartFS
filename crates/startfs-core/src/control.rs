@@ -258,6 +258,8 @@ pub struct NodeReport {
 pub struct Staging {
     pub chunks: u64,
     pub bytes: u64,
+    /// The member most of these chunks wait on, and how many chunks that is.
+    pub waiting_on: Option<(MemberId, u64)>,
 }
 
 /// How safe a chunk (or the worst chunk of a file) is.

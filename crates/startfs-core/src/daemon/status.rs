@@ -541,6 +541,11 @@ impl Daemon {
                     Staging {
                         chunks: s.chunks,
                         bytes: s.stored_bytes,
+                        waiting_on: if s.chunks > 0 {
+                            self.replicator.staged_waiting_on()
+                        } else {
+                            None
+                        },
                     }
                 },
                 cache: self.fs.cache_stats(),

@@ -97,8 +97,13 @@ same code with a different membership scope.
 
 12. **Write durability:** local first, background replication. A write is durable on the local node's
     disk and returns immediately; replication to the other N-1 nodes follows. There is a window with
-    a single copy, and `startfs status` must show files not yet fully replicated. Nodes with offer 0
-    need a local staging area for writes until replication completes. "Durable" means after
+    a single copy, and `startfs status` must show files not yet fully replicated. Every node keeps
+    a local staging area for writes until replication completes. It is the buffer that lets a
+    writer run at local speed while chunks trickle out to slower members, so it is bounded by
+    the free space of its partition, never by the node's offer or by replication speed: writes
+    are refused (`ENOSPC`) only once staging would use more than four fifths of the free space
+    above 2 GiB (or `staging_bytes`, when set), and resume as replication frees staged chunks.
+    `status` names the member most staged chunks are waiting on. "Durable" means after
     `fsync`, the periodic sync tick or shutdown; `close` alone does not wait for disk, as on a
     local filesystem. That holds for a file of any size that is only being added to. Deleting an
     inline file or an empty directory is lazy in the same way, so a crash may bring it back;
@@ -256,7 +261,7 @@ These are intentionally left to the specification, with the constraints stated a
 - Conflict-copy naming and how conflicts are surfaced to the user
 - Node admission and removal flow details (token format, expiry, revocation, `leave` semantics)
 - Repair rate limiting and prioritisation (at-risk chunks first)
-- Local staging area sizing for offer-0 nodes
+- Local staging area sizing. Done: bounded by the staging partition's free space (decision 12)
 - Compression level (zstd 3). Done: `compression = auto` (default) samples four 16 KiB spans of a chunk and compresses it only if they shrink by an eighth, keeping the result only if the whole chunk does; `off` and `always` are the alternatives. The codec is per chunk on disk, so the setting is per node and changing it needs no migration.
 - Defaults to treat as accepted: small-file threshold about 64KB, failure grace period 30 minutes,
   GC retention 7 days, scrub period 30 days

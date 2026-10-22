@@ -35,11 +35,33 @@ pub struct Resources {
     pub io_pressure: Option<Pressure>,
     /// Bytes the daemon has caused to be written to storage; compare two readings for a rate.
     pub written_bytes: Option<u64>,
+    /// Free space on the partition that holds the daemon's data; `None` reads the real disk.
+    /// Only a source that is told its figures (see [`ManualResources`]) uses this.
+    pub disk_free_bytes: Option<u64>,
     pub cgroup: Option<Cgroup>,
 }
 
 pub trait ResourceSource: Send + Sync {
     fn sample(&self) -> Resources;
+
+    /// Bytes available to this daemon on the partition holding `dir`, if the OS says.
+    fn disk_free(&self, _dir: &std::path::Path) -> Option<u64> {
+        None
+    }
+}
+
+/// Free bytes for unprivileged users on the partition holding `dir`.
+pub fn free_space(dir: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `path` is a valid C string and `st` is a valid out pointer for statvfs.
+    if unsafe { libc::statvfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs returned 0, so it filled `st`.
+    let st = unsafe { st.assume_init() };
+    Some(st.f_bavail.saturating_mul(st.f_frsize))
 }
 
 /// Reads `/proc` and the cgroup files; every figure the platform lacks stays `None`.
@@ -56,6 +78,10 @@ impl ResourceSource for SystemResources {
             Resources::default()
         }
     }
+
+    fn disk_free(&self, dir: &std::path::Path) -> Option<u64> {
+        free_space(dir)
+    }
 }
 
 /// Figures that only change when told to; none until set.
@@ -71,6 +97,14 @@ impl ManualResources {
 impl ResourceSource for ManualResources {
     fn sample(&self) -> Resources {
         self.0.lock().unwrap().clone()
+    }
+
+    fn disk_free(&self, dir: &std::path::Path) -> Option<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .disk_free_bytes
+            .or_else(|| free_space(dir))
     }
 }
 
@@ -103,6 +137,7 @@ mod linux {
             cpu_pressure: pressure("/proc/pressure/cpu"),
             io_pressure: pressure("/proc/pressure/io"),
             written_bytes: written_bytes(),
+            disk_free_bytes: None,
             cgroup: cgroup(),
         }
     }
