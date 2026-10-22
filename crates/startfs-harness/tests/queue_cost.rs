@@ -58,12 +58,20 @@ fn a_peer_is_asked_about_no_more_chunks_than_it_can_answer() {
         c.advance(Duration::from_millis(1100));
         c.tick();
     }
-    let asks = c
+    // Retries repeat the same chunks; what the cap bounds is how many different ones are asked.
+    let asked: std::collections::HashSet<_> = c
         .network()
         .traffic()
         .iter()
         .filter(|(from, to, _)| *from == NodeId(0) && *to == PEER)
-        .filter(|(_, _, raw)| matches!(Message::decode(raw), Ok(Message::ChunkPush(..))))
-        .count();
-    assert!(asks <= 1000, "{asks} asks went to a peer that answers none");
+        .filter_map(|(_, _, raw)| match Message::decode(raw) {
+            Ok(Message::ChunkPush(id, _)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        asked.len() <= 600,
+        "{} different chunks were asked of a peer that answers none",
+        asked.len()
+    );
 }
