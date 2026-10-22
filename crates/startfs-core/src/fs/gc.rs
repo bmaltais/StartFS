@@ -110,7 +110,7 @@ impl LocalFs {
             }
             let orphans: Vec<ChunkId> = ids
                 .iter()
-                .filter(|id| !referenced.contains(*id))
+                .filter(|id| !referenced.contains(*id) && self.has_staged(id))
                 .copied()
                 .collect();
             for id in &orphans {

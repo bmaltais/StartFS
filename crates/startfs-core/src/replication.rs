@@ -44,9 +44,21 @@ const POLL_BATCH: usize = 1024;
 /// tried again, so it does not take a place in every round from chunks that can proceed.
 const BLOCKED_WAIT: Duration = Duration::from_secs(1);
 
-/// How often the staged chunks are checked for ones no file refers to any more. Each check
-/// reads every inode, so it is not done every round.
+/// How often the staged chunks are checked for ones no file refers to any more, at least. Each
+/// check reads every inode, so the wait grows to [`SWEEP_SHARE`] times what the last one cost.
 const SWEEP: Duration = Duration::from_secs(2);
+
+/// A sweep may take one part in this many of the time.
+const SWEEP_SHARE: u32 = 20;
+
+/// Most asks (pushes and probes) a peer may have unanswered at once. Past it the chunks wait
+/// without being visited, so a peer that answers slowly is not buried and a round does not
+/// cost more the longer the queue is.
+const ASKS_IN_FLIGHT: u64 = 512;
+
+/// The most real time one round spends visiting chunks; the rest are visited by the next rounds,
+/// so the receive and gossip phases of a tick stay timely however long the queue is.
+const WORK_BUDGET: Duration = Duration::from_millis(10);
 
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
@@ -149,8 +161,12 @@ struct State {
     /// Whether staging has been listed since the last epoch change. After
     /// that, new chunks are learned of as they are staged.
     scanned: bool,
-    /// When staged chunks were last checked against the files that refer to them.
-    swept: Option<Nanos>,
+    /// Asks each peer has unanswered, counted at the start of the round and kept up to date as
+    /// the round sends more.
+    asks: HashMap<MemberId, u64>,
+    /// When staged chunks were last checked against the files that refer to them, and how long
+    /// to wait before the next check.
+    swept: Option<(Nanos, Nanos)>,
 }
 
 /// A replica this node lost to corruption and is fetching afresh.
@@ -336,25 +352,28 @@ impl Replicator {
     fn sweep_unreferenced(&self, st: &mut State, now: Nanos) {
         if st
             .swept
-            .is_some_and(|at| now.saturating_sub(at) < SWEEP.as_nanos() as u64)
+            .is_some_and(|(at, wait)| now.saturating_sub(at) < wait)
         {
             return;
         }
-        let staged: Vec<ChunkId> = st
+        // Only chunks nobody has been asked about yet: once a push is out, it is not recalled.
+        let unsent: Vec<ChunkId> = st
             .tracks
-            .keys()
-            .filter(|id| self.fs.has_staged(id))
-            .copied()
+            .iter()
+            .filter(|(_, t)| t.sent.is_empty() && !t.settled)
+            .map(|(id, _)| *id)
             .collect();
-        if staged.is_empty() {
+        if unsent.is_empty() {
             return;
         }
-        st.swept = Some(now);
-        for id in self.fs.drop_unreferenced(&staged).unwrap_or_default() {
+        let started = std::time::Instant::now();
+        for id in self.fs.drop_unreferenced(&unsent).unwrap_or_default() {
             if !self.fs.has_replica(&id) {
                 st.tracks.remove(&id);
             }
         }
+        let wait = (started.elapsed() * SWEEP_SHARE).max(SWEEP);
+        st.swept = Some((now, wait.as_nanos() as u64));
     }
 
     /// Membership, offers or reachability changed: check again the chunks the change touches.
@@ -443,18 +462,33 @@ impl Replicator {
         // waiting for answers have nothing to do until a retry is due or an answer arrives.
         // A placement change makes every chunk due at once: work only the most at risk of them
         // each round, so one round stays short and the rest follow over the next ones.
-        let mut due: Vec<(usize, ChunkId)> = st
-            .tracks
-            .iter()
-            .filter(|(_, t)| !t.settled && t.wake <= view.now)
-            .map(|(id, t)| (t.holders.len() + usize::from(self.fs.has_replica(id)), *id))
-            .collect();
+        // One pass over the tracks collects what is due and how many asks each peer has
+        // unanswered; no disk is touched for chunks that are not visited.
+        let mut due: Vec<(usize, ChunkId)> = Vec::new();
+        let mut asks: HashMap<MemberId, u64> = HashMap::new();
+        for (id, t) in st.tracks.iter().filter(|(_, t)| !t.settled) {
+            for m in t.sent.keys() {
+                *asks.entry(*m).or_default() += 1;
+            }
+            if t.wake <= view.now {
+                due.push((t.holders.len(), *id));
+            }
+        }
+        st.asks = asks;
         if due.len() > POLL_BATCH {
-            due.select_nth_unstable_by_key(POLL_BATCH, |(replicas, _)| *replicas);
+            due.select_nth_unstable_by_key(POLL_BATCH, |(known, _)| *known);
             due.truncate(POLL_BATCH);
         }
+        // Of the chunks taken, the least replicated first (counting a copy held here).
+        for entry in &mut due {
+            entry.0 += usize::from(self.fs.has_replica(&entry.1));
+        }
         due.sort_unstable_by_key(|(replicas, _)| *replicas);
+        let started = std::time::Instant::now();
         for (_, id) in due {
+            if started.elapsed() > WORK_BUDGET {
+                break;
+            }
             busy |= self.work(&mut st, view, transport, &id);
         }
         drop(st);
@@ -559,6 +593,11 @@ impl Replicator {
             if !due {
                 continue;
             }
+            if st.asks.get(t).copied().unwrap_or(0) >= ASKS_IN_FLIGHT && !track.sent.contains_key(t)
+            {
+                blocked = true;
+                continue;
+            }
             let timed_out = !track.answered.contains(t)
                 && track
                     .sent
@@ -589,7 +628,9 @@ impl Replicator {
                 self.activity.resent_after_timeout(to);
             }
             transport.send(to, Message::ChunkPush(*id, data).encode());
-            track.sent.insert(*t, view.now);
+            if track.sent.insert(*t, view.now).is_none() {
+                *st.asks.entry(*t).or_default() += 1;
+            }
             track.answered.remove(t);
             st.silent.entry(*t).or_insert(view.now);
             busy = true;
