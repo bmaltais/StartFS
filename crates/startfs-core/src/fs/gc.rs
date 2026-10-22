@@ -39,7 +39,11 @@ impl LocalFs {
     ) -> FsResult<GcReport> {
         let now = self.clock.now();
         let retention = retention.as_nanos() as u64;
-        self.run(true, |t| {
+        // Chunk files are removed only after the transaction below has committed durably, which
+        // also persists the lazy commits before it: a delete that a crash would undo never
+        // loses the chunks of the file it brings back.
+        let mut doomed: Vec<ChunkId> = Vec::new();
+        let report = self.run(true, |t| {
             let mut referenced: HashSet<ChunkId> = HashSet::new();
             for row in t.inodes.iter().map_err(db)? {
                 if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
@@ -81,8 +85,7 @@ impl LocalFs {
                     report.held_since = report.held_since.max(Some(eligible_at));
                 }
                 if now >= eligible_at && !held {
-                    self.chunks.remove(&id);
-                    self.staging.remove(&id);
+                    doomed.push(id);
                     t.orphans.remove(id.as_slice()).map_err(db)?;
                     report.reclaimed_chunks += 1;
                     report.reclaimed_bytes += size;
@@ -93,7 +96,12 @@ impl LocalFs {
                 }
             }
             Ok(report)
-        })
+        })?;
+        for id in doomed {
+            self.chunks.remove(&id);
+            self.staging.remove(&id);
+        }
+        Ok(report)
     }
 
     /// Remove from staging those of `ids` that no file in the visible tree refers to, and
@@ -101,7 +109,7 @@ impl LocalFs {
     /// and this reads the tree under the same lock, so a chunk that is about to be referenced
     /// is never taken for an orphan.
     pub fn drop_unreferenced(&self, ids: &[ChunkId]) -> FsResult<Vec<ChunkId>> {
-        self.run(false, |t| {
+        let orphans = self.run(true, |t| {
             let mut referenced: HashSet<ChunkId> = HashSet::new();
             for row in t.inodes.iter().map_err(db)? {
                 if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
@@ -113,10 +121,13 @@ impl LocalFs {
                 .filter(|id| !referenced.contains(*id) && self.has_staged(id))
                 .copied()
                 .collect();
-            for id in &orphans {
-                self.staging.remove(id);
-            }
             Ok(orphans)
-        })
+        })?;
+        // The commit above is durable and persists the lazy ones before it, so a delete that
+        // made these orphans cannot be undone by a crash once they are gone.
+        for id in &orphans {
+            self.staging.remove(id);
+        }
+        Ok(orphans)
     }
 }

@@ -15,7 +15,6 @@ use redb::{
     Database, Durability, ReadOnlyTable, ReadableDatabase, ReadableTable, Table, TableDefinition,
 };
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -1076,8 +1075,9 @@ impl FsOps for LocalFs {
     }
 
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()> {
-        let chunked = Cell::new(false);
-        // Lazy like create, so `rm -rf` pays no fsync per entry.
+        // Lazy like create, so `rm -rf` pays no fsync per entry. The chunks it drops are removed
+        // only after a durable commit (see `collect_garbage` and `drop_unreferenced`), so a
+        // crash that brings the file back brings its chunks back too.
         self.run_as(true, Durability::None, |t| {
             t.dir(parent)?;
             let ino = t.entry(parent, name)?.ok_or(FsError::NotFound)?;
@@ -1085,17 +1085,10 @@ impl FsOps for LocalFs {
             if inode.kind == FileKind::Dir {
                 return Err(FsError::IsDir);
             }
-            // Only the last name drops the chunk references.
-            chunked.set(matches!(inode.content, Content::Chunks(_)) && inode.nlink <= 1);
             self.remove_entry(t, parent, name, ino)?;
             self.touch_dir(t, parent)?;
             self.rename_copies(t, &[(parent, name)], &[ino])
-        })?;
-        // Dropping chunk references stays durable: the old chunks may be collected.
-        if chunked.get() {
-            self.sync()?;
-        }
-        Ok(())
+        })
     }
 
     fn rmdir(&self, parent: Ino, name: &str) -> FsResult<()> {
