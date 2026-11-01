@@ -39,3 +39,17 @@ run "100 x 1 MiB copy"         $((100 * 1048576))  cp -r "$WORK/src1m" "$M/s1m"
 # shellcheck disable=SC2016 # $(seq 50) and $i are for the inner bash
 run "patch 50 files by 14 B"   1 bash -c 'for i in $(seq 50); do printf "patched-header" | dd of="'"$M"'/s1m/f$i" bs=1 conv=notrunc status=none; done'
 run "delete 1100 files"        1 rm -rf "$M/s16k" "$M/s1m"
+
+# A build, in steps. Payload is the bytes each step leaves in the tree (1 for a step that leaves none).
+OBJS=300
+obj_size() { echo $((20000 + $1 * 300)); }
+# objs DIR: writes (or, run again, replaces) the objects; a second run is the relink.
+objs() { for i in $(seq "$OBJS"); do head -c "$(obj_size "$i")" /dev/urandom > "$1/o$i"; done; }
+temps() { for i in $(seq 200); do head -c 65536 /dev/urandom > "$1/t$i"; done; rm -f "$1"/t*; }
+archive() { for i in $(seq 400); do head -c 4096 /dev/urandom >> "$1"; done; }
+objbytes=0; for i in $(seq "$OBJS"); do objbytes=$((objbytes + $(obj_size "$i"))); done
+mkdir -p "$M/build/obj" "$M/build/tmp"
+run "build: write 300 objects" "$objbytes" objs "$M/build/obj"
+run "build: rewrite them (relink)" "$objbytes" objs "$M/build/obj"
+run "build: 200 temps, removed" 1 temps "$M/build/tmp"
+run "build: append 400 x 4 KiB" $((400 * 4096)) archive "$M/build/lib.a"
