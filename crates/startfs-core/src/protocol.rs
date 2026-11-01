@@ -130,7 +130,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 15;
+pub const PROTOCOL_VERSION: u8 = 16;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -280,8 +280,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        15,
-        "62f3cf254cd69c0145033e6342fbf4a1351e4581cc6275da8079957f1769f735",
+        16,
+        "b4012d5af912d5d69611004e4861de23beebaeab51dcf5205fdaef7e13ffd879",
     );
 
     #[test]
@@ -366,6 +366,7 @@ mod tests {
                     rev: 2,
                     issuer: Some(MemberId(1)),
                     go: true,
+                    force: true,
                 }),
                 progress: Some(Progress::Failed("why".into())),
                 pause_secs: Some(30),

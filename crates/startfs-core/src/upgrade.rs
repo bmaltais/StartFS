@@ -54,6 +54,9 @@ pub struct Intent {
     /// The go-signal of a lockstep upgrade, sent by the issuer once every member
     /// that is up has staged the release.
     pub go: bool,
+    /// `update --force` was run: every member restarts even though its mount is in use.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Where a member is in carrying out the intent. Absent when it has nothing to do:

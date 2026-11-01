@@ -62,9 +62,8 @@ pub enum Request {
     Remove {
         member: MemberId,
     },
-    /// Move the cluster to a release (the latest stable one when none is named), or,
-    /// with `force`, let this node restart on the release it has staged even though
-    /// its mount is in use.
+    /// Move the cluster to a release (the latest stable one when none is named); with
+    /// `force`, every member restarts on it even though its mount is in use.
     Update {
         release: Option<String>,
         #[serde(default)]
@@ -741,7 +740,7 @@ impl Client {
         self.update_with(release, false)
     }
 
-    /// Like [`update`](Self::update); with `force` this node also restarts when its mount is in use.
+    /// Like [`update`](Self::update); with `force` every member also restarts when its mount is in use.
     pub fn update_with(&self, release: Option<&str>, force: bool) -> Result<UpdateReport, Error> {
         match self.call(&Request::Update {
             release: release.map(str::to_string),

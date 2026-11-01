@@ -194,8 +194,9 @@ ever moves to a later release than its own, and only on word from a member it kn
 
 **A mount in use.** A member whose mount is in use (a shell inside `~/StartFS`, an open file)
 stages the release but does not restart; `status` says it is waiting. Free the mount and it
-goes on within seconds, or run `startfs update --force` on that node to restart it anyway. A
-rolling upgrade carries on past it; a lockstep one waits for it.
+goes on within seconds, or run `startfs update --force` on any member to restart every busy
+member anyway. A rolling upgrade carries on past it; a lockstep one waits for it. A rolling
+upgrade waits only while some data is down to a single copy, not for a member that is asleep.
 
 Any member can order every member to move to a release: that is fine on a tailnet whose members
 you all trust (see Known limits), which StartFS already assumes. The mount still drops while a
