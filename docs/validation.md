@@ -371,6 +371,14 @@ buffers (the differences are noise). A blank cell was not measured.
   Read-ahead was not measured on random access beyond the harness test, nor with more than one
   peer holding the data.
 
+**Hedged reads (#185).** Before, a read whose nearest peer had gone silent waited out the whole
+reply wait (300 rounds: 3 s on a real daemon, 300 ms of simulated time in the harness) before asking the next peer. Now a peer
+that has not answered after 3 times its usual round trip (at least 20 ms; 200 ms if never timed)
+is asked in parallel with the next one, and the first good answer wins. Harness test only, not yet measured on a live link
+(`read_order.rs`, nearest peer 5 ms away then silent, others 30 ms): the read takes under 150 ms
+of simulated time, and the silent peer drops down the order within a few reads. Nothing is held
+beyond the existing reply bookkeeping: a late reply is pruned like any unclaimed one.
+
 ## 11. Short-lived files and the replication hold
 
 `scripts/profile-churn.sh`: three loopback nodes (3 copies); on A, 50 files of 1 MiB of fresh
