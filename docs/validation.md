@@ -379,6 +379,17 @@ is asked in parallel with the next one, and the first good answer wins. Harness 
 of simulated time, and the silent peer drops down the order within a few reads. Nothing is held
 beyond the existing reply bookkeeping: a late reply is pruned like any unclaimed one.
 
+**Read-ahead on the same terms (#185).** The chunks fetched along with the first are now asked of
+the members placement gives them to (`likely_holders`; nodes do not track holders, but placement
+is a function of the membership), not of every peer in turn, and the first chunk is fetched the
+hedged way. A peer slow to answer a chunk nobody is waiting for is given up on after 4 times its
+patience, not waited out chunk by chunk. Harness (`read_ahead.rs`): with 1 copy over 4 peers no
+request is turned away (2 were before); with the nearest of 3 peers silent, a read of a file
+none of whose chunks are held takes under 150 ms of simulated time (658 ms before). Two nodes,
+one holder, `profile-transfer.sh` `MODE=read`, 20 ms, 128 MiB, 2 rounds against 1.13.0: 78 to
+108 MiB/s now, 35 to 112 before; same within noise, which is expected with one holder. Not
+measured with a slow or silent peer on a live link.
+
 ## 11. Short-lived files and the replication hold
 
 `scripts/profile-churn.sh`: three loopback nodes (3 copies); on A, 50 files of 1 MiB of fresh

@@ -54,6 +54,9 @@ const WAIT_ROUNDS: usize = 300;
 /// next one instead of waited out.
 const HEDGE_FACTOR: u64 = 3;
 const HEDGE_MIN: Nanos = Duration::from_millis(20).as_nanos() as Nanos;
+/// A chunk fetched only in case a read wants it is given up on after this many times the
+/// patience for its peer.
+const GIVE_UP_PATIENCES: Nanos = 4;
 const HEDGE_UNTIMED: Nanos = Duration::from_millis(200).as_nanos() as Nanos;
 
 /// The most a tick spends waiting on peers for the chunks a commit of buffered writes needs: a
@@ -980,9 +983,10 @@ impl Daemon {
         (peers, up)
     }
 
-    /// Request every chunk at once, spread over the peers that are up, and collect the answers.
-    /// The first chunk, the one a read is blocked on, falls back to asking the peers one by one;
-    /// the others are best effort.
+    /// Request the chunks after the first at once, spread over the peers likely to hold them
+    /// that are up, then fetch the first (the one a read is blocked on) the way a single chunk
+    /// is, and collect the rest. The others are best effort: a peer that is slow to answer
+    /// them is not waited out.
     fn fetch_chunks(
         &self,
         ids: &[ChunkId],
@@ -993,38 +997,48 @@ impl Daemon {
             return answers;
         };
         let (peers, up) = self.ranked_peers();
+        let mut asked = Vec::new();
         if up > 0 {
-            let asked: Vec<(NodeId, Nanos)> = ids
-                .iter()
-                .enumerate()
-                .map(|(n, id)| {
-                    let peer = peers[n % up];
-                    self.chunk_replies.lock().unwrap().remove(&(peer, *id));
-                    let sent = self.clock.now();
-                    transport.send(peer, Message::ChunkRequest(*id).encode());
-                    (peer, sent)
-                })
-                .collect();
-            for ((id, (peer, sent)), answer) in ids.iter().zip(asked).zip(answers.iter_mut()) {
-                let reply =
-                    self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
-                if reply.is_none() {
-                    self.activity.timed_out(peer);
-                    self.fetch_found_silence();
+            for (n, id) in ids.iter().enumerate().skip(1) {
+                let holders = self.likely_holders(id);
+                let near = &peers[..up];
+                let mut holding: Vec<NodeId> = near
+                    .iter()
+                    .copied()
+                    .filter(|p| holders.contains(p))
+                    .collect();
+                if holding.is_empty() {
+                    holding = near.to_vec();
                 }
-                let answered = reply
-                    .as_ref()
-                    .map_or_else(|| self.clock.now(), |(at, _)| *at);
-                self.record_round_trip(peer, sent, answered);
-                if let Some((_, Some(data))) = reply
-                    && accept(id, &data)
-                {
-                    *answer = Some(data);
-                }
+                let peer = holding[n % holding.len()];
+                self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+                transport.send(peer, Message::ChunkRequest(*id).encode());
+                let sent = self.clock.now();
+                let gives_up =
+                    sent.saturating_add(self.patience(peer).saturating_mul(GIVE_UP_PATIENCES));
+                asked.push((n, peer, sent, gives_up));
             }
         }
-        if answers[0].is_none() {
-            answers[0] = self.fetch_chunk(first, &|d| accept(first, d));
+        answers[0] = self.fetch_chunk(first, &|d| accept(first, d));
+        for (n, peer, sent, gives_up) in asked {
+            let id = &ids[n];
+            let reply = self.wait_for(|| {
+                let found = self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+                // `Some(None)`: not worth waiting longer for.
+                found
+                    .map(Some)
+                    .or_else(|| (self.clock.now() >= gives_up).then_some(None))
+            });
+            let answered = match &reply {
+                Some(Some((at, _))) => *at,
+                _ => self.clock.now(),
+            };
+            self.record_round_trip(peer, sent, answered);
+            if let Some(Some((_, Some(data)))) = reply
+                && accept(id, &data)
+            {
+                answers[n] = Some(data);
+            }
         }
         answers
     }
@@ -1039,7 +1053,10 @@ impl Daemon {
             Hedge,
         }
         let transport = self.transport()?;
-        let (peers, _) = self.ranked_peers();
+        let (mut peers, _) = self.ranked_peers();
+        // The members placement gave the chunk to go first, each group still fastest first.
+        let holders = self.likely_holders(id);
+        peers.sort_by_key(|p| !holders.contains(p));
         FETCH.with(|f| f.set((f.get().0, false)));
         let mut next = peers.into_iter().peekable();
         // The peers asked and not yet answered, with when each was asked.
@@ -1098,6 +1115,21 @@ impl Daemon {
         result
     }
 
+    /// The peers placement would give `id` to now. Nodes do not track who holds what, but
+    /// placement is a function of the membership, so this is where a copy most likely is.
+    /// A chunk not yet replicated, or placed differently before, can be elsewhere.
+    fn likely_holders(&self, id: &ChunkId) -> Vec<NodeId> {
+        let m = self.membership.lock().unwrap();
+        let Some(fs) = m.filesystem() else {
+            return Vec::new();
+        };
+        let members = m.members();
+        crate::placement::place(id, &members, fs.copies, &HashSet::new())
+            .into_iter()
+            .filter_map(|h| members.iter().find(|x| x.id == h).map(|x| x.endpoint))
+            .collect()
+    }
+
     /// Fold a request sent at `sent` and answered (or given up on) at `at` into the peer's
     /// round-trip estimate.
     fn record_round_trip(&self, peer: NodeId, sent: Nanos, at: Nanos) {
@@ -1112,11 +1144,19 @@ impl Daemon {
         let Some(&(peer, sent)) = waiting.last() else {
             return false;
         };
-        let now = self.clock.now();
-        let patience = match self.latency.lock().unwrap().estimate(peer, now) {
+        another && self.clock.now().saturating_sub(sent) >= self.patience(peer)
+    }
+
+    /// How long a request to `peer` may go unanswered before it is worth asking another.
+    fn patience(&self, peer: NodeId) -> Nanos {
+        match self
+            .latency
+            .lock()
+            .unwrap()
+            .estimate(peer, self.clock.now())
+        {
             Some(rtt) => rtt.saturating_mul(HEDGE_FACTOR as Nanos).max(HEDGE_MIN),
             None => HEDGE_UNTIMED,
-        };
-        another && now.saturating_sub(sent) >= patience
+        }
     }
 }

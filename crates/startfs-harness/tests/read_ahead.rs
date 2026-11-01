@@ -58,3 +58,60 @@ fn a_read_in_the_middle_of_a_chunk_asks_for_that_chunk_only() {
     assert_eq!(got, noise(FILE, 7)[at as usize..][..4096]);
     assert_eq!(chunk_requests(&c), 1);
 }
+
+/// Peers that were asked for a chunk they do not hold.
+fn turned_away(c: &Cluster) -> usize {
+    c.network()
+        .traffic()
+        .into_iter()
+        .filter(|(_, to, raw)| {
+            *to == READER && matches!(Message::decode(raw), Ok(Message::ChunkReply(_, None)))
+        })
+        .count()
+}
+
+#[test]
+fn chunks_fetched_ahead_are_asked_of_the_peers_placement_gave_them_to() {
+    // One copy of each chunk, somewhere among four peers.
+    let c = Cluster::with_offers(1, &[0, 1 << 30, 1 << 30, 1 << 30, 1 << 30]);
+    let f = c.fs(1).create(ROOT_INO, "big", 0o644).unwrap();
+    c.fs(1).write(f.ino, 0, &noise(FILE, 7)).unwrap();
+    c.sync();
+    let ino = c.fs(0).lookup(ROOT_INO, "big").unwrap().ino;
+
+    let got = c.fs(0).read(ino, 0, PIECE).unwrap();
+    assert_eq!(got, noise(FILE, 7)[..PIECE as usize]);
+    assert!(chunk_requests(&c) > 1);
+    assert_eq!(turned_away(&c), 0);
+}
+
+#[test]
+fn a_read_ahead_does_not_wait_out_a_silent_peer_chunk_by_chunk() {
+    // Every peer holds every chunk; the nearest one has gone silent.
+    let c = Cluster::with_offers(3, &[0, 1 << 30, 1 << 30, 1 << 30]);
+    let f = c.fs(1).create(ROOT_INO, "big", 0o644).unwrap();
+    c.fs(1).write(f.ino, 0, &noise(FILE, 7)).unwrap();
+    c.sync();
+    let ino = c.fs(0).lookup(ROOT_INO, "big").unwrap().ino;
+    let g = c.fs(1).create(ROOT_INO, "more", 0o644).unwrap();
+    c.fs(1).write(g.ino, 0, &noise(FILE, 8)).unwrap();
+    c.sync();
+    let more = c.fs(0).lookup(ROOT_INO, "more").unwrap().ino;
+    for (peer, ms) in [(1, 5), (2, 30), (3, 30)] {
+        c.network()
+            .set_delay(READER, NodeId(peer), std::time::Duration::from_millis(ms));
+    }
+    // Time the peers on the first file, then read a second one, all of whose chunks are missing.
+    c.fs(0).read(ino, 0, PIECE).unwrap();
+    c.network()
+        .set_delay(READER, NodeId(1), std::time::Duration::from_secs(3600));
+
+    let start = c.now();
+    let got = c.fs(0).read(more, 0, PIECE).unwrap();
+    let took = std::time::Duration::from_nanos(c.now() - start);
+    assert_eq!(got, noise(FILE, 8)[..PIECE as usize]);
+    assert!(
+        took < std::time::Duration::from_millis(150),
+        "read took {took:?}"
+    );
+}
