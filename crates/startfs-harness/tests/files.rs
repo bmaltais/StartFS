@@ -561,3 +561,42 @@ fn a_chunk_cut_short_by_a_power_cut_is_not_mistaken_for_stored_content() {
     fs.fsync(g.ino).unwrap();
     assert_eq!(fs.read(g.ino, 0, 300_000).unwrap(), body);
 }
+
+#[test]
+fn truncating_a_file_waits_for_the_quiet_period_and_a_power_cut_keeps_old_or_new() {
+    let c = Cluster::start_with_config(1, "sync_quiet_ms = 1000");
+    let fs = c.fs(0);
+    let old = vec![7u8; 200_000];
+    let f = fs.create(ROOT_INO, "obj", 0o600).unwrap();
+    fs.write(f.ino, 0, &old).unwrap();
+    fs.fsync(f.ino).unwrap();
+    assert!(!fs.has_unsynced());
+    let truncate = |size| SetAttr {
+        size: Some(size),
+        ..SetAttr::default()
+    };
+
+    // What `> obj` does on open: every rebuilt file pays this once.
+    assert_eq!(fs.setattr(f.ino, truncate(0)).unwrap().size, 0);
+    assert!(fs.has_unsynced(), "a truncate does not wait for disk");
+    c.advance(std::time::Duration::from_millis(1500));
+    c.tick();
+    assert!(!fs.has_unsynced(), "quiet long enough: made durable");
+
+    // A shrink that keeps part of the file needs new chunks, so it is durable at once.
+    let old = vec![9u8; 200_000];
+    fs.write(f.ino, 0, &old).unwrap();
+    fs.fsync(f.ino).unwrap();
+    assert_eq!(fs.setattr(f.ino, truncate(100_000)).unwrap().size, 100_000);
+    assert!(
+        !fs.has_unsynced(),
+        "nothing durable refers to an unsynced chunk"
+    );
+    c.power_cut(0);
+    c.restart(0);
+    let got = fs.read(f.ino, 0, u32::MAX).unwrap();
+    assert!(
+        got == old || got == old[..100_000],
+        "neither the old nor the new content"
+    );
+}

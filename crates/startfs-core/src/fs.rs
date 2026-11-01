@@ -312,6 +312,8 @@ pub struct LocalFs {
     /// Signalled when a commit of a file's buffer ends.
     committed: Condvar,
     write_buffer_limit: AtomicU64,
+    /// How long the tick leaves a written file alone; a nonzero delay lets a close wait for it.
+    write_commit_delay: AtomicU64,
     /// The last commit failure logged by `flush_all_logged`.
     flush_error: Mutex<Option<String>>,
     /// Whether lazy commits have happened since the last durable one.
@@ -386,6 +388,7 @@ impl LocalFs {
             dirty: Mutex::new(HashMap::new()),
             committed: Condvar::new(),
             write_buffer_limit: AtomicU64::new(DEFAULT_WRITE_BUFFER),
+            write_commit_delay: AtomicU64::new(0),
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
             last_lazy: AtomicU64::new(0),
@@ -795,16 +798,8 @@ impl LocalFs {
         self.has_replica(id) || self.has_staged(id) || self.cache.touch(id)
     }
 
-    /// Run `f`, fetching from peers (outside any lock) each chunk it finds
-    /// missing and then running it again.
-    fn fetching<T>(
-        &self,
-        write: bool,
-        f: impl FnMut(&mut Tables<'_>, &mut Spill) -> FsResult<T>,
-    ) -> FsResult<T> {
-        self.fetching_as(write, Durability::Immediate, f)
-    }
-
+    /// Run `f` with the given durability, fetching from peers (outside any lock) each chunk it
+    /// finds missing and then running it again.
     fn fetching_as<T>(
         &self,
         write: bool,
@@ -976,14 +971,36 @@ impl FsOps for LocalFs {
 
     fn setattr(&self, ino: Ino, set: SetAttr) -> FsResult<Attr> {
         self.flush_ino(ino)?;
-        self.fetching(true, |t, spill| {
+        // Lazy like create and unlink: a build truncates every file it rewrites (`>` opens with
+        // O_TRUNC) and sets times on the rest, so an fsync per call dominates what it writes.
+        // A resize to a size that needs new chunks stays durable: nothing durable may refer to a
+        // chunk that is not (a truncate to zero stores inline, so it has none).
+        let new_chunks = match set.size {
+            Some(size) if size != 0 => {
+                let i = self.view(|t| Self::file(t, ino))?;
+                size != i.size
+            }
+            _ => false,
+        };
+        let durability = if new_chunks {
+            Durability::Immediate
+        } else {
+            Durability::None
+        };
+        self.fetching_as(true, durability, |t, spill| {
             let mut i = t.inode(ino)?;
             let now = self.clock.now();
             if let Some(size) = set.size {
                 let mut i2 = Self::file(t, ino)?;
-                let mut data = self.read_all(&i2, spill)?;
-                data.resize(size as usize, 0);
-                self.store(&mut i2, &data)?;
+                if size != i2.size {
+                    let mut data = if size == 0 {
+                        Vec::new() // nothing of the old content is kept
+                    } else {
+                        self.read_all(&i2, spill)?
+                    };
+                    data.resize(size as usize, 0);
+                    self.store(&mut i2, &data)?;
+                }
                 i2.mtime = now;
                 i = i2;
             }
@@ -1099,7 +1116,7 @@ impl FsOps for LocalFs {
     }
 
     fn flush(&self, ino: Ino) -> FsResult<()> {
-        self.flush_ino(ino)
+        self.close_ino(ino)
     }
 
     fn fsync(&self, ino: Ino) -> FsResult<()> {

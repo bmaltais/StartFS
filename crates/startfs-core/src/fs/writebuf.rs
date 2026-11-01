@@ -341,6 +341,32 @@ impl LocalFs {
         }
     }
 
+    /// The tick leaves a file alone for `delay` after its last write; see [`Self::close_ino`].
+    pub fn set_write_commit_delay(&self, delay: Duration) {
+        self.write_commit_delay
+            .store(delay.as_nanos() as u64, Ordering::SeqCst);
+    }
+
+    /// A file is closed. Its buffer is committed now, except when that would write a chunk
+    /// again that is already committed (an append or a patch to a file that has chunks) and the
+    /// tick is set to wait for writes to stop: `ar`, a logger or `>>` in a loop reopen the file
+    /// many times a second, and each close would store its whole tail chunk once more. The
+    /// tick commits the buffer once the file has been quiet for the delay; reads see it meanwhile.
+    pub(super) fn close_ino(&self, ino: Ino) -> FsResult<()> {
+        if self.write_commit_delay.load(Ordering::SeqCst) > 0 {
+            let start = self.dirty.lock().unwrap().get(&ino).map(|d| d.start);
+            let rewrites = start.is_some_and(|start| {
+                let committed = self.view(|t| Self::file(t, ino));
+                committed.is_ok_and(|i| matches!(i.content, Content::Chunks(_)) && start <= i.size)
+            });
+            if rewrites {
+                self.wake_tick();
+                return Ok(());
+            }
+        }
+        self.flush_ino(ino)
+    }
+
     /// Commit what is buffered for `ino`.
     pub(super) fn flush_ino(&self, ino: Ino) -> FsResult<()> {
         self.commit(ino, true, true)
