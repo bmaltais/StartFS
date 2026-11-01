@@ -11,26 +11,26 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// One recorded state of an object.
 #[derive(Serialize, Deserialize, Clone)]
-struct Version {
-    hlc: Hlc,
-    base: Option<Hlc>,
-    size: u64,
-    mode: u32,
-    mtime: Nanos,
-    xattrs: BTreeMap<String, Vec<u8>>,
-    content: Content,
+pub(super) struct Version {
+    pub(super) hlc: Hlc,
+    pub(super) base: Option<Hlc>,
+    pub(super) size: u64,
+    pub(super) mode: u32,
+    pub(super) mtime: Nanos,
+    pub(super) xattrs: BTreeMap<String, Vec<u8>>,
+    pub(super) content: Content,
 }
 
 /// Where a name lives: when it got there, the parent directory and the name.
-type Loc = (Hlc, Ino, String);
+pub(super) type Loc = (Hlc, Ino, String);
 
 /// Merge registers for one name of an object.
 #[derive(Serialize, Deserialize, Clone, Default)]
-struct Name {
+pub(super) struct Name {
     /// Latest create, link or rename of this name.
-    loc: Option<Loc>,
+    pub(super) loc: Option<Loc>,
     /// Latest unlink of this name.
-    del: Option<Hlc>,
+    pub(super) del: Option<Hlc>,
     /// Latest write made while this name was live and not known to be unlinked.
     seen: Option<Hlc>,
 }
@@ -62,20 +62,22 @@ impl Name {
 
 /// Merge registers for one object.
 #[derive(Serialize, Deserialize, Clone, Default)]
-struct Object {
-    kind: Option<FileKind>,
+pub(super) struct Object {
+    pub(super) kind: Option<FileKind>,
     /// The names, by the stamp of the op that made each (`Hlc::ZERO` for the
     /// one a conflict copy gets when it is renamed or removed).
-    names: BTreeMap<Hlc, Name>,
+    pub(super) names: BTreeMap<Hlc, Name>,
     /// Versions nothing else is derived from.
     heads: Vec<Version>,
-    /// Stamps of versions that something else is derived from.
+    /// Stamps of versions that something else is derived from. Their content
+    /// lives on in the history table (see [`Tables::retire`]).
     superseded: Vec<Hlc>,
 }
 
 impl Object {
     /// Fold another node's register for the same object into this one.
-    fn join(&mut self, other: Object) {
+    /// Returns the heads that the other's supersede.
+    fn join(&mut self, other: Object) -> Vec<Version> {
         self.kind = self.kind.or(other.kind);
         for (slot, n) in other.names {
             self.names.entry(slot).or_default().join(n);
@@ -90,8 +92,11 @@ impl Object {
                 self.heads.push(h);
             }
         }
-        let superseded = &self.superseded;
-        self.heads.retain(|h| !superseded.contains(&h.hlc));
+        let (heads, dropped): (Vec<Version>, Vec<Version>) = std::mem::take(&mut self.heads)
+            .into_iter()
+            .partition(|h| !self.superseded.contains(&h.hlc));
+        self.heads = heads;
+        dropped
     }
 
     /// The live names.
@@ -104,7 +109,7 @@ impl Object {
     }
 
     /// Where the most recently placed name is, live or not.
-    fn home(&self) -> Option<(Hlc, &Loc)> {
+    pub(super) fn home(&self) -> Option<(Hlc, &Loc)> {
         self.names
             .iter()
             .filter_map(|(slot, n)| Some((*slot, n.loc.as_ref()?)))
@@ -127,22 +132,18 @@ impl Object {
         self.names.values().any(|n| n.del.is_some())
     }
 
-    fn winner(&self) -> Option<&Version> {
+    pub(super) fn winner(&self) -> Option<&Version> {
         self.heads.iter().max_by_key(|v| v.hlc)
     }
-    fn alive(&self) -> bool {
+    pub(super) fn alive(&self) -> bool {
         !self.live().is_empty()
     }
-    fn add_version(&mut self, v: Version) {
-        if let Some(b) = v.base {
-            self.heads.retain(|h| h.hlc != b);
-            if !self.superseded.contains(&b) {
-                self.superseded.push(b);
-            }
+    /// When the object ended: the last unlink of its names, once none is live.
+    pub(super) fn death(&self) -> Option<Hlc> {
+        if self.alive() {
+            return None;
         }
-        if !self.superseded.contains(&v.hlc) && !self.heads.iter().any(|h| h.hlc == v.hlc) {
-            self.heads.push(v);
-        }
+        self.names.values().filter_map(|n| n.del).max()
     }
 }
 
@@ -188,7 +189,7 @@ fn conflict_name(name: &str, from: Hlc) -> String {
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC.
-fn stamp(wall: Nanos) -> String {
+pub(super) fn stamp(wall: Nanos) -> String {
     let secs = wall / 1_000_000_000;
     let (days, rest) = (secs / 86_400, secs % 86_400);
     // Civil-from-days (proleptic Gregorian), after Howard Hinnant.
@@ -230,31 +231,43 @@ pub(super) fn lost_found_ino() -> Ino {
     u64::from_le_bytes(raw) | (1 << 63)
 }
 
-fn enc<T: Serialize>(v: &T) -> Vec<u8> {
+/// Whether the merge made the inode number up (a conflict copy or `lost+found`)
+/// rather than an object's own entries.
+pub(super) fn made_up(ino: Ino) -> bool {
+    ino & (1 << 63) != 0
+}
+
+pub(super) fn enc<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_stdvec(v).expect("serialises")
 }
 
-fn dec<'a, T: Deserialize<'a>>(raw: &'a [u8]) -> FsResult<T> {
+pub(super) fn dec<'a, T: Deserialize<'a>>(raw: &'a [u8]) -> FsResult<T> {
     postcard::from_bytes(raw).map_err(|e| FsError::Io(format!("bad record: {e}")))
 }
 
 impl Tables<'_> {
     /// Forget what only matters while some member might not have seen it:
-    /// superseded versions, and objects that are deleted. Safe only when every
+    /// superseded versions, and objects that are deleted, once their versions
+    /// are past the window (`window` nanoseconds before `now`). Safe only when every
     /// member holds the whole log. Conflict copies keep their records: a
     /// deleted one is how the tree remembers it was resolved.
-    pub(super) fn purge_settled(&mut self) -> FsResult<()> {
+    pub(super) fn purge_settled(&mut self, now: Nanos, window: Nanos) -> FsResult<()> {
         let mut all = Vec::new();
         for row in self.objects.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
             all.push((k.value(), dec::<Object>(v.value())?));
         }
         for (ino, mut o) in all {
-            if ino & (1 << 63) != 0 {
+            if made_up(ino) {
                 continue;
             }
             if o.kind.is_none() || !o.alive() {
+                // A deleted file is found by its last path while its versions are kept.
+                if self.keeps_versions(ino, &o, now, window)? {
+                    continue;
+                }
                 self.objects.remove(ino).map_err(db)?;
+                self.forget_versions(ino)?;
             } else {
                 // Nobody can still be told about a removed name.
                 let keep_dead = !o.names.values().any(Name::alive);
@@ -266,7 +279,7 @@ impl Tables<'_> {
         Ok(())
     }
 
-    fn object(&self, ino: Ino) -> FsResult<Object> {
+    pub(super) fn object(&self, ino: Ino) -> FsResult<Object> {
         match self.objects.get(ino).map_err(db)? {
             Some(g) => dec(g.value()),
             None => Ok(Object::default()),
@@ -275,6 +288,47 @@ impl Tables<'_> {
     fn put_object(&mut self, ino: Ino, o: &Object) -> FsResult<()> {
         self.objects.insert(ino, enc(o).as_slice()).map_err(db)?;
         Ok(())
+    }
+
+    /// Add a version to an object. The head it is derived from is replaced,
+    /// and kept in the history table as replaced by it.
+    fn add_version(&mut self, ino: Ino, o: &mut Object, v: Version) -> FsResult<()> {
+        if let Some(b) = v.base {
+            if let Some(pos) = o.heads.iter().position(|h| h.hlc == b) {
+                let old = o.heads.remove(pos);
+                self.retire(ino, old, v.hlc)?;
+            } else {
+                self.replaced_by(ino, b, v.hlc)?;
+            }
+            if !o.superseded.contains(&b) {
+                o.superseded.push(b);
+            }
+        }
+        if o.superseded.contains(&v.hlc) {
+            // Arrived after a version derived from it.
+            let until = self.successor(ino, o, v.hlc)?.unwrap_or(v.hlc);
+            self.retire(ino, v, until)?;
+        } else if !o.heads.iter().any(|h| h.hlc == v.hlc) {
+            o.heads.push(v);
+        }
+        Ok(())
+    }
+
+    /// The earliest version of `ino` derived from the one stamped `of`.
+    fn successor(&self, ino: Ino, o: &Object, of: Hlc) -> FsResult<Option<Hlc>> {
+        let mut first = o
+            .heads
+            .iter()
+            .filter(|h| h.base == Some(of))
+            .map(|h| h.hlc)
+            .min();
+        for past in self.versions_of(ino)? {
+            if past.version.base == Some(of) {
+                let h = past.version.hlc;
+                first = Some(first.map_or(h, |f| f.min(h)));
+            }
+        }
+        Ok(first)
     }
     /// The records of the entries showing `ino` as a conflict: one for each
     /// name of a hardlinked file that lost a collision.
@@ -588,7 +642,7 @@ impl LocalFs {
                     .entry(e.hlc)
                     .or_default()
                     .place(e.hlc, *parent, name);
-                o.add_version(self.version(e.hlc, None, snap));
+                t.add_version(*ino, &mut o, self.version(e.hlc, None, snap))?;
                 t.put_object(*ino, &o)
             }
             Op::Set {
@@ -602,7 +656,7 @@ impl LocalFs {
                     let n = o.names.entry(*slot).or_default();
                     n.seen = n.seen.max(Some(e.hlc));
                 }
-                o.add_version(self.version(e.hlc, *base, snap));
+                t.add_version(*ino, &mut o, self.version(e.hlc, *base, snap))?;
                 t.put_object(*ino, &o)
             }
             Op::Link { ino, parent, name } => {
@@ -674,21 +728,31 @@ impl LocalFs {
         self.run(false, |t| {
             let from = after.map_or(0, |a| a + 1);
             let mut objects = Vec::new();
+            let mut versions = Vec::new();
             let mut bytes = 0;
             let mut last = true;
             for row in t.objects.range(from..).map_err(db)? {
                 let (k, v) = row.map_err(db)?;
-                let size = std::mem::size_of::<Ino>() + v.value().len();
+                let ino = k.value();
+                let past = t.raw_versions_of(ino)?;
+                let size = std::mem::size_of::<Ino>()
+                    + v.value().len()
+                    + past
+                        .iter()
+                        .map(|p| std::mem::size_of::<Ino>() + p.len())
+                        .sum::<usize>();
                 if !objects.is_empty() && bytes + size > max_bytes {
                     last = false;
                     break;
                 }
                 bytes += size;
-                objects.push((k.value(), v.value().to_vec()));
+                objects.push((ino, v.value().to_vec()));
+                versions.extend(past.into_iter().map(|p| (ino, p)));
             }
             Ok(StateChunk {
                 pin: pin.clone(),
                 objects,
+                versions,
                 last,
             })
         })
@@ -700,9 +764,15 @@ impl LocalFs {
     /// breaks off never claims history we do not hold.
     pub fn apply_state_chunk(&self, chunk: &StateChunk) -> FsResult<bool> {
         self.run(true, |t| {
+            for (ino, raw) in &chunk.versions {
+                t.join_version(*ino, raw)?;
+            }
             for (ino, raw) in &chunk.objects {
                 let mut o = t.object(*ino)?;
-                o.join(dec(raw)?);
+                for old in o.join(dec(raw)?) {
+                    let until = t.successor(*ino, &o, old.hlc)?.unwrap_or(old.hlc);
+                    t.retire(*ino, old, until)?;
+                }
                 t.put_object(*ino, &o)?;
             }
             if !chunk.last {

@@ -82,7 +82,8 @@ same code with a different membership scope.
     metadata. A background GC removes chunks that are unreferenced and have been orphaned longer than
     a retention period (default 7 days, configurable). This protects
     against accidental deletes and against nodes returning from offline with stale references. No
-    reference counting. Versioned snapshots are a possible future addition. `startfs purge` ends the
+    reference counting. Overwritten and deleted files keep their earlier versions for a window (see
+    "Versions (as built)"), and a chunk a kept version uses is reclaimed only once the window ends. `startfs purge` ends the
     wait on request, for what is deleted by then: it refuses unless every member is up (a member that
     missed it would keep its copies and re-spread them when it returns), sends `Purge` to all, and
     each member records the orphans it knows and collects with a retention of zero for those first
@@ -128,7 +129,7 @@ same code with a different membership scope.
     under systemd or launchd) mounts the filesystem and performs replication, repair and GC. The CLI
     (`create`, `join`, `status`, `leave`, `config`) talks to the daemon over a local socket. Config is
     a small TOML file with sensible defaults. `startfs status` is designed to answer "is my data safe
-    right now?" for the whole cluster: members gossip counts of their under-replicated chunks (by copies held) and repair progress, `status` merges the reports of reachable members, and lists the members it could not hear from (`unheard`) so a partial view is never shown as complete. A member that is not up still speaks through its last report: the chunks it then listed as a single copy are shown as `stranded` (they may exist only on it) and hold the verdict at risk until it returns. Such knowledge is the cluster's collective memory: kept in memory, relayed in `Health`, and relearned by a restarted daemon from its peers (ADR 0003). `status` also answers "where did my space go?" from this node's own view: logical size of the files, bytes after dedup (both cluster-wide, since every member holds the full metadata), and how this node's replicas are compressed (chunks, bytes saved, share of the data compressed) and what share of the expected total it holds. Other members' figures are not gossiped: `startfs stats` asks each member that is up for them on demand (`StatsRequest`/`StatsReply`), so nothing runs in the background and the numbers are current. `df` on the mount reports the logical used bytes against the usable size (offered space divided by N), not the node-local replica bytes. `status` also shows, for each member that is up, this node's round-trip time to it: the transport's own smoothed measurement (`Transport::rtt`, QUIC's connection RTT, kept fresh by keep-alives), falling back to the estimate learned from chunk fetches. `startfs activity` answers "where does the time go?" for this node only (nothing is sent to other members): a `CountingTransport` around the transport counts bytes and messages per peer path by message category, a tick timer splits each tick into phases, and the replicator reports its queue and send outcomes; all of it sits in a 60 s rolling window of one-second buckets read from the injected `Clock`, in memory, off with `activity = false`. The view also lists the in-memory structures a burst fills (transport inbox, unclaimed chunk replies, decoded-chunk cache, replication and staging indexes) beside the daemon's RSS, and the OS figures (`/proc`, PSI, cgroup), each shown as unavailable when the platform has no source. Memory is bounded by bytes on the chunk path: a receiver stops reading a chunk message while its inbox holds 64 MiB (QUIC flow control slows the sender; metadata and gossip are exempt), the replicator withholds a chunk push while the transport holds 32 MiB for that peer (`Transport::backlog`), unclaimed chunk replies (late or duplicate answers nobody fetched) are dropped after 60 s and capped at 16 MiB, oldest first, and the tick hands freed heap pages back to the OS every 2 s (`malloc_trim`) because glibc keeps a burst's memory in per-thread arenas. No web UI or tray app in v1.
+    right now?" for the whole cluster: members gossip counts of their under-replicated chunks (by copies held) and repair progress, `status` merges the reports of reachable members, and lists the members it could not hear from (`unheard`) so a partial view is never shown as complete. A member that is not up still speaks through its last report: the chunks it then listed as a single copy are shown as `stranded` (they may exist only on it) and hold the verdict at risk until it returns. Such knowledge is the cluster's collective memory: kept in memory, relayed in `Health`, and relearned by a restarted daemon from its peers (ADR 0003). `status` also answers "where did my space go?" from this node's own view: logical size of the files, bytes after dedup (both cluster-wide, since every member holds the full metadata), and how this node's replicas are compressed (chunks, bytes saved, share of the data compressed) and what share of the expected total it holds. Other members' figures are not gossiped: `startfs stats` asks each member that is up for them on demand (`StatsRequest`/`StatsReply`), so nothing runs in the background and the numbers are current. `df` on the mount reports the logical used bytes, plus the bytes only kept versions use, against the usable size (offered space divided by N), not the node-local replica bytes. `status` also shows, for each member that is up, this node's round-trip time to it: the transport's own smoothed measurement (`Transport::rtt`, QUIC's connection RTT, kept fresh by keep-alives), falling back to the estimate learned from chunk fetches. `startfs activity` answers "where does the time go?" for this node only (nothing is sent to other members): a `CountingTransport` around the transport counts bytes and messages per peer path by message category, a tick timer splits each tick into phases, and the replicator reports its queue and send outcomes; all of it sits in a 60 s rolling window of one-second buckets read from the injected `Clock`, in memory, off with `activity = false`. The view also lists the in-memory structures a burst fills (transport inbox, unclaimed chunk replies, decoded-chunk cache, replication and staging indexes) beside the daemon's RSS, and the OS figures (`/proc`, PSI, cgroup), each shown as unavailable when the platform has no source. Memory is bounded by bytes on the chunk path: a receiver stops reading a chunk message while its inbox holds 64 MiB (QUIC flow control slows the sender; metadata and gossip are exempt), the replicator withholds a chunk push while the transport holds 32 MiB for that peer (`Transport::backlog`), unclaimed chunk replies (late or duplicate answers nobody fetched) are dropped after 60 s and capped at 16 MiB, oldest first, and the tick hands freed heap pages back to the OS every 2 s (`malloc_trim`) because glibc keeps a burst's memory in per-thread arenas. No web UI or tray app in v1.
 
 15. **Transport:** QUIC (`quinn`) to peers' tailnet addresses. Streams are multiplexed so bulk
     chunk transfers don't block metadata sync. Tailscale provides encryption and identity, so QUIC
@@ -189,6 +190,47 @@ same code with a different membership scope.
   removed to unblock that. A node offline longer than the retention period is not otherwise
   special: its state joins in like any other.
 
+## Versions (as built)
+
+ADR 0008. An overwrite or a delete keeps the state it replaced as a *version* for the filesystem's
+window, `keep_versions_secs` (7 days by default, set on `create` and changed with `config
+--keep-versions`, gossiped as `KeepVersions` like the copies setting: the higher revision wins, a tie
+goes to the longer window). The window counts from when the version was replaced. A state that
+lasted under 30 s (`MIN_VERSION_LIFE`) is never a version, so the replication hold still keeps a
+build's short-lived files on the node.
+
+- Versions are derived from the log: a head that a newer version is derived from moves from the
+  object's register to the `history` table, stamped with the earliest version derived from it, and
+  a deleted object keeps its register for the window, so its last version is found by its path.
+  Members holding the same entries hold the same versions, whatever the arrival order. State
+  transfer sends each object's versions with it.
+- The chunks of a kept version count as in use: the staging sweep keeps them, so they are replicated
+  and repaired like the tree's, and GC reclaims them only once no kept version uses them. Such a
+  chunk is still an orphan, so the GC retention runs alongside the window: it is held for the longer
+  of the two, not their sum. It is not counted as pending GC. While a version holds it, its orphan
+  clock is kept no more than one retention behind, so once the version is released the reclaim gate
+  still needs a catch-up with every member from about then (a restore made elsewhere just before may
+  be on its way). `purge` leaves versions alone.
+- Versions past the window are dropped by each GC pass, and a deleted object's register by the next
+  settled compaction once it keeps no version (at once for a file that lasted under 30 s).
+- `startfs history PATH` finds the path through deleted directories and lists the kept versions of
+  every file or symlink last named there, each by its *restore point*, the instant it was written
+  (`YYYYMMDD-HHMMSS.mmm`, UTC). `startfs restore PATH --at POINT` takes the version that the path held
+  at that instant (a point stands for the end of the precision given) and writes it over what the
+  path holds now, or creates the file again; it is an ordinary write, so it replicates and can itself
+  be undone. For a directory (deleted or not) it does so for every file and symlink last placed
+  anywhere under it that held a kept version at the point, in one pass over the registers; files
+  that came later are left alone, and one blocked by a directory now at its path is counted, not
+  written. A deleted directory a restored file needs is brought back by placing its name again
+  (a `Rename` to where it was, which outlives the unlink), so it is a directory again and not only
+  kept for what is in it. A path under the mount is taken as the file it shows.
+- `status` shows the bytes only versions use (`version_bytes`); `df` counts them as used, as the
+  last GC pass found them (up to 10 minutes old), since working them out reads every register.
+
+Not done: thinning (a file written every minute keeps one version per minute for the window, each a
+row of metadata), and versions of directories themselves (a restored directory comes back with its
+last mode, and a file renamed out of it since the restore point is not brought back).
+
 ## Transport (as built)
 
 `crates/startfs/src/quic.rs` implements the poll-based `Transport` over quinn on a private background
@@ -246,7 +288,7 @@ encryption-ready.
 - Erasure coding
 - Encryption at rest and per-user access control
 - ACLs, cross-node locks, directory hardlinks
-- Pinning, snapshots and versioned history
+- Pinning and snapshots (versioned history of single files is built: ADR 0008)
 - Web UI or tray app
 - Auto-discovery of filesystems
 - More than about 20 nodes

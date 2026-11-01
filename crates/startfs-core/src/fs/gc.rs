@@ -5,6 +5,9 @@
 //! an orphan for the retention period. There is no reference counting: each
 //! pass looks at what the tree references right now.
 //!
+//! A chunk a kept version uses (ADR 0008) is still an orphan, so its retention
+//! runs alongside the window, but it is reclaimed only once no version needs it.
+//!
 //! An eligible orphan is only reclaimed once the reclaim gate opens for it:
 //! the caller vouches that this member has caught up with every other member
 //! since the orphan became eligible, so no re-reference can be pending.
@@ -50,6 +53,13 @@ impl LocalFs {
                     referenced.extend(refs.into_iter().map(|r| r.id));
                 }
             }
+            let versioned = t.version_chunks(now, self.window(), true)?;
+            let only_versions = versioned
+                .iter()
+                .filter(|(id, _)| !referenced.contains(*id))
+                .map(|(_, len)| len)
+                .sum();
+            self.version_bytes.store(only_versions, Ordering::SeqCst);
             let mut present: HashMap<ChunkId, u64> = HashMap::new();
             for (id, size, _) in self.chunks.list()?.into_iter().chain(self.staging.list()?) {
                 *present.entry(id).or_default() += size;
@@ -75,6 +85,15 @@ impl LocalFs {
                     continue;
                 }
                 let first = *since.entry(id.to_vec()).or_insert(now);
+                if versioned.contains_key(&id) {
+                    // Held by a version, not waiting for GC: its retention runs meanwhile, but
+                    // never more than one retention behind, so that once the version is released
+                    // the gate still needs a catch-up from about then (a restore made elsewhere
+                    // just before may be on its way).
+                    let first = first.max(now.saturating_sub(retention));
+                    t.orphans.insert(id.as_slice(), first).map_err(db)?;
+                    continue;
+                }
                 let eligible_at = if purge_cutoff.is_some_and(|cutoff| first <= cutoff) {
                     first
                 } else {
@@ -104,8 +123,8 @@ impl LocalFs {
         Ok(report)
     }
 
-    /// Remove from staging those of `ids` that no file in the visible tree refers to, and
-    /// return them. A chunk is staged in the same transaction that makes a file refer to it,
+    /// Remove from staging those of `ids` that no file in the visible tree or kept version
+    /// refers to, and return them. A chunk is staged in the same transaction that makes a file refer to it,
     /// and this reads the tree under the same lock, so a chunk that is about to be referenced
     /// is never taken for an orphan.
     pub fn drop_unreferenced(&self, ids: &[ChunkId]) -> FsResult<Vec<ChunkId>> {
@@ -116,11 +135,17 @@ impl LocalFs {
                     referenced.extend(refs.into_iter().map(|r| r.id));
                 }
             }
-            let orphans: Vec<ChunkId> = ids
+            let mut orphans: Vec<ChunkId> = ids
                 .iter()
                 .filter(|id| !referenced.contains(*id) && self.has_staged(id))
                 .copied()
                 .collect();
+            // A kept version's chunks are replicated like the tree's. Looked up only when
+            // the tree leaves something out, since it reads every object's register.
+            if !orphans.is_empty() {
+                let versioned = t.version_chunks(self.clock.now(), self.window(), false)?;
+                orphans.retain(|id| !versioned.contains_key(id));
+            }
             Ok(orphans)
         })?;
         // The commit above is durable and persists the lazy ones before it, so a delete that

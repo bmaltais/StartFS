@@ -154,6 +154,8 @@ impl Daemon {
                 repair_grace_secs: self.config.repair_grace_secs,
                 gc_retention_secs: self.config.gc_retention_secs,
                 standin_days: self.config.standin_days,
+                keep_versions_secs: self.config.keep_versions_secs,
+                keep_versions_rev: 0,
             },
             endpoint,
             self.addr(),

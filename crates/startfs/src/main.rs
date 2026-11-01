@@ -33,6 +33,12 @@ commands:
   purge                               free the data of deleted files on every member now, instead
                                       of after the retention period (not undoable)
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
+  history PATH [--json]               list the versions kept of the file at PATH (under the mount,
+                                      or in the filesystem), each named by its restore point
+  restore PATH --at POINT             bring the file at PATH, or every file under the directory at
+                                      PATH (deleted or not), back to what it held at POINT
+                                      (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it); what
+                                      it replaces is kept as a version, so a restore is undoable
   join TOKEN [--offer SIZE] [--site NAME]
                                       join the filesystem a token names, declaring where this
                                       node lives (home, cloud) so copies are spread across sites
@@ -47,12 +53,15 @@ commands:
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
   config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off] [--site NAME]
+         [--keep-versions DURATION]
                                       change this node's space offer (sizes like 500M, 2T), its
                                       weight (the share of new copies it takes, in the same
                                       units; 0: follow the offer), the filesystem's number of
                                       copies on every node, or whether this node keeps the
                                       counters behind `activity` (until restart), or the site
-                                      this node declares (empty: none, so it is its own site)";
+                                      this node declares (empty: none, so it is its own site),
+                                      or how long every node keeps a replaced or deleted file's
+                                      earlier version (like 7d, 36h; 0: none)";
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
@@ -72,6 +81,12 @@ enum CliError {
     ActivityNotOnOff,
     #[error("remove needs a member number (see `startfs status`)")]
     RemoveNeedsMember,
+    #[error(
+        "not a restore point: {0} (expected YYYYMMDD-HHMMSS[.fff] in UTC, as `startfs history` shows)"
+    )]
+    BadRestorePoint(String),
+    #[error("not a duration: {0} (expected a number and a unit, like 7d, 36h, 90m or 30s; or 0)")]
+    BadDuration(String),
     #[error("not a size: {0}")]
     BadSize(String),
     #[error("{}: {source}", path.display())]
@@ -241,6 +256,11 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                 };
                 Client::new(socket.clone()).set_activity(on)?;
             }
+            if let Ok(window) = flag_value(rest, "--keep-versions") {
+                let secs =
+                    parse_duration(&window).ok_or_else(|| CliError::BadDuration(window.clone()))?;
+                Client::new(socket.clone()).set_keep_versions(secs)?;
+            }
             if let Ok(copies) = flag_value(rest, "--copies") {
                 let copies = copies
                     .parse::<u32>()
@@ -294,6 +314,39 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             );
             Ok(())
         }
+        "history" => {
+            let path = absolute(positional(rest, &[]).ok_or(CliError::Usage)?)?;
+            let versions = Client::new(socket).history(&path)?;
+            if rest.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string(&versions).map_err(CliError::Json)?
+                );
+            } else {
+                print!("{}", history_table(&path, &versions));
+            }
+            Ok(())
+        }
+        "restore" => {
+            let point = flag_value(rest, "--at")?;
+            let path = absolute(positional(rest, &["--at"]).ok_or(CliError::Usage)?)?;
+            let at = startfs_core::fs::parse_restore_point(&point)
+                .ok_or_else(|| CliError::BadRestorePoint(point.clone()))?;
+            let report = Client::new(socket).restore(&path, at)?;
+            println!(
+                "restored {} file{} under {path} to what {} held at {point}",
+                report.restored,
+                if report.restored == 1 { "" } else { "s" },
+                if report.restored == 1 { "it" } else { "they" }
+            );
+            if report.blocked > 0 {
+                eprintln!(
+                    "{} left as they are: a directory now stands where they were",
+                    report.blocked
+                );
+            }
+            Ok(())
+        }
         "stats" => {
             let client = Client::new(socket);
             let rows = client.node_stats()?;
@@ -307,6 +360,52 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         }
         _ => Err(CliError::Usage),
     }
+}
+
+/// The first argument that is neither a flag nor the value of one of `valued`.
+fn positional<'a>(args: &'a [String], valued: &[&str]) -> Option<&'a str> {
+    let mut args = args.iter();
+    while let Some(a) = args.next() {
+        if valued.contains(&a.as_str()) {
+            args.next();
+        } else if !a.starts_with('-') {
+            return Some(a);
+        }
+    }
+    None
+}
+
+/// A path as given, made absolute against the working directory (not resolved:
+/// the file it names may be gone).
+fn absolute(path: &str) -> Result<String, CliError> {
+    if path.starts_with('/') {
+        return Ok(path.to_string());
+    }
+    let cwd = std::env::current_dir().map_err(CliError::DataDir)?;
+    Ok(cwd.join(path).display().to_string())
+}
+
+/// One line per version, oldest first, each named by its restore point.
+fn history_table(path: &str, versions: &[control::VersionInfo]) -> String {
+    use startfs_core::fs::restore_point;
+    let mut out = format!(
+        "{path}: {} version{} (restore points in UTC; `startfs restore {path} --at POINT`)\n",
+        versions.len(),
+        if versions.len() == 1 { "" } else { "s" }
+    );
+    for v in versions {
+        let ended = match (v.replaced, v.deleted) {
+            (None, _) => "current".to_string(),
+            (Some(t), true) => format!("deleted {}", restore_point(t)),
+            (Some(t), false) => format!("replaced {}", restore_point(t)),
+        };
+        out.push_str(&format!(
+            "  {}  {:>10}  {ended}\n",
+            restore_point(v.written),
+            human(v.size)
+        ));
+    }
+    out
 }
 
 /// One line per member: what it stores, how well, and its share of the replicas.
@@ -393,12 +492,21 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "daemon" => (&["--mount"], &[], 0),
         "create" => (&["--name", "--copies"], &["--example"], 0),
         "status" | "activity" | "stats" => (&[], &["--json"], 0),
+        "history" => (&[], &["--json"], 1),
+        "restore" => (&["--at"], &[], 1),
         "join" => (&["--offer", "--site"], &[], 1),
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
         "remove" | "revoke" => (&[], &[], 1),
         "config" => (
-            &["--offer", "--weight", "--copies", "--activity", "--site"],
+            &[
+                "--offer",
+                "--weight",
+                "--copies",
+                "--activity",
+                "--site",
+                "--keep-versions",
+            ],
             &[],
             0,
         ),
@@ -454,6 +562,24 @@ fn parse_size(text: &str) -> Result<u64, CliError> {
         .ok_or_else(bad)
 }
 
+/// Seconds in a duration like `7d`, `36h`, `90m` or `30s`; a bare `0` is none.
+fn parse_duration(text: &str) -> Option<u64> {
+    if text == "0" {
+        return Some(0);
+    }
+    let unit = match text.chars().last()? {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return None,
+    };
+    text[..text.len() - 1]
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(unit)
+}
+
 fn optional_size(args: &[String], name: &str) -> Result<Option<u64>, CliError> {
     match args.iter().position(|a| a == name) {
         None => Ok(None),
@@ -502,6 +628,9 @@ fn daemon(
         advertised_host(host),
     )?;
     let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
+    if let Some(mp) = &mountpoint {
+        d.set_mountpoint(mp.clone());
+    }
     // Before the first tick: what an earlier swap left open is settled here.
     d.set_installer(Arc::new(ScriptInstaller::new(
         &data_dir,
@@ -785,8 +914,16 @@ fn ratio(a: u64, b: u64) -> Option<String> {
 /// of it, and this node's share of the replicas.
 fn efficiency_lines(s: &Status, copies: u32) -> String {
     let e = &s.efficiency;
+    let versions = match (&s.filesystem, e.version_bytes) {
+        (Some(f), bytes) if bytes > 0 => format!(
+            "  plus {} that only earlier versions use, kept {} after they were replaced (`startfs history PATH`)\n",
+            human(bytes),
+            time_left(f.keep_versions_secs)
+        ),
+        _ => String::new(),
+    };
     if e.logical_bytes == 0 {
-        return "storage: no files yet\n".into();
+        return format!("storage: no files yet\n{versions}");
     }
     let mut out = format!(
         "storage: {} in files, {} after dedup",
@@ -832,6 +969,7 @@ fn efficiency_lines(s: &Status, copies: u32) -> String {
             human(s.gc.pending_bytes)
         ));
     }
+    out.push_str(&versions);
     out
 }
 

@@ -185,6 +185,8 @@ pub struct Daemon {
     purging: Mutex<Option<Nanos>>,
     /// Fetches and swaps releases for an upgrade the cluster coordinates.
     installer: Mutex<Arc<dyn Installer>>,
+    /// Where the filesystem is mounted, so paths under it can be named as such.
+    mountpoint: Mutex<Option<PathBuf>>,
     /// The upgrade under way and what the other members said about it.
     upgrades: Mutex<upgrade::Upgrades>,
 }
@@ -294,6 +296,7 @@ impl Daemon {
                 stopping: AtomicBool::new(false),
                 purging: Mutex::new(None),
                 installer: Mutex::new(Arc::new(NoInstaller)),
+                mountpoint: Mutex::new(None),
                 dir: dir.to_path_buf(),
                 upgrades: Mutex::new(upgrade::Upgrades::open(dir)),
                 fs,
@@ -414,6 +417,10 @@ impl Daemon {
         self.refresh_staging_limit();
         self.fs
             .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
+        if let Some(f) = self.membership.lock().unwrap().filesystem() {
+            self.fs
+                .set_keep_versions(Duration::from_secs(f.keep_versions_secs));
+        }
         timer.phase(Phase::Sync);
         // A long queue is worked off over several ticks, so the rest of the
         // background work is not starved behind it.
@@ -560,8 +567,14 @@ impl Daemon {
                 .unwrap()
                 .copies_setting()
                 .map(|(copies, rev)| Message::Copies { copies, rev }.encode());
+            let versions_msg = self
+                .membership
+                .lock()
+                .unwrap()
+                .keep_versions_setting()
+                .map(|(secs, rev)| Message::KeepVersions { secs, rev }.encode());
             for p in &peers {
-                if let Some(msg) = &copies_msg {
+                for msg in copies_msg.iter().chain(&versions_msg) {
                     transport.send(*p, msg.clone());
                 }
                 transport.send(*p, members_msg.clone());

@@ -405,6 +405,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `repair_grace_secs` | 1800 | on `create`: how long a member may be unseen before re-replication |
 | `standin_days` | 3 | on `create`: days the extra copies made while a member slept are kept after it is back (0 = no stand-ins for sleeping members) |
 | `gc_retention_secs` | 604800 | on `create`: how long deleted chunks are kept |
+| `keep_versions_secs` | 604800 | on `create`: how long an overwritten or deleted file keeps its earlier version, from when it was replaced (0 = none); `startfs config --keep-versions 3d` changes it on every member |
 | `repair_bytes_per_sec` | 64 MiB | most bytes per second each node sends when repairing (restoring copies after a lost node or a `config --copies` increase); every holder sends its share, so the cluster's speed grows with its size |
 | `behind_inbox_messages` | 5000 | messages waiting in a peer's inbox from which this node sends it nothing new until it drains (0 = off) |
 | `scrub_period_secs` | 30 days | full integrity pass period |
@@ -414,6 +415,30 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `allowed_tags` | `[]` | Tailscale ACL tags a peer must carry (empty: any tailnet machine) |
 | `whois_socket` | platform default | `tailscaled` socket |
 
+### Getting an earlier version back
+
+An overwritten or deleted file keeps its earlier version for `keep_versions_secs` (7 days by
+default) from when it was replaced, on every member, so a bad write or an `rm -rf` can be undone:
+
+```
+$ startfs history ~/startfs/notes.txt
+/home/me/startfs/notes.txt: 2 versions (restore points in UTC; `startfs restore /home/me/startfs/notes.txt --at POINT`)
+  20261101-091502.114     12.0 KiB  replaced 20261101-143010.502
+  20261101-143010.502      3.1 KiB  current
+$ startfs restore ~/startfs/notes.txt --at 20261101-091502.114
+```
+
+A restore point is an instant: `restore --at` brings the path back to what it held then, writing
+over what is there now or creating the file again. Given a directory, deleted or not, it does that
+for every file under it, so `startfs restore ~/startfs/project --at POINT` undoes an `rm -rf`
+(files created since are left alone). It is an
+ordinary write, so it replicates, and what it replaces becomes a version in turn. A state that
+lasted under 30 s is not kept, so a build's short-lived files still never leave the machine.
+`startfs status` shows the bytes that only versions use, and `df` counts them as used. A version's
+chunks are freed once both the window and the GC retention have passed; `startfs config
+--keep-versions` (like `3d`, `12h`; `0` for none) changes the window on every member. Every member
+must run protocol 17.
+
 ### Freeing the space of deleted files
 
 Deleting a file keeps its data for `gc_retention_secs` (7 days by default), so a mistake can be
@@ -422,8 +447,9 @@ soon as it has caught up with all the others (`startfs status` shows `purge in p
 a member that holds it back). It **cannot be undone**: the deleted files are gone. It needs every
 member up, and refuses otherwise (naming the ones away; `startfs remove` a member that is gone for
 good): a member that missed it would keep its copies and hand them back to the others when it
-returns. Files deleted after the purge keep their usual 7 days. If a daemon restarts mid-purge, run
-it again. Every member must run protocol 12 (release 1.5.0 or newer).
+returns. Files deleted after the purge keep their usual 7 days. A purge leaves versions alone:
+data a version still uses stays until its window ends, so to free it now shorten the window first
+(`startfs config --keep-versions 0`). If a daemon restarts mid-purge, run it again. Every member must run protocol 12 (release 1.5.0 or newer).
 
 ### Why is a transfer slow?
 

@@ -56,6 +56,9 @@ pub enum Message {
     /// protocol version (ADR 0006). It never goes through the enum's own encoding:
     /// see [`NOTICE_BYTE`].
     UpgradeNotice(UpgradeNotice),
+    /// How long the filesystem keeps versions, in seconds, and the revision of
+    /// that setting; the higher revision wins, a tie goes to the longer window.
+    KeepVersions { secs: u64, rev: u64 },
 }
 
 /// Which release the cluster is on, sent to a member that cannot otherwise hear
@@ -82,7 +85,7 @@ pub enum Category {
     Chunk,
     /// Operation log entries and state transfer.
     Metadata,
-    /// Hello, members, tokens, health, the copies setting and upgrades.
+    /// Hello, members, tokens, health, the copies and versions settings and upgrades.
     Gossip,
     /// Joining and storage-figure queries.
     Other,
@@ -130,7 +133,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 16;
+pub const PROTOCOL_VERSION: u8 = 17;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -193,9 +196,9 @@ impl Message {
     /// Whether an encoded message is periodic gossip that nothing waits on, so a node that is
     /// idle need not wake for it: it reads it at its next round.
     pub fn is_background(raw: &[u8]) -> bool {
-        // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`
-        // and `Upgrade`.
-        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16))
+        // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`,
+        // `Upgrade` and `KeepVersions`.
+        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16 | 18))
     }
 
     /// What an encoded message is for, as the activity view groups traffic.
@@ -207,7 +210,7 @@ impl Message {
         match raw.get(1) {
             Some(6..=9) => Category::Chunk,
             Some(1 | 2) => Category::Metadata,
-            Some(0 | 3 | 10..=12 | 13) => Category::Gossip,
+            Some(0 | 3 | 10..=12 | 13 | 18) => Category::Gossip,
             _ => Category::Other,
         }
     }
@@ -280,8 +283,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        16,
-        "b4012d5af912d5d69611004e4861de23beebaeab51dcf5205fdaef7e13ffd879",
+        17,
+        "d86acc7c2c54134c4fb8a82819f85de2ae63c800058062fad4628b9224c2c544",
     );
 
     #[test]
@@ -309,6 +312,8 @@ mod tests {
             repair_grace_secs: 1800,
             gc_retention_secs: 604800,
             standin_days: 3,
+            keep_versions_secs: 86400,
+            keep_versions_rev: 2,
         };
         let samples = [
             Message::JoinReply(Ok(Admission {
@@ -353,6 +358,16 @@ mod tests {
                 },
             }),
             Message::Copies { copies: 3, rev: 2 },
+            Message::KeepVersions { secs: 4, rev: 5 },
+            Message::StateChunk(StateChunk {
+                pin: crate::oplog::StatePin {
+                    frontier: Frontier::from([(MemberId(1), 2)]),
+                    hlc: crate::oplog::Hlc::ZERO,
+                },
+                objects: vec![(3, vec![4])],
+                versions: vec![(3, vec![5])],
+                last: true,
+            }),
             Message::ChunkAck([1u8; 32], Replica::Missing),
             Message::StatsRequest,
             Message::Purge,
@@ -386,6 +401,7 @@ mod tests {
                     raw_chunks: 9,
                     zstd_chunks: 10,
                     zstd_plain_bytes: 11,
+                    version_bytes: 13,
                 },
                 pending_gc_bytes: 12,
             }),
@@ -433,6 +449,7 @@ mod tests {
             Message::Tokens(vec![]),
             Message::Health(Health::default()),
             Message::Copies { copies: 3, rev: 2 },
+            Message::KeepVersions { secs: 4, rev: 5 },
             Message::Upgrade(UpgradeGossip {
                 running: crate::upgrade::Release {
                     version: "1.10.0".into(),

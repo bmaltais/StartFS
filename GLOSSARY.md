@@ -5,7 +5,7 @@ A filesystem replicated across a group of machines (members) that each hold its 
 ## Language
 
 **Logical size**:
-The bytes the files in the visible tree add up to, what the user thinks they stored. `df` reports it as used.
+The bytes the files in the visible tree add up to, what the user thinks they stored. `df` reports it as used, plus the bytes only kept versions use.
 _Avoid_: Apparent size
 
 **Referenced bytes**:
@@ -81,6 +81,14 @@ _Avoid_: Priority, load factor
 **Purge**:
 Asking every member to reclaim the chunks no file uses now instead of after the retention period. The reclaim gate still applies, so a member that has not caught up holds it back until it has. Not undoable.
 _Avoid_: Cleanup, force GC
+
+**Version**:
+An earlier state of a file, kept after the file is overwritten or deleted for `keep_versions_secs` (the filesystem's window, 7 days by default) from when it was replaced. Every member derives the same versions from the log, and their chunks count as in use, so they are not trimmed and repair keeps their copies. A state that lasted less than 30 s is not kept, so short-lived files still never leave the node that wrote them (ADR 0008).
+_Avoid_: Snapshot (unused: it was *state transfer*), backup, revision
+
+**Restore point**:
+An instant within the window, named as `YYYYMMDD-HHMMSS[.fff]` in UTC. `restore --at` brings a path back to the version it held at that instant; `history` lists each version by the instant it was written. Restoring is a write like any other, so the state it replaces becomes a version in turn.
+_Avoid_: Checkpoint, snapshot
 
 **Peer path**:
 The traffic between this node and one other member, counted at each end. Two ends that disagree about the same path show loss or a stall on it.

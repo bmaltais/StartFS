@@ -138,6 +138,8 @@ pub struct StateChunk {
     pub pin: StatePin,
     /// Merge registers by object (encoded), in object order.
     pub objects: Vec<(Ino, Vec<u8>)>,
+    /// The earlier versions of those objects (encoded), in object order.
+    pub versions: Vec<(Ino, Vec<u8>)>,
     /// Whether no objects follow in this transfer.
     pub last: bool,
 }

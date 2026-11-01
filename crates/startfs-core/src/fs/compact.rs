@@ -45,7 +45,7 @@ impl LocalFs {
                 }
             }
             if settled {
-                t.purge_settled()?;
+                t.purge_settled(self.clock.now(), self.window())?;
             }
             Ok(())
         })

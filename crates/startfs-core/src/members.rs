@@ -543,6 +543,39 @@ impl Membership {
         true
     }
 
+    /// Set how long versions are kept and bump its revision so the others take it.
+    pub fn set_keep_versions(&mut self, secs: u64) -> Result<(), Error> {
+        let fs = self.fs.as_mut().ok_or(Error::NotInFilesystem)?;
+        if fs.keep_versions_secs == secs {
+            return Ok(());
+        }
+        fs.keep_versions_secs = secs;
+        fs.keep_versions_rev += 1;
+        self.save()
+    }
+
+    /// The versions window as gossiped: `(seconds, revision)`.
+    pub fn keep_versions_setting(&self) -> Option<(u64, u64)> {
+        self.fs
+            .as_ref()
+            .map(|fs| (fs.keep_versions_secs, fs.keep_versions_rev))
+    }
+
+    /// Fold in a peer's versions window; the higher revision wins, and equal
+    /// revisions go to the longer window, which keeps more. Returns whether anything changed.
+    pub fn merge_keep_versions(&mut self, secs: u64, rev: u64) -> bool {
+        let Some(fs) = self.fs.as_mut() else {
+            return false;
+        };
+        if (fs.keep_versions_rev, fs.keep_versions_secs) >= (rev, secs) {
+            return false;
+        }
+        fs.keep_versions_secs = secs;
+        fs.keep_versions_rev = rev;
+        self.save_or_report();
+        true
+    }
+
     /// Change how much of the placement this node takes; 0 follows the offer.
     pub fn set_weight(&mut self, bytes: u64) -> Result<(), Error> {
         let me = self.me;

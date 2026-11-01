@@ -110,6 +110,12 @@ impl Daemon {
                     m.merge_copies(copies, rev);
                 }
             }
+            Message::KeepVersions { secs, rev } => {
+                let mut m = self.membership.lock().unwrap();
+                if m.is_member_endpoint(from) {
+                    m.merge_keep_versions(secs, rev);
+                }
+            }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
                 if m.is_member_endpoint(from) && m.merge(list) {

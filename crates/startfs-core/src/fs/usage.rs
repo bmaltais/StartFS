@@ -11,11 +11,12 @@ impl LocalFs {
         self.usable_bytes.store(bytes, Ordering::SeqCst);
     }
 
-    /// Bytes the files in the tree add up to. Cheaper than [`Self::efficiency`],
-    /// for callers such as `df` that poll.
-    pub fn logical_bytes(&self) -> FsResult<u64> {
+    /// What `df` counts as used: the bytes the files in the tree add up to, and the
+    /// bytes only kept versions use, as the last GC pass found them (working those out reads
+    /// every object's register, too much for `df`, which polls).
+    pub(super) fn used_bytes(&self) -> FsResult<u64> {
         self.flush_all_logged(false, 0);
-        self.run(false, |t| {
+        let files = self.run(false, |t| {
             let mut total = 0;
             for row in t.inodes.iter().map_err(db)? {
                 let inode = decode(row.map_err(db)?.1.value())?;
@@ -24,7 +25,8 @@ impl LocalFs {
                 }
             }
             Ok(total)
-        })
+        })?;
+        Ok(files + self.version_bytes.load(Ordering::SeqCst))
     }
 
     /// Logical size against the chunks the tree references, and how those
@@ -34,6 +36,7 @@ impl LocalFs {
         self.flush_all_logged(false, 0);
         let mut out = Efficiency::default();
         let mut referenced: HashMap<ChunkId, u64> = HashMap::new();
+        let (now, window) = (self.clock.now(), self.window());
         self.run(false, |t| {
             for row in t.inodes.iter().map_err(db)? {
                 let inode = decode(row.map_err(db)?.1.value())?;
@@ -48,6 +51,8 @@ impl LocalFs {
                     Content::Inline(bytes) => out.inline_bytes += bytes.len() as u64,
                 }
             }
+            let tree: HashSet<ChunkId> = referenced.keys().copied().collect();
+            out.version_bytes = t.version_only_bytes(&tree, now, window)?;
             Ok(())
         })?;
         out.referenced_bytes = referenced.values().sum();

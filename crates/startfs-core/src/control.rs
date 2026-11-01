@@ -51,6 +51,9 @@ pub enum Request {
         /// Declare where this node lives; empty clears it (it is then its own site).
         #[serde(default)]
         site: Option<String>,
+        /// Change how long the filesystem keeps versions, in seconds (for every member).
+        #[serde(default)]
+        keep_versions_secs: Option<u64>,
     },
     /// Make a token we issued stop working.
     Revoke {
@@ -68,6 +71,16 @@ pub enum Request {
         release: Option<String>,
         #[serde(default)]
         force: bool,
+    },
+    /// The versions of the file at a path (in the filesystem, or under the mount).
+    History {
+        path: String,
+    },
+    /// Bring the file at a path back to the version it held at `at` (a restore point),
+    /// or for a directory every file under it.
+    Restore {
+        path: String,
+        at: Nanos,
     },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
@@ -98,6 +111,17 @@ pub struct FilesystemInfo {
     /// back; 0 means no stand-in copies are made for members that are only asleep.
     #[serde(default = "default_standin_days")]
     pub standin_days: u64,
+    /// How long an overwritten or deleted file keeps its earlier version, from
+    /// when it was replaced; 0 keeps none. `config --keep-versions` changes it.
+    #[serde(default = "default_keep_versions")]
+    pub keep_versions_secs: u64,
+    /// Bumped each time `keep_versions_secs` is changed; the highest wins.
+    #[serde(default)]
+    pub keep_versions_rev: u64,
+}
+
+fn default_keep_versions() -> u64 {
+    crate::config::DEFAULT_KEEP_VERSIONS_SECS
 }
 
 fn default_standin_days() -> u64 {
@@ -230,6 +254,10 @@ pub struct Efficiency {
     /// Plaintext bytes of the chunks compressed with zstd.
     #[serde(default)]
     pub zstd_plain_bytes: u64,
+    /// Plaintext bytes of the distinct chunks that only kept versions use: what
+    /// history holds beyond the tree. `df` counts it as used.
+    #[serde(default)]
+    pub version_bytes: u64,
 }
 
 /// One node's storage figures: what it holds and how well it is stored.
@@ -337,6 +365,27 @@ pub struct LogStatus {
     /// Objects (files, directories, symlinks) whose merge state is kept,
     /// deleted ones included until every member has seen the delete.
     pub objects: u64,
+}
+
+/// One version of the file at a path, as `history` lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    /// When it was written: the restore point that names it.
+    pub written: Nanos,
+    /// When it was overwritten or deleted; `None` for what the path holds now.
+    pub replaced: Option<Nanos>,
+    /// Whether it ended with the file's deletion.
+    pub deleted: bool,
+    pub size: u64,
+}
+
+/// What a restore wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RestoreReport {
+    /// Files and symlinks brought back to the version they held at the restore point.
+    pub restored: u64,
+    /// Those left as they are because something of another kind (a directory) is there now.
+    pub blocked: u64,
 }
 
 /// Who a purge was sent to.
@@ -472,6 +521,8 @@ pub enum Response {
     Purged(PurgeReport),
     Updating(UpdateReport),
     NodeStats(Vec<NodeReport>),
+    History(Vec<VersionInfo>),
+    Restored(RestoreReport),
     Error(String),
 }
 
@@ -672,6 +723,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -687,6 +739,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -701,6 +754,22 @@ impl Client {
             copies: Some(copies),
             activity: None,
             site: None,
+            keep_versions_secs: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Change how long the filesystem keeps versions, on every member; 0 keeps none.
+    pub fn set_keep_versions(&self, secs: u64) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            weight_bytes: None,
+            copies: None,
+            activity: None,
+            site: None,
+            keep_versions_secs: Some(secs),
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -715,6 +784,7 @@ impl Client {
             copies: None,
             activity: None,
             site: Some(site.into()),
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -729,6 +799,7 @@ impl Client {
             copies: None,
             activity: Some(on),
             site: None,
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -787,6 +858,26 @@ impl Client {
     pub fn node_stats(&self) -> Result<Vec<NodeReport>, Error> {
         match self.call(&Request::NodeStats)? {
             Response::NodeStats(rows) => Ok(rows),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Bring the file at `path`, or every file under the directory at `path`,
+    /// back to what it held at `at`.
+    pub fn restore(&self, path: &str, at: Nanos) -> Result<RestoreReport, Error> {
+        match self.call(&Request::Restore {
+            path: path.into(),
+            at,
+        })? {
+            Response::Restored(report) => Ok(report),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// The versions of the file at `path`, oldest first.
+    pub fn history(&self, path: &str) -> Result<Vec<VersionInfo>, Error> {
+        match self.call(&Request::History { path: path.into() })? {
+            Response::History(v) => Ok(v),
             other => Err(unexpected(other)),
         }
     }
