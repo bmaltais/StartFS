@@ -11,7 +11,9 @@ source "$(dirname "$0")/lib.sh"
 WATCH=${WATCH:-40}
 [ -n "$given" ] || build
 setup_env
-PORT_A=$((20000 + RANDOM % 20000)); PORT_B=$((PORT_A + 1)); PORT_C=$((PORT_A + 2))
+PORT_A=$((20000 + RANDOM % 20000))
+# shellcheck disable=SC2034 # read by start_node through eval "port=\${PORT_$name:-0}"
+PORT_B=$((PORT_A + 1)) PORT_C=$((PORT_A + 2))
 mkdir -p "$WORK/A/mnt" "$WORK/B/mnt" "$WORK/C/mnt"
 start_node A "$WORK/A/mnt"
 TOKEN=$(sf A create --name restart --copies 3)

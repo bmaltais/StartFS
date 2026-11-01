@@ -36,5 +36,6 @@ PY
 
 run "1000 x 16 KiB copy"       $((1000 * 16384))   cp -r "$WORK/src16k" "$M/s16k"
 run "100 x 1 MiB copy"         $((100 * 1048576))  cp -r "$WORK/src1m" "$M/s1m"
+# shellcheck disable=SC2016 # $(seq 50) and $i are for the inner bash
 run "patch 50 files by 14 B"   1 bash -c 'for i in $(seq 50); do printf "patched-header" | dd of="'"$M"'/s1m/f$i" bs=1 conv=notrunc status=none; done'
 run "delete 1100 files"        1 rm -rf "$M/s16k" "$M/s1m"

@@ -20,7 +20,7 @@ sample() { # label
   local dt; dt=$(elapsed "$t0")
   python3 - "$1" "$dt" "$c0a" "$(cpu_ticks "$PID_A")" "$c0b" "$(cpu_ticks "$PID_B")" \
     "$(rss_kb "$PID_A")" "$(hwm_kb "$PID_A")" "$(rss_kb "$PID_B")" "$(hwm_kb "$PID_B")" \
-    "$(ls /proc/$PID_A/task | wc -l)" "$w0" "$(wakeups "$PID_A")" <<'PY'
+    "$(find "/proc/$PID_A/task" -mindepth 1 -maxdepth 1 | wc -l)" "$w0" "$(wakeups "$PID_A")" <<'PY'
 import sys
 l, dt, a0, a1, b0, b1, ra, ha, rb, hb, th, w0, w1 = sys.argv[1:]
 dt = float(dt)

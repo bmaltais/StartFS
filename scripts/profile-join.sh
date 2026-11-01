@@ -17,7 +17,7 @@ DEV=${DEV:-$(findmnt -no SOURCE -T "$HOME/.cache")}
 setup_env
 T0=$(now)
 say() { printf '[%5.0fs] %s\n' "$(python3 -c "print($(now) - $T0)")" "$*"; }
-names=$(printf '%s ' $(echo A B C D E F G H | cut -d' ' -f1-"$NODES"))
+names="$(echo A B C D E F G H | cut -d' ' -f1-"$NODES") "
 base=$((20000 + RANDOM % 20000)); i=0
 for n in $names J; do eval "PORT_$n=$((base + i))"; i=$((i + 1)); done
 for n in $names J; do mkdir -p "$WORK/$n/mnt"; done
@@ -30,6 +30,7 @@ exec sudo -n systemd-run --scope -q --uid=$(id -u) --gid=$(id -g) -p CPUQuota=20
   env HOME=$HOME PATH=$PATH "\$@"
 CAPPED
   chmod +x "$WORK/capped"
+  # shellcheck disable=SC2034 # read by start_node through eval "wrap=\${WRAP_$name:-}"
   WRAP_J="$WORK/capped"
 fi
 say "starting $NODES nodes"
@@ -54,7 +55,7 @@ done
 say "tree stored; joiner starts (WATCH=$WATCH s max)"
 
 line() { local out="$1"; for n in $names J; do eval "out=\$out,\$(( \$(rss_kb \$PID_$n) / 1024 ))"; done; echo "$out"; }
-echo "seconds,$(echo $names J | tr ' ' ',')"
+echo "seconds,$(echo "${names}J" | tr ' ' ',')"
 t0=$(now)
 start_node J "$WORK/J/mnt"
 sf J join "$(sf A token)" --offer 100G >/dev/null

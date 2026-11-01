@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the validation scripts. Source this file; do not run it.
 # Runs real `startfs` daemons on loopback, each with its own data dir, a fake
 # tailscaled whois (so peer identification passes without a tailnet) and a
@@ -31,7 +32,7 @@ class H(socketserver.BaseRequestHandler):
 if os.path.exists(path): os.unlink(path)
 socketserver.ThreadingUnixStreamServer(path, H).serve_forever()
 PY
-  python3 "$WORK/whois.py" "$WORK/whois.sock" & PIDS+=($!)
+  python3 "$WORK/whois.py" "$WORK/whois.sock" & PIDS+=("$!")
   while [ ! -S "$WORK/whois.sock" ]; do sleep 0.05; done
 }
 
@@ -52,7 +53,7 @@ start_node() {
   $wrap "$BIN" "${args[@]}" >"$d/log" 2>&1 &
   local pid=$!
   if [ -n "$wrap" ]; then
-    PIDS+=($pid)
+    PIDS+=("$pid")
     # the wrapper's own command line names the data dir too: take the process that is the daemon
     pid=
     local tries=0
@@ -62,7 +63,7 @@ start_node() {
       sleep 0.05
     done
   fi
-  PIDS+=($pid)
+  PIDS+=("$pid")
   eval "PID_$name=$pid"
   while [ ! -S "$d/data/control.sock" ]; do
     kill -0 "$pid" 2>/dev/null || { echo "daemon $name died:"; cat "$d/log"; exit 1; }

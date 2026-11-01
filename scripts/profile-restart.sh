@@ -15,7 +15,9 @@ source "$(dirname "$0")/lib.sh"
 FILES=${FILES:-1500}; BIG=${BIG:-50}; SEED=${SEED:-85}; WATCH=${WATCH:-90}
 [ -n "$given" ] || build
 setup_env
-PORT_A=$((20000 + RANDOM % 20000)); PORT_B=$((PORT_A + 1)); PORT_C=$((PORT_A + 2))
+PORT_A=$((20000 + RANDOM % 20000))
+# shellcheck disable=SC2034 # read by start_node through eval "port=\${PORT_$name:-0}"
+PORT_B=$((PORT_A + 1)) PORT_C=$((PORT_A + 2))
 mkdir -p "$WORK/A/mnt" "$WORK/B/mnt" "$WORK/C/mnt"
 start_node A "$WORK/A/mnt"
 TOKEN=$(sf A create --name restart --copies 3)
@@ -58,7 +60,17 @@ syscw() {
 if [ -n "${TRACE:-}" ]; then
   sudo -n strace -f -y -e trace=write,pwrite64,pwritev,sendto,sendmsg,fsync,fdatasync -o "$WORK/strace.out" -p "$PID_B" 2>/dev/null & TP=$!
 fi
-until { [ "$(find "$WORK/B/mnt/copy" -type f 2>/dev/null | wc -l)" -ge "$want" ] && sf B status 2>/dev/null | grep -q 'data: *SAFE'; } || [ "$(python3 -c "print(int($(now) - $t0))")" -ge "$WATCH" ]; do sleep 1; done
+# Done once B has heard every member, has nothing queued or being re-checked, and is SAFE: just
+# after a restart a node reads SAFE, with nothing being re-checked, until its peers' hellos arrive.
+settled() {
+  sf B status --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ok = d["verdict"] == "Safe" and d["rechecking"] == 0 and all(m["state"] == "Online" for m in d["members"])
+sys.exit(0 if ok else 1)' &&
+    [ "$(sf B activity --json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["queue"]["chunks"])')" = 0 ]
+}
+until { [ "$(find "$WORK/B/mnt/copy" -type f 2>/dev/null | wc -l)" -ge "$want" ] && settled; } || [ "$(python3 -c "print(int($(now) - $t0))")" -ge "$WATCH" ]; do sleep 1; done
 echo "seconds_to_caught_up_and_safe=$(elapsed "$t0") write_syscalls=$(syscw "$PID_B") cpu_s=$(( $(cpu_ticks "$PID_B") / 100 ))"
 sf B status | grep -E 'data:|repair|log' || true
 echo "files on B: $(find "$WORK/B/mnt/copy" -type f 2>/dev/null | wc -l) of $want"

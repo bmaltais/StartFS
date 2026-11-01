@@ -267,6 +267,20 @@ it does not reproduce the live `meta.redb` flood (about 7,500 `pwrite64` in 6 s)
 restart of an idle cluster writes almost nothing to `meta.redb` and sends about 400 "do you hold
 this chunk?" messages a second.
 
+Re-check after a restart, 1.10.15 (2026-11-01). A restarted node asks the other holders of every
+chunk it holds whether they still hold it: 4 messages per chunk with 3 copies (an ask and an answer
+to each of the 2 others; counted in the harness at 500 and 2,000 chunks). `scripts/profile-restart.sh`
+(3 loopback nodes, uncapped, done when B has heard everyone, has nothing queued or re-checking and
+reads SAFE; until 1.10.15 it stopped at the SAFE a node reads before its peers' hellos arrive):
+
+| files (about one chunk each) | 1,550 | 6,050 | 24,050 |
+|---|---|---|---|
+| seconds until settled | 1.2 | 2.4 | 4.5 |
+
+About 0.15 ms a chunk past a second of fixed cost, so 200,000 chunks would take about half a minute.
+Live, vps1 (8,827 chunks, Azure Standard HDD) had nothing left to re-check at its first sample,
+22 s after `systemctl --user restart startfs`.
+
 ## 8. A new empty member joins (#78, #91 step 1)
 
 `scripts/profile-join.sh`: four loopback nodes (10 GiB offers, 3 copies) hold 4,000 small files plus

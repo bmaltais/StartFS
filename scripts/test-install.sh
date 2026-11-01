@@ -11,7 +11,8 @@ mkdir -p "$HOME" "$work/bin" "$work/state"
 # A release is a tarball holding a fake `startfs` that reports a version and protocol, and
 # answers `status` unless the release is marked broken.
 make_release() { # tag version protocol [broken]
-  local name=startfs-$1-$(uname -m | sed 's/amd64/x86_64/;s/arm64/aarch64/')-linux d=$work/rel/$1
+  local name d=$work/rel/$1
+  name=startfs-$1-$(uname -m | sed 's/amd64/x86_64/;s/arm64/aarch64/')-linux
   mkdir -p "$d" "$work/pkg/$name"
   cat >"$work/pkg/$name/startfs" <<SH
 #!/bin/sh
@@ -72,6 +73,7 @@ expect "startfs service is running" "$work/out"
 echo "ok   fresh install enables and starts the service"
 # The last lines are what a user reads before pasting the next command, so the PATH
 # fix has to be there, not buried above the service messages.
+# shellcheck disable=SC2016 # \$PATH is the literal text the installer prints
 tail -n 3 "$work/out" | grep -q 'export PATH="'"$HOME"'/.local/bin:\$PATH"' || fail "no PATH fix at the end"
 echo "ok   a missing PATH entry comes with the command that fixes it, as the last thing printed"
 
@@ -79,6 +81,7 @@ echo "ok   a missing PATH entry comes with the command that fixes it, as the las
 fix() { STARTFS_BASE_URL=file://$work/rel STARTFS_VERSION=v1.0.0 sh "$here/install.sh" --fixpath >"$work/out" 2>&1; }
 SHELL=/bin/bash fix || fail "--fixpath"
 fix || fail "--fixpath again"
+# shellcheck disable=SC2016 # $PATH is the literal text written to the profile
 [ "$(grep -cF 'export PATH="'"$HOME"'/.local/bin:$PATH"' "$HOME/.profile")" = 1 ] || fail "profile line missing or duplicated"
 expect "already added to PATH" "$work/out"
 if sh "$here/install.sh" --bogus >"$work/out" 2>&1; then fail "unknown flag must fail"; fi

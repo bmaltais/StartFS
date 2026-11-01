@@ -1,0 +1,2 @@
+# Scripts source lib.sh as "$(dirname "$0")/lib.sh": resolve it next to the script, from any cwd.
+source-path=SCRIPTDIR
