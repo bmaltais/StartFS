@@ -429,7 +429,9 @@ $ startfs restore ~/startfs/notes.txt --at 20261101-091502.114
 ```
 
 A restore point is an instant: `restore --at` brings the path back to what it held then, writing
-over what is there now or creating the file again (inside a deleted directory too). It is an
+over what is there now or creating the file again. Given a directory, deleted or not, it does that
+for every file under it, so `startfs restore ~/startfs/project --at POINT` undoes an `rm -rf`
+(files created since are left alone). It is an
 ordinary write, so it replicates, and what it replaces becomes a version in turn. A state that
 lasted under 30 s is not kept, so a build's short-lived files still never leave the machine.
 `startfs status` shows the bytes that only versions use, and `df` counts them as used. A version's

@@ -8,8 +8,8 @@
 use super::merge::{Object, Version, dec, enc, made_up};
 use super::*;
 use crate::chunkstore::ChunkId;
-use crate::control::VersionInfo;
-use std::collections::{HashMap, HashSet};
+use crate::control::{RestoreReport, VersionInfo};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 /// A state that lasted less than this is not kept: the files a build writes and
@@ -227,6 +227,7 @@ impl Tables<'_> {
 }
 
 /// One state the file at a path has had: its version and how it ended.
+#[derive(Clone)]
 pub(super) struct Span {
     pub(super) kind: FileKind,
     pub(super) version: Version,
@@ -278,7 +279,46 @@ impl Tables<'_> {
         now: Nanos,
         window: Nanos,
     ) -> FsResult<Vec<Span>> {
-        let mut out = Vec::new();
+        let mut places = self.places(&HashSet::from([dir]), now, window)?;
+        Ok(places.remove(&(dir, name.to_string())).unwrap_or_default())
+    }
+
+    /// The directories under `top`, `top` included, deleted ones too: each by where
+    /// it was last placed.
+    fn subtree(&self, top: Ino) -> FsResult<HashSet<Ino>> {
+        let mut parent_of: HashMap<Ino, Ino> = HashMap::new();
+        for row in self.objects.iter().map_err(db)? {
+            let (k, v) = row.map_err(db)?;
+            let o: Object = dec(v.value())?;
+            if o.kind == Some(FileKind::Dir)
+                && let Some((_, (_, parent, _))) = o.home()
+            {
+                parent_of.insert(k.value(), *parent);
+            }
+        }
+        let mut dirs = HashSet::from([top]);
+        loop {
+            let before = dirs.len();
+            for (dir, parent) in &parent_of {
+                if dirs.contains(parent) {
+                    dirs.insert(*dir);
+                }
+            }
+            if dirs.len() == before {
+                return Ok(dirs);
+            }
+        }
+    }
+
+    /// Every kept state of every file and symlink named in one of `dirs`, by
+    /// directory and name, oldest first. One pass over the registers.
+    fn places(
+        &self,
+        dirs: &HashSet<Ino>,
+        now: Nanos,
+        window: Nanos,
+    ) -> FsResult<BTreeMap<(Ino, String), Vec<Span>>> {
+        let mut out: BTreeMap<(Ino, String), Vec<Span>> = BTreeMap::new();
         for row in self.objects.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
             let ino = k.value();
@@ -289,17 +329,21 @@ impl Tables<'_> {
             let Some(kind) = o.kind.filter(|k| *k != FileKind::Dir) else {
                 continue;
             };
-            let here = o
+            let mut here: Vec<(Ino, String)> = o
                 .names
                 .values()
                 .filter_map(|n| n.loc.as_ref())
-                .any(|(_, p, n)| *p == dir && n == name);
-            if !here {
+                .filter(|(_, p, _)| dirs.contains(p))
+                .map(|(_, p, n)| (*p, n.clone()))
+                .collect();
+            here.dedup();
+            if here.is_empty() {
                 continue;
             }
+            let mut spans = Vec::new();
             for past in self.versions_of(ino)? {
                 if kept(past.version.hlc, past.until, now, window) {
-                    out.push(Span {
+                    spans.push(Span {
                         kind,
                         version: past.version,
                         end: Some(past.until),
@@ -307,26 +351,53 @@ impl Tables<'_> {
                     });
                 }
             }
-            let Some(last) = o.winner() else { continue };
-            match o.death() {
-                None => out.push(Span {
-                    kind,
-                    version: last.clone(),
-                    end: None,
-                    deleted: false,
-                }),
-                Some(d) if kept(last.hlc, d, now, window) => out.push(Span {
-                    kind,
-                    version: last.clone(),
-                    end: Some(d),
-                    deleted: true,
-                }),
-                Some(_) => {}
+            if let Some(last) = o.winner() {
+                match o.death() {
+                    None => spans.push(Span {
+                        kind,
+                        version: last.clone(),
+                        end: None,
+                        deleted: false,
+                    }),
+                    Some(d) if kept(last.hlc, d, now, window) => spans.push(Span {
+                        kind,
+                        version: last.clone(),
+                        end: Some(d),
+                        deleted: true,
+                    }),
+                    Some(_) => {}
+                }
+            }
+            for place in here {
+                let list = out.entry(place).or_default();
+                list.extend(spans.iter().map(Span::clone));
             }
         }
-        out.sort_by_key(|s| s.version.hlc);
+        for list in out.values_mut() {
+            list.sort_by_key(|s| s.version.hlc);
+        }
         Ok(out)
     }
+}
+
+/// The state among `spans` that was current at `at`.
+fn at_instant(spans: Vec<Span>, at: Nanos) -> Option<Span> {
+    spans
+        .into_iter()
+        .filter(|s| s.version.hlc.wall <= at && s.end.is_none_or(|e| e.wall > at))
+        .max_by_key(|s| s.version.hlc)
+}
+
+/// What a restore wrote: the files brought back, and those it could not
+/// write because something of another kind (a directory) is there now.
+#[derive(Default)]
+struct Restoring {
+    restored: u64,
+    blocked: u64,
+    /// Deleted directories brought back so far.
+    revived: HashSet<Ino>,
+    /// Whether entries were logged that the tree does not show yet.
+    rebuild: bool,
 }
 
 impl LocalFs {
@@ -352,52 +423,94 @@ impl LocalFs {
             .collect())
     }
 
-    /// Bring the file at `path` back to the version it held at `at`: written over
-    /// what the path holds now, or created again (in its deleted directory too).
-    /// It is an ordinary write, so it replicates, and what it replaces is kept
-    /// as a version in turn. Not found if the path held nothing kept at `at`.
-    pub fn restore(&self, path: &str, at: Nanos) -> FsResult<()> {
+    /// Bring the file at `path` back to the version it held at `at`, or for a
+    /// directory (deleted or not) every file and symlink last placed under it
+    /// that held a kept version then; files that came later are left alone.
+    /// Each is written over what its path holds now, or created again, and the
+    /// deleted directories it needs come back. These are ordinary writes, so
+    /// they replicate, and what they replace is kept as a version in turn.
+    /// Not found if `path` names neither a directory nor a file kept at `at`.
+    pub fn restore(&self, path: &str, at: Nanos) -> FsResult<RestoreReport> {
         self.flush_all_logged(true, 0);
         let (now, window) = (self.clock.now(), self.window());
         self.run(true, |t| {
             let (dir, name) = t.locate(path)?;
-            let Some(span) = t
-                .spans(dir, &name, now, window)?
-                .into_iter()
-                .filter(|s| s.version.hlc.wall <= at && s.end.is_none_or(|e| e.wall > at))
-                .max_by_key(|s| s.version.hlc)
-            else {
-                return Err(FsError::NotFound);
+            let shown = t.entry(dir, &name)?;
+            let shown_dir = match shown {
+                Some(ino) if t.inode(ino)?.kind == FileKind::Dir => Some(ino),
+                _ => None,
             };
-            if span.end.is_none() {
-                return Ok(()); // the path holds it already
-            }
-            let v = span.version;
-            let mut inode = Inode {
-                kind: span.kind,
-                mode: v.mode,
-                nlink: 1,
-                size: v.size,
-                mtime: v.mtime,
-                ctime: now,
-                parent: dir,
-                content: v.content,
-                xattrs: v.xattrs,
-            };
-            if let Some(ino) = t.entry(dir, &name)? {
-                let current = t.inode(ino)?;
-                if current.kind != span.kind {
+            let mut r = Restoring::default();
+            let file = t.spans(dir, &name, now, window)?;
+            if shown_dir.is_none() && !file.is_empty() {
+                let span = at_instant(file, at).ok_or(FsError::NotFound)?;
+                if !self.put_back(t, dir, &name, span, now, &mut r)? {
                     return Err(FsError::Exists);
                 }
-                inode.nlink = current.nlink;
-                inode.parent = current.parent;
-                t.put(ino, &inode)?;
-                return self.emit_set(t, ino, &inode);
+            } else {
+                let top = match shown_dir {
+                    Some(ino) => ino,
+                    None => t.deleted_dir(dir, &name)?.ok_or(FsError::NotFound)?,
+                };
+                let dirs = t.subtree(top)?;
+                for ((d, n), spans) in t.places(&dirs, now, window)? {
+                    if let Some(span) = at_instant(spans, at)
+                        && !self.put_back(t, d, &n, span, now, &mut r)?
+                    {
+                        r.blocked += 1;
+                    }
+                }
             }
-            if t.inodes.get(dir).map_err(db)?.is_some() {
-                return self.add(t, dir, &name, inode).map(|_| ());
+            if r.rebuild {
+                self.reconcile(t)?;
             }
-            // A deleted directory: a file created in it brings its path back.
+            Ok(RestoreReport {
+                restored: r.restored,
+                blocked: r.blocked,
+            })
+        })
+    }
+
+    /// Write `span` back as what `name` in `dir` holds. Returns false when
+    /// something of another kind is there now, so it cannot be.
+    fn put_back(
+        &self,
+        t: &mut Tables<'_>,
+        dir: Ino,
+        name: &str,
+        span: Span,
+        now: Nanos,
+        r: &mut Restoring,
+    ) -> FsResult<bool> {
+        if span.end.is_none() {
+            return Ok(true); // the path holds it already
+        }
+        let v = span.version;
+        let mut inode = Inode {
+            kind: span.kind,
+            mode: v.mode,
+            nlink: 1,
+            size: v.size,
+            mtime: v.mtime,
+            ctime: now,
+            parent: dir,
+            content: v.content,
+            xattrs: v.xattrs,
+        };
+        let shown = t.inodes.get(dir).map_err(db)?.is_some() && !r.revived.contains(&dir);
+        if shown && let Some(ino) = t.entry(dir, name)? {
+            let current = t.inode(ino)?;
+            if current.kind != span.kind {
+                return Ok(false);
+            }
+            inode.nlink = current.nlink;
+            inode.parent = current.parent;
+            t.put(ino, &inode)?;
+            self.emit_set(t, ino, &inode)?;
+        } else if shown {
+            self.add(t, dir, name, inode)?;
+        } else {
+            self.revive(t, dir, r)?;
             let ino = t.alloc_ino(self.node())?;
             let snap = self.snapshot(&inode);
             self.emit(
@@ -406,12 +519,42 @@ impl LocalFs {
                     ino,
                     kind: span.kind,
                     parent: dir,
-                    name,
+                    name: name.to_string(),
                     snap,
                 },
             )?;
-            self.reconcile(t)
-        })
+            r.rebuild = true;
+        }
+        r.restored += 1;
+        Ok(true)
+    }
+
+    /// Bring back a deleted directory, and the deleted ones it sits in, where they
+    /// last were: placing a name again after its unlink makes it live.
+    fn revive(&self, t: &mut Tables<'_>, dir: Ino, r: &mut Restoring) -> FsResult<()> {
+        let mut cur = dir;
+        while cur != ROOT_INO && !r.revived.contains(&cur) {
+            let o = t.object(cur)?;
+            if o.kind != Some(FileKind::Dir) || o.alive() {
+                break;
+            }
+            let Some((slot, (_, parent, name))) = o.home().map(|(s, l)| (s, l.clone())) else {
+                break;
+            };
+            self.emit(
+                t,
+                Op::Rename {
+                    ino: cur,
+                    slot,
+                    parent,
+                    name,
+                },
+            )?;
+            r.revived.insert(cur);
+            r.rebuild = true;
+            cur = parent;
+        }
+        Ok(())
     }
 
     /// Set how long a replaced version is kept (the filesystem's window).

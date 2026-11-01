@@ -32,7 +32,9 @@ The window counts from when a version was replaced, not from when it was written
 - A deleted object keeps its registers until its window has passed, so a deleted file can be found
   by its path, inside deleted directories too.
 - A restore point is an instant. Restoring writes the version found there to whatever is at the path
-  now (or creates the file), as an ordinary write, so it replicates and can itself be undone.
+  now (or creates the file), as an ordinary write, so it replicates and can itself be undone. For a
+  directory it does so for every file last placed under it, and brings back the deleted directories
+  they need, so an `rm -rf` is undone in one step.
 - `purge` does not touch versions: what they hold is released by shortening the window.
 
 This changes the state transfer message, so it bumps the protocol version (ADR 0002).

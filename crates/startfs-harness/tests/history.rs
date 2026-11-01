@@ -277,3 +277,80 @@ fn status_and_df_count_the_bytes_only_versions_hold() {
         assert_eq!(c.fs(i).space().unwrap().used_bytes, 21 * 1024, "node {i}");
     }
 }
+
+#[test]
+fn a_deleted_directory_tree_is_restored_whole() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let fs = c.fs(0);
+    let top = fs.mkdir(ROOT_INO, "proj", 0o755).unwrap();
+    let sub = fs.mkdir(top.ino, "src", 0o755).unwrap();
+    let a = fs.create(top.ino, "a", 0o644).unwrap();
+    fs.write(a.ino, 0, &noise(8 * 1024, 1)).unwrap();
+    let b = fs.create(sub.ino, "b", 0o644).unwrap();
+    fs.write(b.ino, 0, &noise(8 * 1024, 2)).unwrap();
+    fs.symlink(sub.ino, "link", "b").unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+    // The manual clock stands still between steps: what is written next is stamped now.
+    let before = c.now() - 1_000_000_000;
+    // A bad write, then `rm -rf proj` from another member.
+    fs.write(a.ino, 0, &noise(8 * 1024, 3)).unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+    let other = c.fs(1);
+    other.unlink(sub.ino, "b").unwrap();
+    other.unlink(sub.ino, "link").unwrap();
+    other.rmdir(top.ino, "src").unwrap();
+    other.unlink(top.ino, "a").unwrap();
+    other.rmdir(ROOT_INO, "proj").unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    let report = c.control(2).restore("/proj", before).unwrap();
+    assert_eq!(report.restored, 3, "{report:?}");
+    pass(&c, 10 * MINUTE, MINUTE);
+    for i in 0..3 {
+        let p = c.fs(i).lookup(ROOT_INO, "proj").unwrap();
+        let s = c.fs(i).lookup(p.ino, "src").unwrap();
+        assert_eq!(read(&c, i, p.ino, "a"), noise(8 * 1024, 1), "node {i}");
+        assert_eq!(read(&c, i, s.ino, "b"), noise(8 * 1024, 2), "node {i}");
+        let l = c.fs(i).lookup(s.ino, "link").unwrap();
+        assert_eq!(c.fs(i).readlink(l.ino).unwrap(), "b", "node {i}");
+    }
+    // The directories are back as such, not only kept for what is in them.
+    let s = c
+        .fs(0)
+        .lookup(c.fs(0).lookup(ROOT_INO, "proj").unwrap().ino, "src")
+        .unwrap();
+    c.fs(0).unlink(s.ino, "b").unwrap();
+    c.fs(0).unlink(s.ino, "link").unwrap();
+    pass(&c, 10 * MINUTE, MINUTE);
+    for i in 0..3 {
+        let p = c.fs(i).lookup(ROOT_INO, "proj").unwrap();
+        assert!(
+            c.fs(i).lookup(p.ino, "src").is_ok(),
+            "node {i}: src went with its files"
+        );
+    }
+}
+
+#[test]
+fn restoring_a_directory_leaves_files_that_came_later_alone() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let fs = c.fs(0);
+    let d = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    let a = fs.create(d.ino, "a", 0o644).unwrap();
+    fs.write(a.ino, 0, &noise(8 * 1024, 1)).unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+    // The manual clock stands still between steps: what is written next is stamped now.
+    let before = c.now() - 1_000_000_000;
+    fs.write(a.ino, 0, &noise(8 * 1024, 2)).unwrap();
+    let n = fs.create(d.ino, "new", 0o644).unwrap();
+    fs.write(n.ino, 0, &noise(8 * 1024, 3)).unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    let report = c.control(0).restore("/d", before).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    pass(&c, 10 * MINUTE, MINUTE);
+    for i in 0..3 {
+        assert_eq!(read(&c, i, d.ino, "a"), noise(8 * 1024, 1), "node {i}");
+        assert_eq!(read(&c, i, d.ino, "new"), noise(8 * 1024, 3), "node {i}");
+    }
+}

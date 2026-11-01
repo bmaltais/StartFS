@@ -35,7 +35,8 @@ commands:
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
   history PATH [--json]               list the versions kept of the file at PATH (under the mount,
                                       or in the filesystem), each named by its restore point
-  restore PATH --at POINT             bring the file at PATH back to what it held at POINT
+  restore PATH --at POINT             bring the file at PATH, or every file under the directory at
+                                      PATH (deleted or not), back to what it held at POINT
                                       (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it); what
                                       it replaces is kept as a version, so a restore is undoable
   join TOKEN [--offer SIZE] [--site NAME]
@@ -331,8 +332,19 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             let path = absolute(positional(rest, &["--at"]).ok_or(CliError::Usage)?)?;
             let at = startfs_core::fs::parse_restore_point(&point)
                 .ok_or_else(|| CliError::BadRestorePoint(point.clone()))?;
-            Client::new(socket).restore(&path, at)?;
-            println!("restored {path} to what it held at {point}");
+            let report = Client::new(socket).restore(&path, at)?;
+            println!(
+                "restored {} file{} under {path} to what {} held at {point}",
+                report.restored,
+                if report.restored == 1 { "" } else { "s" },
+                if report.restored == 1 { "it" } else { "they" }
+            );
+            if report.blocked > 0 {
+                eprintln!(
+                    "{} left as they are: a directory now stands where they were",
+                    report.blocked
+                );
+            }
             Ok(())
         }
         "stats" => {

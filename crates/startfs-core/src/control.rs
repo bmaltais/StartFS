@@ -76,7 +76,8 @@ pub enum Request {
     History {
         path: String,
     },
-    /// Bring the file at a path back to the version it held at `at` (a restore point).
+    /// Bring the file at a path back to the version it held at `at` (a restore point),
+    /// or for a directory every file under it.
     Restore {
         path: String,
         at: Nanos,
@@ -378,6 +379,15 @@ pub struct VersionInfo {
     pub size: u64,
 }
 
+/// What a restore wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RestoreReport {
+    /// Files and symlinks brought back to the version they held at the restore point.
+    pub restored: u64,
+    /// Those left as they are because something of another kind (a directory) is there now.
+    pub blocked: u64,
+}
+
 /// Who a purge was sent to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurgeReport {
@@ -512,6 +522,7 @@ pub enum Response {
     Updating(UpdateReport),
     NodeStats(Vec<NodeReport>),
     History(Vec<VersionInfo>),
+    Restored(RestoreReport),
     Error(String),
 }
 
@@ -851,13 +862,14 @@ impl Client {
         }
     }
 
-    /// Bring the file at `path` back to what it held at `at`.
-    pub fn restore(&self, path: &str, at: Nanos) -> Result<(), Error> {
+    /// Bring the file at `path`, or every file under the directory at `path`,
+    /// back to what it held at `at`.
+    pub fn restore(&self, path: &str, at: Nanos) -> Result<RestoreReport, Error> {
         match self.call(&Request::Restore {
             path: path.into(),
             at,
         })? {
-            Response::Done => Ok(()),
+            Response::Restored(report) => Ok(report),
             other => Err(unexpected(other)),
         }
     }

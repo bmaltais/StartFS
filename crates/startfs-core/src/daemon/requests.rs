@@ -81,8 +81,7 @@ impl Daemon {
             Request::Activity => Response::Activity(Box::new(self.activity_report()?)),
             Request::Status => Response::Status(Box::new(self.status()?)),
             Request::Restore { path, at } => {
-                self.fs.restore(&self.fs_path(&path), at)?;
-                Response::Done
+                Response::Restored(self.fs.restore(&self.fs_path(&path), at)?)
             }
             Request::History { path } => Response::History(self.fs.history(&self.fs_path(&path))?),
         })

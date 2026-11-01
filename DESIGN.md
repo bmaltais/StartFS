@@ -217,13 +217,19 @@ build's short-lived files on the node.
   every file or symlink last named there, each by its *restore point*, the instant it was written
   (`YYYYMMDD-HHMMSS.mmm`, UTC). `startfs restore PATH --at POINT` takes the version that the path held
   at that instant (a point stands for the end of the precision given) and writes it over what the
-  path holds now, or creates the file again, in its deleted directory too; it is an ordinary write,
-  so it replicates and can itself be undone. A path under the mount is taken as the file it shows.
+  path holds now, or creates the file again; it is an ordinary write, so it replicates and can itself
+  be undone. For a directory (deleted or not) it does so for every file and symlink last placed
+  anywhere under it that held a kept version at the point, in one pass over the registers; files
+  that came later are left alone, and one blocked by a directory now at its path is counted, not
+  written. A deleted directory a restored file needs is brought back by placing its name again
+  (a `Rename` to where it was, which outlives the unlink), so it is a directory again and not only
+  kept for what is in it. A path under the mount is taken as the file it shows.
 - `status` shows the bytes only versions use (`version_bytes`); `df` counts them as used, as the
   last GC pass found them (up to 10 minutes old), since working them out reads every register.
 
 Not done: thinning (a file written every minute keeps one version per minute for the window, each a
-row of metadata), restoring a whole directory at once, and versions of directories themselves.
+row of metadata), and versions of directories themselves (a restored directory comes back with its
+last mode, and a file renamed out of it since the restore point is not brought back).
 
 ## Transport (as built)
 

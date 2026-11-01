@@ -130,7 +130,8 @@ An overwritten or deleted file keeps its earlier version for 7 days (the filesys
 every member. `startfs history PATH` lists the versions of the file at PATH (a path under the mount,
 or in the filesystem; deleted directories work too), oldest first, each named by its restore point
 (`YYYYMMDD-HHMMSS.mmm`, UTC) and whether it was replaced, deleted or is current. `startfs restore
-PATH --at POINT` brings the file back to what it held at that instant; it is a write like any other,
+PATH --at POINT` brings the file back to what it held at that instant (for a directory, deleted or
+not, every file under it: the way to undo an `rm -rf`; files created since are left alone); it is a write like any other,
 so what it replaces is kept as a version and the restore can be undone the same way. Confirm the
 version with the user before restoring over a file they may have changed since. A state that lasted
 under 30 s is not kept. `startfs config --keep-versions 3d` (or `12h`, `0` for none) changes the
