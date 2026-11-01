@@ -614,6 +614,14 @@ impl LocalFs {
         self.log_failure(self.sync(), "could not sync");
     }
 
+    /// [`Self::sync_logged`], saying whether everything reached disk.
+    pub fn sync_checked(&self) -> bool {
+        let result = self.sync();
+        let ok = result.is_ok();
+        self.log_failure(result, "could not sync");
+        ok
+    }
+
     /// Log a failure once per distinct message; success re-arms the log.
     fn log_failure(&self, result: FsResult<()>, what: &str) {
         let mut last = self.flush_error.lock().unwrap();

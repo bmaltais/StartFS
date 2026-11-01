@@ -129,6 +129,10 @@ same code with a different membership scope.
     finds its chunks. Chunks written without a
     sync are flagged on disk, and a store opened after a crash drops any of them that were cut
     short, so a later write of the same content stores it afresh.
+    A member answers a chunk pushed to it only once the chunk is on its disk. A tick takes the pushes
+    waiting for it (up to 64 at a time), writes them without a sync each, syncs once and then answers
+    all of them, so a burst costs the receiver one flush per group, not one per chunk; if the sync fails
+    the answer is "full".
 
 13. **Metadata sync:** per-node operation log (create, write, rename, delete) stamped with hybrid
     logical clocks. Peers exchange missing entries: push when online, catch-up on reconnect. Applying

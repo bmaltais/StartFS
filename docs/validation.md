@@ -430,6 +430,31 @@ patch still stores one new chunk (up to 1 MiB) per patched file, the cost of the
 script exits non-zero when a bounded step goes over its bound (with `write_commit_delay_ms = 0`
 in `NODE_CONFIG`, the append step fails at 202x).
 
+## 13. A burst of chunks pushed to one member (#166)
+
+`scripts/profile-burst.sh`: two loopback nodes, 2 copies, 4000 files of 64 KiB (half text, half
+random) copied through A's mount; time until every chunk is on B, and B's `activity`. 1.13.2
+against the fix, one run each (replication time varied by under 5% over repeats).
+
+| B's disk | 1.13.2 | Fixed |
+|---|---|---|
+| this machine (fsync 0.24 ms, btrfs on NVMe) | 8.9 s | 5.2 to 5.5 s |
+| +2 ms on every fsync (`SLOW_FSYNC_US=2000`) | 19.7 s | 8.6 s |
+
+Before, a push cost the receiver one fsync, one create and one rename on its single tick thread
+(system CPU 0.47 ms per chunk, user 0.38 ms), and each of them waited for the disk in turn. It now
+writes a group of up to 64 pushes without syncing, syncs once (the flushes overlap), then answers
+them all. Compression and the second hash of each chunk were measured and are small (about 0.1 ms
+and 0.03 ms per chunk). Storing pushes lazily without grouping them was slower than before (each
+chunk paid a dirty marker and a later reopen to sync it), which is why the answers wait for the
+group. `a_burst_of_pushes_acknowledged_survives_a_power_cut_at_the_receiver` guards that nothing
+acknowledged is lost.
+
+On the live cluster (1.13.2, a cold build of gliff on the mount, 2026-11-01): mini1 reached 97% busy
+with a receive phase of 237 ms per tick, 896 messages in its inbox and a longest tick of 2.2 s; vps2
+100% busy, 252 ms, 808 messages; this node, sending, had 1349 sends time out and 1347 retried.
+The same run after the fix is still to be done.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

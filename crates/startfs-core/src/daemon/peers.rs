@@ -1,6 +1,7 @@
 //! Messages from peers: join admission, chunk traffic, gossip and log exchange.
 
 use super::Daemon;
+use crate::chunkstore::ChunkId;
 use crate::error::Error;
 use crate::net::{NodeId, Transport};
 use crate::protocol::{Message, Replica};
@@ -64,10 +65,9 @@ impl Daemon {
                 }
             }
             Message::ChunkPush(id, data) => {
-                let standing = self
-                    .with_view(|v| self.replicator.on_push(v, &id, data.as_deref()))
-                    .unwrap_or(Replica::Full);
-                transport.send(from, Message::ChunkAck(id, standing).encode());
+                // The tick answers pushes in groups (`take_push`); this is one on its own.
+                let mut group = vec![self.take_push(from, id, data.as_deref())];
+                self.ack_pushes(transport, &mut group);
             }
             Message::ChunkAck(id, standing) => {
                 self.with_view(|v| self.replicator.on_ack(v, from, &id, standing));
@@ -130,6 +130,41 @@ impl Daemon {
                     s.handle(from, msg);
                 }
             }
+        }
+    }
+}
+
+impl Daemon {
+    /// Take the chunk a member pushed, not yet synced, and say what to answer once it is.
+    pub(super) fn take_push(
+        &self,
+        from: NodeId,
+        id: ChunkId,
+        data: Option<&[u8]>,
+    ) -> (NodeId, ChunkId, Replica) {
+        let standing = self
+            .with_view(|v| self.replicator.on_push(v, &id, data))
+            .unwrap_or(Replica::Full);
+        (from, id, standing)
+    }
+
+    /// Answer a group of pushes after one sync for all of them: nothing is acknowledged that is
+    /// not on disk, and a failed sync says "full" instead.
+    pub(super) fn ack_pushes(
+        &self,
+        transport: &dyn Transport,
+        group: &mut Vec<(NodeId, ChunkId, Replica)>,
+    ) {
+        if group.is_empty() {
+            return;
+        }
+        let durable = self.fs.sync_checked();
+        for (from, id, standing) in group.drain(..) {
+            let standing = match standing {
+                Replica::Stored if !durable => Replica::Full,
+                other => other,
+            };
+            transport.send(from, Message::ChunkAck(id, standing).encode());
         }
     }
 }

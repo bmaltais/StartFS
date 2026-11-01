@@ -29,7 +29,7 @@ use crate::oplog::{Entry, Frontier};
 use crate::ops::FsResult;
 use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
-use crate::protocol::{DecodeError, Health, Message};
+use crate::protocol::{DecodeError, Health, Message, Replica};
 use crate::replication::{Replicator, View};
 use crate::resources::{ResourceSource, SystemResources};
 use crate::scrub::Scrubber;
@@ -90,6 +90,9 @@ const DRAIN_BUDGET: Duration = Duration::from_millis(20);
 const DRAIN_MIN: usize = 16;
 /// The most a tick handles, so the entries it batches stay bounded when every message is cheap.
 const DRAIN_MAX: usize = 2048;
+/// The most pushes taken before they are synced and answered together, so a sender waits for
+/// the answer to no more than this many chunks.
+const PUSH_GROUP: usize = 64;
 
 /// How long a chunk reply that nobody fetched stays before it is dropped. A fetch
 /// gives up long before this, so a reply still here was late or a duplicate.
@@ -449,6 +452,8 @@ impl Daemon {
         // A peer's entries wait here to be applied in one write transaction;
         // anything else from that peer applies them first, to keep its order.
         let mut entries: BTreeMap<NodeId, Vec<Entry>> = BTreeMap::new();
+        // Pushed chunks are synced once for the group, then answered.
+        let mut pushes: Vec<(NodeId, ChunkId, Replica)> = Vec::new();
         let drain_started = Instant::now();
         for handled in 0..DRAIN_MAX {
             if handled >= DRAIN_MIN && drain_started.elapsed() >= DRAIN_BUDGET {
@@ -469,6 +474,14 @@ impl Daemon {
             }
             match decoded {
                 Ok(Message::Entries(more)) => entries.entry(from).or_default().extend(more),
+                Ok(Message::ChunkPush(id, data))
+                    if self.membership.lock().unwrap().is_member_endpoint(from) =>
+                {
+                    pushes.push(self.take_push(from, id, data.as_deref()));
+                    if pushes.len() >= PUSH_GROUP {
+                        self.ack_pushes(&*transport, &mut pushes);
+                    }
+                }
                 Ok(msg) => {
                     if let Some(held) = entries.remove(&from) {
                         self.handle_peer_message(&*transport, from, Message::Entries(held));
@@ -483,6 +496,7 @@ impl Daemon {
                 }
             }
         }
+        self.ack_pushes(&*transport, &mut pushes);
         for (from, held) in entries {
             self.handle_peer_message(&*transport, from, Message::Entries(held));
         }

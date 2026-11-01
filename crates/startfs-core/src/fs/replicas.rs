@@ -107,10 +107,26 @@ impl LocalFs {
         }
     }
 
-    /// Take a replica of a chunk pushed by a peer, if it is genuine and fits
-    /// within `offer` bytes of replica storage.
+    /// Take a replica of a chunk, if it fits within `offer` bytes of replica storage. Durable
+    /// when it returns.
     pub fn store_replica(&self, data: &[u8], offer: u64) -> FsResult<Replica> {
-        let id = *blake3::hash(data).as_bytes();
+        self.take_replica(*blake3::hash(data).as_bytes(), data, offer, true)
+    }
+
+    /// [`Self::store_replica`] for a chunk the caller has verified hashes to `id`, written
+    /// without its own sync: the caller makes it durable (`sync`) before it says it holds it.
+    /// Pushes arrive in bursts, and a sync per chunk was what a busy receiver spent its time on.
+    pub fn store_replica_lazy(&self, id: ChunkId, data: &[u8], offer: u64) -> FsResult<Replica> {
+        self.take_replica(id, data, offer, false)
+    }
+
+    fn take_replica(
+        &self,
+        id: ChunkId,
+        data: &[u8],
+        offer: u64,
+        durable: bool,
+    ) -> FsResult<Replica> {
         if self.has_replica(&id) {
             return Ok(Replica::Stored);
         }
@@ -118,7 +134,11 @@ impl LocalFs {
         if used + data.len() as u64 > offer {
             return Ok(Replica::Full);
         }
-        self.chunks.put_hashed(id, data)?;
+        if durable {
+            self.chunks.put_hashed(id, data)?;
+        } else {
+            self.chunks.put_lazy_hashed(id, data)?;
+        }
         Ok(Replica::Stored)
     }
 
