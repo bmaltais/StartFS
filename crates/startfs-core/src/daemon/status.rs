@@ -1,7 +1,7 @@
 //! The status report: this node's view of the filesystem and its health.
 
 use super::Daemon;
-use super::standing::{is_unknown, is_up, node_state};
+use super::standing::{is_unknown, is_up, node_state, unseen_since};
 use crate::control::{
     GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
     Shortfall, Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
@@ -144,19 +144,28 @@ impl Daemon {
     /// This node's own replication state: what it gossips and contributes to `status`.
     pub(super) fn local_health(&self) -> Health {
         let now = self.clock.now();
+        // A member not heard since this daemon started is passed on as unseen at least since
+        // then, or since what the peers relayed: a lower bound, so the cluster keeps knowing
+        // how long it has been gone through restarts, as long as one member keeps running.
         let seen = {
             let membership = self.membership.lock().unwrap();
             let heard = self.heard.lock().unwrap();
+            let peer_health = self.peer_health.lock().unwrap();
             membership
                 .members()
                 .iter()
                 .filter(|m| Some(m.id) != membership.me())
-                .filter_map(|m| {
-                    let at = heard.get(&m.endpoint)?;
-                    Some(Sighting {
+                .map(|m| {
+                    let at = unseen_since(
+                        heard.get(&m.endpoint).copied(),
+                        m.id,
+                        &peer_health,
+                        self.started,
+                    );
+                    Sighting {
                         member: m.id,
-                        secs_ago: now.saturating_sub(*at) / NANOS_PER_SEC,
-                    })
+                        secs_ago: now.saturating_sub(at) / NANOS_PER_SEC,
+                    }
                 })
                 .collect()
         };
