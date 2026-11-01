@@ -215,6 +215,9 @@ impl Cluster {
         if !config_toml.contains("write_commit_delay_ms") {
             config_for_nodes.write_commit_delay_ms = 0;
         }
+        if !config_toml.contains("replication_hold_secs") {
+            config_for_nodes.replication_hold_secs = 0;
+        }
         let clock = Arc::new(ManualClock::new(START));
         let network = SimNetwork::new(clock.clone());
         let releases = Arc::new(Releases::default());

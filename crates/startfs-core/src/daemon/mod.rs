@@ -749,6 +749,11 @@ impl Daemon {
             heard: &heard,
             offer,
             repair_rate: self.config.repair_bytes_per_sec,
+            hold: if self.fs.staging_pressed() {
+                0
+            } else {
+                Duration::from_secs(self.config.replication_hold_secs).as_nanos() as Nanos
+            },
             now,
         }))
     }

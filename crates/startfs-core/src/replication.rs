@@ -92,6 +92,9 @@ pub struct View<'a> {
     pub offer: u64,
     /// Most bytes per second sent when re-replicating chunks already held.
     pub repair_rate: u64,
+    /// How long a chunk written here waits before it is sent, so one whose file is deleted
+    /// meanwhile is dropped instead (0: no wait).
+    pub hold: Nanos,
     pub now: Nanos,
 }
 
@@ -542,6 +545,16 @@ impl Replicator {
         if !staged && !self.fs.has_replica(id) {
             st.tracks.remove(id);
             return false;
+        }
+        // A chunk written here and not yet offered to anyone waits out the hold, before it is
+        // even kept here as a replica: the sweep drops it meanwhile if its file goes.
+        if staged && view.hold > 0 {
+            let track = st.tracks.get_mut(id).expect("tracked");
+            let since = *track.queued_at.get_or_insert(view.now);
+            if track.sent.is_empty() && view.now.saturating_sub(since) < view.hold {
+                track.wake = since.saturating_add(view.hold);
+                return false;
+            }
         }
         let skip: HashSet<MemberId> = st.full.union(view.lost).copied().collect();
         let mut targets = place(id, view.members, view.copies, &skip);

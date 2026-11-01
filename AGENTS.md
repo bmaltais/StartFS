@@ -22,4 +22,5 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 - Before/after on `main` for any `scripts/` profile: `scripts/ab.sh`.
 - Where the suite's time goes (slowest binaries, or slowest tests in one): `scripts/test-times.sh`.
 - Write amplification (bytes written to storage per byte of payload: copies, a patch, a delete; the daemon's figure and the disk's): `scripts/profile-amplification.sh`, with `scripts/ab.sh -r REF` to compare.
+- What short-lived files cost the other members (bytes they write and keep, per file lifetime; the replication hold): `scripts/profile-churn.sh`, with `NODE_CONFIG="replication_hold_secs = 0"` for no hold.
 - Write-path speed (large file, many small files, syscall counts): `scripts/profile-write.sh`; the syscall counts need `strace` and `sudo` (`ptrace_scope` blocks attaching to the daemon).

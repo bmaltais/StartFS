@@ -97,7 +97,11 @@ same code with a different membership scope.
 
 12. **Write durability:** local first, background replication. A write is durable on the local node's
     disk and returns immediately; replication to the other N-1 nodes follows. There is a window with
-    a single copy, and `startfs status` must show files not yet fully replicated. Every node keeps
+    a single copy, and `startfs status` must show files not yet fully replicated. A chunk written
+    here waits `replication_hold_secs` (30 s by default) before it is offered to anyone, so the
+    files a build writes and deletes within that time never leave the node (no network, no copies
+    kept elsewhere for the GC retention); the hold is skipped while staging is more than half full,
+    so it never runs writes out of room. Every node keeps
     a local staging area for writes until replication completes. It is the buffer that lets a
     writer run at local speed while chunks trickle out to slower members, so it is bounded by
     the free space of its partition, never by the node's offer or by replication speed: writes

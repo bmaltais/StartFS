@@ -159,6 +159,15 @@ impl LocalFs {
     }
 
     /// What the staging area holds.
+    /// Whether staging holds more than half of what it may: chunks written here are then
+    /// sent without waiting, so a hold never makes writes run out of room.
+    pub fn staging_pressed(&self) -> bool {
+        let limit = self.staging_limit.load(Ordering::SeqCst);
+        self.staging
+            .stats()
+            .is_ok_and(|s| s.stored_bytes > limit / 2)
+    }
+
     pub fn staging_stats(&self) -> FsResult<StoreStats> {
         self.staging.stats()
     }

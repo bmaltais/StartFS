@@ -54,6 +54,12 @@ pub struct Config {
     /// made to cover for a sleeping member are kept after it is back, in case
     /// it sleeps again. 0 turns stand-in copies off. Fixed for the filesystem.
     pub standin_days: u64,
+    /// How long a chunk written here waits before it is sent to other members, in
+    /// seconds. A file deleted within it (a build's temporary files) never leaves this
+    /// node: no network, no copies elsewhere kept for the GC retention. The data is on
+    /// this node's disk meanwhile, as a single copy. Not applied while staging is more
+    /// than half full. 0 sends at once.
+    pub replication_hold_secs: u64,
     /// Most bytes per second this node sends when re-replicating chunks it
     /// already holds (repair and rebalancing; new writes are not limited).
     pub repair_bytes_per_sec: u64,
@@ -96,6 +102,7 @@ impl Default for Config {
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
             standin_days: DEFAULT_STANDIN_DAYS,
+            replication_hold_secs: 30,
             repair_bytes_per_sec: 64 << 20,
             behind_inbox_messages: 5000,
             scrub_period_secs: 30 * 24 * 3600,
