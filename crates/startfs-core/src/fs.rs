@@ -326,6 +326,8 @@ pub struct LocalFs {
     batching: AtomicBool,
     /// Whether a batch left the tree to rebuild.
     stale: AtomicBool,
+    /// Objects read to bring the tree up to date with peers' entries.
+    tree_reads: AtomicU64,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -348,6 +350,8 @@ fn is_acl(name: &str) -> bool {
 
 /// Counter set while applied entries have not yet been reconciled into the tree.
 const STALE: &str = "tree_stale";
+/// How many placed objects the last rebuild could not reach from the root.
+const UNREACHED: &str = "tree_unreached";
 
 /// The metadata database's page cache. redb's default is 1 GiB, which a daemon on a small
 /// machine should not be allowed to fill as the filesystem grows; 64 MiB holds the metadata of
@@ -395,6 +399,7 @@ impl LocalFs {
             waker: OnceLock::new(),
             batching: AtomicBool::new(false),
             stale: AtomicBool::new(false),
+            tree_reads: AtomicU64::new(0),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
