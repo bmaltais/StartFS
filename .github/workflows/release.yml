@@ -19,7 +19,7 @@ jobs:
           # The macOS adapter has never been run (see README); a failed build here
           # must not block the Linux release.
           - target: aarch64-macos
-            runner: macos-14
+            runner: macos-15
             experimental: true
     # Oldest LTS runner, so the binary runs on any newer glibc.
     runs-on: ${{ matrix.runner }}
