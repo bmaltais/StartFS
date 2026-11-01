@@ -391,8 +391,11 @@ pub struct RestoreReport {
 /// Who a purge was sent to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurgeReport {
-    /// Members told to purge, this one included: all of them.
+    /// Members told to purge now, this one included: those that are up.
     pub asked: Vec<MemberId>,
+    /// Members that are away: each is told once it is back and has caught up.
+    #[serde(default)]
+    pub deferred: Vec<MemberId>,
 }
 
 /// What `update` set in motion.

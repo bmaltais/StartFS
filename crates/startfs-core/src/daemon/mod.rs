@@ -25,7 +25,7 @@ use crate::error::Error;
 use crate::fs::{ChunkSource, GcReport, LocalFs, NodeConfig};
 use crate::members::{Member, MemberId, Membership};
 use crate::net::{NodeId, Transport};
-use crate::oplog::Entry;
+use crate::oplog::{Entry, Frontier};
 use crate::ops::FsResult;
 use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
@@ -183,6 +183,12 @@ pub struct Daemon {
     /// cutoff) are reclaimed without waiting out the retention, as the reclaim
     /// gate allows, until a pass holds none back. Later deletes keep their retention.
     purging: Mutex<Option<Nanos>>,
+    /// Members that were away when this node began its purge: its gate does not wait on
+    /// them for what the purge frees (a version holds what they could bring back).
+    purge_excused: Mutex<HashSet<NodeId>>,
+    /// Members that were away when this node ran `purge`, with this node's log as it stood
+    /// then: each is told once it is back and holds all of that, so it frees its copies too.
+    purge_owed: Mutex<BTreeMap<NodeId, Frontier>>,
     /// Fetches and swaps releases for an upgrade the cluster coordinates.
     installer: Mutex<Arc<dyn Installer>>,
     /// Where the filesystem is mounted, so paths under it can be named as such.
@@ -295,6 +301,8 @@ impl Daemon {
                 power: Mutex::new(Arc::new(MainsPower)),
                 stopping: AtomicBool::new(false),
                 purging: Mutex::new(None),
+                purge_excused: Mutex::new(HashSet::new()),
+                purge_owed: Mutex::new(BTreeMap::new()),
                 installer: Mutex::new(Arc::new(NoInstaller)),
                 mountpoint: Mutex::new(None),
                 dir: dir.to_path_buf(),
@@ -482,6 +490,7 @@ impl Daemon {
         timer.phase(Phase::Replicate);
         busy |= self.finish_leaving(&*transport);
         busy |= self.drive_upgrade();
+        busy |= self.pass_on_purge(&*transport);
         busy |= self.collect_garbage();
         busy |= self.compact_log();
         if !busy {
@@ -678,15 +687,23 @@ impl Daemon {
             return false;
         }
         *last = Some(now);
-        let Ok(report) = self.fs.collect_garbage(retention, purge_cutoff, |since| {
-            peers.iter().all(|p| caught_up(&synced, p, since))
-        }) else {
+        let excused = self.purge_excused.lock().unwrap().clone();
+        let Ok(report) = self
+            .fs
+            .collect_garbage(retention, purge_cutoff, |since, purged| {
+                peers
+                    .iter()
+                    .filter(|p| !(purged && excused.contains(p)))
+                    .all(|p| caught_up(&synced, p, since))
+            })
+        else {
             eprintln!("startfs: garbage collection failed");
             return false;
         };
         // A pass that holds nothing back has freed everything there was to free.
         if purge_cutoff.is_some_and(|cutoff| now >= cutoff) && report.held_since.is_none() {
             *self.purging.lock().unwrap() = None;
+            self.purge_excused.lock().unwrap().clear();
         }
         let mut gc = self.gc.lock().unwrap();
         gc.reclaimed_chunks += report.reclaimed_chunks;

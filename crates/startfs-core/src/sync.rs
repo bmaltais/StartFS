@@ -195,6 +195,11 @@ impl Syncer {
         };
     }
 
+    /// What `peer` itself last said it holds.
+    pub fn confirmed(&self, peer: NodeId) -> Option<&Frontier> {
+        self.peers.get(&peer).and_then(|p| p.confirmed.as_ref())
+    }
+
     /// For each peer, when it last reported its own frontier while we held
     /// everything up to it; `None` if we have not caught up with it since.
     pub fn synced_with(&self) -> BTreeMap<NodeId, Option<Nanos>> {

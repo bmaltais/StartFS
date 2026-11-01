@@ -73,26 +73,34 @@ fn a_purge_never_removes_data_a_file_still_uses() {
 }
 
 #[test]
-fn a_purge_is_refused_while_a_member_is_away_and_works_once_it_is_back() {
-    let c = Cluster::with_filesystem(3, 3, "");
+fn a_purge_frees_data_now_and_on_an_away_member_once_it_is_back() {
+    // No versions, which a purge leaves alone.
+    let c = Cluster::with_filesystem(3, 3, "keep_versions_secs = 0");
     put(&c.fs(0), "doomed", &noise(8 * 1024, 4));
     c.sync();
-    let held = total_replicas(&c);
+    assert_eq!(total_replicas(&c), 3);
     c.network()
         .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
     c.fs(0).unlink(ROOT_INO, "doomed").unwrap();
     c.elapse(Duration::from_secs(300));
 
-    // Purging without it would leave its copy to be handed back to the others.
-    let err = c.control(0).purge().unwrap_err().to_string();
-    assert!(err.contains("unreachable"), "{err}");
-    assert!(!purging(&c, 0));
-    assert_eq!(total_replicas(&c), held);
+    let report = c.control(0).purge().unwrap();
+    assert_eq!(report.asked.len(), 2, "{report:?}");
+    let away = c.control(2).status().unwrap();
+    let away_id = away.members.iter().find(|m| m.is_self).unwrap().id;
+    assert_eq!(report.deferred, vec![away_id]);
+    c.elapse(Duration::from_secs(300));
+    assert_eq!(total_replicas(&c), 1, "only the away member's copy is left");
 
+    // Back and caught up, it is told and frees its copy, without handing it back first.
     c.network().heal();
-    c.elapse(Duration::from_secs(300));
-    c.control(0).purge().unwrap();
-    c.elapse(Duration::from_secs(300));
+    for _ in 0..6 {
+        c.elapse(Duration::from_secs(100));
+        assert!(
+            total_replicas(&c) <= 1,
+            "the away member's copy was spread again"
+        );
+    }
     assert_eq!(total_replicas(&c), 0);
 }
 

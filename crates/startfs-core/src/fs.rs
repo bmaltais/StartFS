@@ -292,6 +292,11 @@ pub struct LocalFs {
     keep_versions: AtomicU64,
     /// Bytes only kept versions use, as the last GC pass found them (for `df`).
     version_bytes: AtomicU64,
+    /// Bumped by every write commit, so a view derived from the tree knows when it is stale.
+    tree_generation: AtomicU64,
+    /// The chunks a file or kept version uses, and the tree generation they were worked
+    /// out at (see [`Self::refresh_used`]).
+    used: Mutex<(Option<u64>, std::collections::HashSet<ChunkId>)>,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
     /// Decoded chunks recently read, so small reads do not decode a chunk each.
@@ -367,6 +372,8 @@ impl LocalFs {
             staging_limit: AtomicU64::new(u64::MAX),
             usable_bytes: AtomicU64::new(0),
             version_bytes: AtomicU64::new(0),
+            tree_generation: AtomicU64::new(0),
+            used: Mutex::new((None, std::collections::HashSet::new())),
             keep_versions: AtomicU64::new(
                 crate::config::DEFAULT_KEEP_VERSIONS_SECS * 1_000_000_000,
             ),
@@ -533,6 +540,7 @@ impl LocalFs {
                     self.staging.sync()?;
                 }
                 txn.commit().map_err(db)?;
+                self.tree_generation.fetch_add(1, Ordering::SeqCst);
                 let lazy = matches!(durability, Durability::None);
                 if lazy {
                     self.last_lazy.store(self.clock.now(), Ordering::SeqCst);
