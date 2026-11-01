@@ -165,6 +165,14 @@ impl Syncer {
                 }
             }
             Message::Entries(entries) => {
+                // The peer holds what it sends. Its hellos lag a busy writer, so
+                // without this it would be sent its own entries back.
+                if let Some(known) = self.peers.get_mut(&from).and_then(|p| p.known.as_mut()) {
+                    for e in &entries {
+                        let k = known.entry(e.origin).or_default();
+                        *k = (*k).max(e.seq + 1);
+                    }
+                }
                 if let Err(e) = self.fs.apply_remote(&entries) {
                     eprintln!("startfs: cannot apply entries from node {}: {e}", from.0);
                 }
