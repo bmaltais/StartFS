@@ -84,11 +84,19 @@ same code with a different membership scope.
     against accidental deletes and against nodes returning from offline with stale references. No
     reference counting. Overwritten and deleted files keep their earlier versions for a window (see
     "Versions (as built)"), and a chunk a kept version uses is reclaimed only once the window ends. `startfs purge` ends the
-    wait on request, for what is deleted by then: it refuses unless every member is up (a member that
-    missed it would keep its copies and re-spread them when it returns), sends `Purge` to all, and
+    wait on request, for what is deleted by then: it sends `Purge` to every member that is up, and
     each member records the orphans it knows and collects with a retention of zero for those first
     seen up to 30 s after the request (so a delete still arriving is included); later deletes keep
-    their retention. The reclaim gate is kept. A purge cannot be undone.
+    their retention. The reclaim gate is kept, except that for what the purge frees it does not wait
+    on the members that were away when it began: what an edit made while away could bring back is a
+    recently deleted file, which a version holds (versions are never purged). The member that ran it
+    remembers, in memory, each member that was away and its own frontier then, and sends that member
+    `Purge` once it is back and has reported holding that frontier, so it has seen every delete the
+    purge covers. Repair never copies a held chunk that no file or kept version uses (the replicator
+    works that out afresh, once a round, when the tree has changed and it has held chunks to look
+    at), so a member back from away does not hand the others what they purged. If the member that ran
+    the purge restarts or is away when the other returns, that member keeps its copies for the
+    normal retention instead. A purge cannot be undone.
 
 11. **Remote reads:** fetch on demand with a bounded local LRU cache (size configurable). The cache
     is separate from replica storage and does not count toward the N copies. Recently used files

@@ -79,7 +79,7 @@ The share of new copies a member takes, in the units of its offer; placement use
 _Avoid_: Priority, load factor
 
 **Purge**:
-Asking every member to reclaim the chunks no file uses now instead of after the retention period. The reclaim gate still applies, so a member that has not caught up holds it back until it has. Not undoable.
+Asking every member to reclaim the chunks no file or kept version uses now instead of after the retention period. Members that are up purge at once; one that is away is told by the member that ran it once it is back and caught up, and the others' reclaim gate does not wait on it for what the purge frees (a version holds what a recent delete freed). Not undoable.
 _Avoid_: Cleanup, force GC
 
 **Version**:

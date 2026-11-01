@@ -141,8 +141,8 @@ window for every member; `status` shows the bytes only versions use.
 
 Deleted files keep their data for 7 days. If the user is short of disk now, or has just deleted a
 test tree, `startfs purge` frees it on every member. It cannot be undone, so run it only when the
-user has said the deleted files are not needed. It refuses while any member is down (it names them;
-bring them back, or `startfs remove` one that is gone for good). Afterwards `startfs status` shows
+user has said the deleted files are not needed. Members that are away are told once they are back
+(the output names them), by the machine that ran it. Afterwards `startfs status` shows
 `garbage collection: purge in progress` while it works, and names a member holding it back. Only
 files deleted before the purge are freed, and not what a kept version still uses: to free that
 too, shorten the window first (`startfs config --keep-versions 0`), with the same care, since the

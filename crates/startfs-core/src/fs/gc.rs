@@ -32,13 +32,14 @@ pub struct GcReport {
 impl LocalFs {
     /// Remove chunks (replicas and staged) that have been unreferenced for
     /// at least `retention`, as observed by this node, and for which
-    /// `gate_open(eligible_at)` holds. Orphans first seen at or before
-    /// `purge_cutoff` need no retention at all (a purge); later ones still do.
+    /// `gate_open(eligible_at, purged)` holds. Orphans first seen at or before
+    /// `purge_cutoff` need no retention at all (a purge, so `purged` is set for
+    /// them); later ones still do.
     pub fn collect_garbage(
         &self,
         retention: Duration,
         purge_cutoff: Option<u64>,
-        gate_open: impl Fn(u64) -> bool,
+        gate_open: impl Fn(u64, bool) -> bool,
     ) -> FsResult<GcReport> {
         let now = self.clock.now();
         let retention = retention.as_nanos() as u64;
@@ -94,12 +95,13 @@ impl LocalFs {
                     t.orphans.insert(id.as_slice(), first).map_err(db)?;
                     continue;
                 }
-                let eligible_at = if purge_cutoff.is_some_and(|cutoff| first <= cutoff) {
+                let purged = purge_cutoff.is_some_and(|cutoff| first <= cutoff);
+                let eligible_at = if purged {
                     first
                 } else {
                     first.saturating_add(retention)
                 };
-                let held = now >= eligible_at && !gate_open(eligible_at);
+                let held = now >= eligible_at && !gate_open(eligible_at, purged);
                 if held {
                     report.held_since = report.held_since.max(Some(eligible_at));
                 }
@@ -121,6 +123,39 @@ impl LocalFs {
             self.staging.remove(&id);
         }
         Ok(report)
+    }
+
+    /// Work out again which chunks a file or kept version uses, if the tree has
+    /// changed since. It reads every register, so the replicator does it at most
+    /// once a round, and only when it has held chunks to look at.
+    pub fn refresh_used(&self) {
+        let generation = self.tree_generation.load(Ordering::SeqCst);
+        if self.used.lock().unwrap().0 == Some(generation) {
+            return;
+        }
+        let (now, window) = (self.clock.now(), self.window());
+        let used = self.run(false, |t| {
+            let mut used: HashSet<ChunkId> = HashSet::new();
+            for row in t.inodes.iter().map_err(db)? {
+                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
+                    used.extend(refs.into_iter().map(|r| r.id));
+                }
+            }
+            used.extend(t.version_chunks(now, window, false)?.into_keys());
+            Ok(used)
+        });
+        match used {
+            Ok(used) => *self.used.lock().unwrap() = (Some(generation), used),
+            Err(e) => eprintln!("startfs: cannot work out which chunks are in use: {e}"),
+        }
+    }
+
+    /// Whether no file or kept version used the chunk when [`Self::refresh_used`] last
+    /// looked, so it is garbage waiting to be reclaimed: repair does not copy it.
+    /// Never, before the first look.
+    pub fn is_unused(&self, id: &ChunkId) -> bool {
+        let used = self.used.lock().unwrap();
+        used.0.is_some() && !used.1.contains(id)
     }
 
     /// Remove from staging those of `ids` that no file in the visible tree or kept version

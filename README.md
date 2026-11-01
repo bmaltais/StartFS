@@ -444,10 +444,10 @@ must run protocol 17.
 Deleting a file keeps its data for `gc_retention_secs` (7 days by default), so a mistake can be
 undone. `startfs purge` ends that wait for what is deleted by now: every member frees the data as
 soon as it has caught up with all the others (`startfs status` shows `purge in progress`, and names
-a member that holds it back). It **cannot be undone**: the deleted files are gone. It needs every
-member up, and refuses otherwise (naming the ones away; `startfs remove` a member that is gone for
-good): a member that missed it would keep its copies and hand them back to the others when it
-returns. Files deleted after the purge keep their usual 7 days. A purge leaves versions alone:
+a member that holds it back). It **cannot be undone**: the deleted files are gone. A member that is
+away is told by the machine that ran the purge once it is back and caught up, and frees its copies
+then (if that machine restarted meanwhile, it keeps them for the usual retention); meanwhile the
+others do not wait for it. Files deleted after the purge keep their usual 7 days. A purge leaves versions alone:
 data a version still uses stays until its window ends, so to free it now shorten the window first
 (`startfs config --keep-versions 0`). If a daemon restarts mid-purge, run it again. Every member must run protocol 12 (release 1.5.0 or newer).
 

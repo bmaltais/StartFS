@@ -64,6 +64,10 @@ const ASKS_IN_FLIGHT: u64 = 512;
 /// so the receive and gossip phases of a tick stay timely however long the queue is.
 const WORK_BUDGET: Duration = Duration::from_millis(10);
 
+/// How long a held chunk nothing uses waits before it is looked at again, in case a
+/// file comes to use it. About a GC pass, which is what finds it unused or used.
+const UNUSED_RECHECK: Nanos = 10 * 60 * 1_000_000_000;
+
 /// What the replicator needs to know about the node and filesystem right now.
 pub struct View<'a> {
     pub me: MemberId,
@@ -496,6 +500,10 @@ impl Replicator {
             entry.0 += usize::from(self.fs.has_replica(&entry.1));
         }
         due.sort_unstable_by_key(|(replicas, _)| *replicas);
+        // Repair copies only what a file or kept version uses: know that afresh first.
+        if due.iter().any(|(_, id)| !self.fs.has_staged(id)) {
+            self.fs.refresh_used();
+        }
         let started = std::time::Instant::now();
         for (_, id) in due {
             if started.elapsed() > WORK_BUDGET {
@@ -544,6 +552,13 @@ impl Replicator {
         let staged = self.fs.has_staged(id);
         if !staged && !self.fs.has_replica(id) {
             st.tracks.remove(id);
+            return false;
+        }
+        // Nothing uses it, so it is not copied anywhere: a member back from away would
+        // otherwise hand the others what a purge freed. Looked at again in a while, in
+        // case a file comes to use it.
+        if !staged && self.fs.is_unused(id) {
+            st.tracks.get_mut(id).expect("tracked").wake = view.now.saturating_add(UNUSED_RECHECK);
             return false;
         }
         // A chunk written here and not yet offered to anyone waits out the hold, before it is
@@ -885,6 +900,10 @@ impl Replicator {
                 continue;
             }
             if !self.fs.has_staged(id) && awaiting(t, view, &st.silent) {
+                continue;
+            }
+            // Nothing uses it, so it is not short of anything.
+            if !self.fs.has_staged(id) && self.fs.is_unused(id) {
                 continue;
             }
             let replicas = t.holders.len() as u32 + u32::from(held);

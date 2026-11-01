@@ -31,7 +31,8 @@ commands:
   activity [--json]                   show this node's recent traffic, tick timings, queues and
                                       memory over the last minute (--json: as JSON)
   purge                               free the data of deleted files on every member now, instead
-                                      of after the retention period (not undoable)
+                                      of after the retention period (not undoable); a member that
+                                      is away is told once it is back. Kept versions stay
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
   history PATH [--json]               list the versions kept of the file at PATH (under the mount,
                                       or in the filesystem), each named by its restore point
@@ -312,6 +313,14 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                 report.asked.len(),
                 if report.asked.len() == 1 { "" } else { "s" }
             );
+            if !report.deferred.is_empty() {
+                let away: Vec<String> = report.deferred.iter().map(|m| m.0.to_string()).collect();
+                println!(
+                    "away: member{} {} will be told to purge once back and caught up, by this node",
+                    if away.len() == 1 { "" } else { "s" },
+                    away.join(", ")
+                );
+            }
             Ok(())
         }
         "history" => {
