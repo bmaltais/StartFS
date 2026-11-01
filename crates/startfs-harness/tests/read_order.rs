@@ -128,3 +128,23 @@ fn a_peer_that_let_a_read_down_is_asked_later_than_one_that_answers() {
     read_file(&c, 6);
     assert_ne!(asked(&c)[before..][0], NodeId(1));
 }
+
+#[test]
+fn a_read_does_not_ask_a_member_that_is_down_while_others_are_up() {
+    // One copy each; node 3 is cut off before the files are written, so placement would give
+    // some of them to it but their copy is on a member that is up.
+    let c = Cluster::with_offers(1, &[0, 1 << 30, 1 << 30, 1 << 30]);
+    c.network()
+        .partition(&[&[READER, NodeId(1), NodeId(2)], &[NodeId(3)]]);
+    c.elapse(Duration::from_secs(10 * 60));
+    for i in 0..12 {
+        let f = c.fs(1).create(ROOT_INO, &format!("f{i}"), 0o644).unwrap();
+        c.fs(1).write(f.ino, 0, &noise(8 * 1024, i + 1)).unwrap();
+    }
+    c.sync();
+    // A request to node 3 is dropped by the partition, so it shows as time waited.
+    for i in 0..12 {
+        let took = read_time(&c, i);
+        assert!(took < Duration::from_millis(100), "read {i} took {took:?}");
+    }
+}

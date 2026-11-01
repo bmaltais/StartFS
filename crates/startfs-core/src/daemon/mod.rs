@@ -54,10 +54,11 @@ const WAIT_ROUNDS: usize = 300;
 /// next one instead of waited out.
 const HEDGE_FACTOR: u64 = 3;
 const HEDGE_MIN: Nanos = Duration::from_millis(20).as_nanos() as Nanos;
-/// A chunk fetched only in case a read wants it is given up on after this many times the
-/// patience for its peer.
-const GIVE_UP_PATIENCES: Nanos = 4;
 const HEDGE_UNTIMED: Nanos = Duration::from_millis(200).as_nanos() as Nanos;
+
+/// A chunk fetched only in case a read wants it is given up on after this many times the
+/// patience for its peer (see `HEDGE_FACTOR`).
+const GIVE_UP_FACTOR: u64 = 4;
 
 /// The most a tick spends waiting on peers for the chunks a commit of buffered writes needs: a
 /// commit that cannot get them is retried later, but a tick that waits longer stalls
@@ -985,59 +986,80 @@ impl Daemon {
 
     /// Request the chunks after the first at once, spread over the peers likely to hold them
     /// that are up, then fetch the first (the one a read is blocked on) the way a single chunk
-    /// is, and collect the rest. The others are best effort: a peer that is slow to answer
-    /// them is not waited out.
+    /// is, and collect the rest. The others are best effort: they are not asked of a second
+    /// peer, and a peer slow to answer them is given up on instead of waited out.
     fn fetch_chunks(
         &self,
         ids: &[ChunkId],
         accept: &dyn Fn(&ChunkId, &[u8]) -> bool,
     ) -> Vec<Option<Vec<u8>>> {
+        struct Ahead {
+            n: usize,
+            peer: NodeId,
+            sent: Nanos,
+            gives_up: Nanos,
+        }
+        enum Wait {
+            Reply(Nanos, ChunkAnswer),
+            GaveUp,
+        }
         let mut answers = vec![None; ids.len()];
         let (Some(transport), Some(first)) = (self.transport(), ids.first()) else {
             return answers;
         };
         let (peers, up) = self.ranked_peers();
+        let guess = self.holder_guess();
         let mut asked = Vec::new();
-        if up > 0 {
-            for (n, id) in ids.iter().enumerate().skip(1) {
-                let holders = self.likely_holders(id);
-                let near = &peers[..up];
-                let mut holding: Vec<NodeId> = near
-                    .iter()
-                    .copied()
-                    .filter(|p| holders.contains(p))
-                    .collect();
-                if holding.is_empty() {
-                    holding = near.to_vec();
-                }
-                let peer = holding[n % holding.len()];
-                self.chunk_replies.lock().unwrap().remove(&(peer, *id));
-                transport.send(peer, Message::ChunkRequest(*id).encode());
-                let sent = self.clock.now();
-                let gives_up =
-                    sent.saturating_add(self.patience(peer).saturating_mul(GIVE_UP_PATIENCES));
-                asked.push((n, peer, sent, gives_up));
-            }
+        for (n, id) in ids.iter().enumerate().skip(1) {
+            let (order, holding) = ask_order(&guess.holders(id), &peers, up);
+            // The likely holders that are up, or else every peer that is up.
+            let choice = &order[..if holding > 0 { holding } else { up }];
+            let Some(&peer) = choice.get(n % choice.len().max(1)) else {
+                break;
+            };
+            self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+            transport.send(peer, Message::ChunkRequest(*id).encode());
+            let sent = self.clock.now();
+            let gives_up =
+                sent.saturating_add(self.patience(peer).saturating_mul(GIVE_UP_FACTOR as Nanos));
+            asked.push(Ahead {
+                n,
+                peer,
+                sent,
+                gives_up,
+            });
         }
         answers[0] = self.fetch_chunk(first, &|d| accept(first, d));
-        for (n, peer, sent, gives_up) in asked {
+        for Ahead {
+            n,
+            peer,
+            sent,
+            gives_up,
+        } in asked
+        {
             let id = &ids[n];
-            let reply = self.wait_for(|| {
+            let wait = self.wait_for(|| {
                 let found = self.chunk_replies.lock().unwrap().remove(&(peer, *id));
-                // `Some(None)`: not worth waiting longer for.
-                found
-                    .map(Some)
-                    .or_else(|| (self.clock.now() >= gives_up).then_some(None))
+                match found {
+                    Some((at, answer)) => Some(Wait::Reply(at, answer)),
+                    None => (self.clock.now() >= gives_up).then_some(Wait::GaveUp),
+                }
             });
-            let answered = match &reply {
-                Some(Some((at, _))) => *at,
-                _ => self.clock.now(),
-            };
-            self.record_round_trip(peer, sent, answered);
-            if let Some(Some((_, Some(data)))) = reply
-                && accept(id, &data)
-            {
-                answers[n] = Some(data);
+            match wait {
+                Some(Wait::Reply(at, answer)) => {
+                    self.record_round_trip(peer, sent, at);
+                    if let Some(data) = answer
+                        && accept(id, &data)
+                    {
+                        answers[n] = Some(data);
+                    }
+                }
+                // Counted as a timeout, but not as silence: `silent` is about the chunk a read
+                // waits for, and that one was fetched on its own.
+                Some(Wait::GaveUp) | None => {
+                    self.activity.timed_out(peer);
+                    self.record_round_trip(peer, sent, self.clock.now());
+                }
             }
         }
         answers
@@ -1053,10 +1075,8 @@ impl Daemon {
             Hedge,
         }
         let transport = self.transport()?;
-        let (mut peers, _) = self.ranked_peers();
-        // The members placement gave the chunk to go first, each group still fastest first.
-        let holders = self.likely_holders(id);
-        peers.sort_by_key(|p| !holders.contains(p));
+        let (peers, up) = self.ranked_peers();
+        let (peers, _) = ask_order(&self.holder_guess().holders(id), &peers, up);
         FETCH.with(|f| f.set((f.get().0, false)));
         let mut next = peers.into_iter().peekable();
         // The peers asked and not yet answered, with when each was asked.
@@ -1115,19 +1135,13 @@ impl Daemon {
         result
     }
 
-    /// The peers placement would give `id` to now. Nodes do not track who holds what, but
-    /// placement is a function of the membership, so this is where a copy most likely is.
-    /// A chunk not yet replicated, or placed differently before, can be elsewhere.
-    fn likely_holders(&self, id: &ChunkId) -> Vec<NodeId> {
+    /// What placement works from now, to guess where a chunk's copies are.
+    fn holder_guess(&self) -> HolderGuess {
         let m = self.membership.lock().unwrap();
-        let Some(fs) = m.filesystem() else {
-            return Vec::new();
-        };
-        let members = m.members();
-        crate::placement::place(id, &members, fs.copies, &HashSet::new())
-            .into_iter()
-            .filter_map(|h| members.iter().find(|x| x.id == h).map(|x| x.endpoint))
-            .collect()
+        HolderGuess {
+            copies: m.filesystem().map_or(0, |fs| fs.copies),
+            members: m.members(),
+        }
     }
 
     /// Fold a request sent at `sent` and answered (or given up on) at `at` into the peer's
@@ -1159,4 +1173,38 @@ impl Daemon {
             None => HEDGE_UNTIMED,
         }
     }
+}
+
+/// The membership and copies placement works from. Nodes do not track who holds what, but
+/// placement is a function of these, so it says where a copy most likely is. A chunk not yet
+/// replicated, placed before the membership changed, or covered by a stand-in can be elsewhere.
+struct HolderGuess {
+    members: Vec<crate::members::Member>,
+    copies: u32,
+}
+
+impl HolderGuess {
+    /// The peers placement would give `id` to now.
+    fn holders(&self, id: &ChunkId) -> Vec<NodeId> {
+        if self.copies == 0 {
+            return Vec::new();
+        }
+        crate::placement::place(id, &self.members, self.copies, &HashSet::new())
+            .into_iter()
+            .filter_map(|h| self.members.iter().find(|x| x.id == h).map(|x| x.endpoint))
+            .collect()
+    }
+}
+
+/// `peers` (ranked, the first `up` of them up) in the order to ask them for a chunk: the likely
+/// holders that are up, then the other peers that are up, then those down, each group still in
+/// rank order; and how many lead as likely holders that are up.
+fn ask_order(holders: &[NodeId], peers: &[NodeId], up: usize) -> (Vec<NodeId>, usize) {
+    let (near, far) = peers.split_at(up.min(peers.len()));
+    let (mut order, others): (Vec<NodeId>, Vec<NodeId>) =
+        near.iter().partition(|p| holders.contains(p));
+    let holding = order.len();
+    order.extend(others);
+    order.extend(far);
+    (order, holding)
 }

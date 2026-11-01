@@ -383,7 +383,8 @@ beyond the existing reply bookkeeping: a late reply is pruned like any unclaimed
 the members placement gives them to (`likely_holders`; nodes do not track holders, but placement
 is a function of the membership), not of every peer in turn, and the first chunk is fetched the
 hedged way. A peer slow to answer a chunk nobody is waiting for is given up on after 4 times its
-patience, not waited out chunk by chunk. Harness (`read_ahead.rs`): with 1 copy over 4 peers no
+patience, not waited out chunk by chunk, and not asked of a second peer (only the chunk the
+read waits for is hedged). A likely holder that is down is asked after the peers that are up. Harness (`read_ahead.rs`): with 1 copy over 4 peers no
 request is turned away (2 were before); with the nearest of 3 peers silent, a read of a file
 none of whose chunks are held takes under 150 ms of simulated time (658 ms before). Two nodes,
 one holder, `profile-transfer.sh` `MODE=read`, 20 ms, 128 MiB, 2 rounds against 1.13.0: 78 to
