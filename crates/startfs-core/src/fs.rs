@@ -404,7 +404,17 @@ impl LocalFs {
                 counter: counter as u32,
                 node: fs.node(),
             };
-            if t.inodes.get(ROOT_INO).map_err(db)?.is_none() {
+            let fresh = t.inodes.get(ROOT_INO).map_err(db)?.is_none();
+            if t.counters
+                .get(history::VERSIONS_SINCE)
+                .map_err(db)?
+                .is_none()
+            {
+                t.counters
+                    .insert(history::VERSIONS_SINCE, history::versions_since(fresh))
+                    .map_err(db)?;
+            }
+            if fresh {
                 let now = fs.clock.now();
                 let root = Inode {
                     kind: FileKind::Dir,

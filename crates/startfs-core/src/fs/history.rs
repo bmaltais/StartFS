@@ -60,6 +60,20 @@ pub fn parse_restore_point(text: &str) -> Option<Nanos> {
     Some(secs * 1_000_000_000 + frac * unit + (unit - 1))
 }
 
+/// When versions began on a database that a release without them wrote: the
+/// rollout of 1.11.0 (2026-11-01 18:00 UTC). Before it, GC did not keep a deleted
+/// file's chunks for the window, so an earlier deletion cannot be a version.
+const VERSIONS_BEGAN: Nanos = 1_793_556_000 * 1_000_000_000;
+
+/// The counter holding when versions began on this database.
+pub(super) const VERSIONS_SINCE: &str = "versions_since";
+
+/// When versions begin on a database being opened: a new one has had them from
+/// the start, one written by an earlier release only from [`VERSIONS_BEGAN`].
+pub(super) fn versions_since(fresh: bool) -> Nanos {
+    if fresh { 0 } else { VERSIONS_BEGAN }
+}
+
 /// One earlier version of an object, and the stamp of what replaced it.
 #[derive(Serialize, Deserialize, Clone)]
 pub(super) struct Past {
@@ -84,7 +98,22 @@ pub(super) fn kept(start: Hlc, end: Hlc, now: Nanos, window: Nanos) -> bool {
         && end.wall.saturating_add(window) > now
 }
 
+/// Whether a deleted object's last state, written at `last` and ended by the
+/// deletion at `death`, is kept: as any version, and deleted after versions began.
+fn last_kept(last: Hlc, death: Hlc, since: Nanos, now: Nanos, window: Nanos) -> bool {
+    death.wall >= since && kept(last, death, now, window)
+}
+
 impl Tables<'_> {
+    /// When versions began on this database (see [`versions_since`]).
+    fn since(&self) -> FsResult<Nanos> {
+        Ok(self
+            .counters
+            .get(VERSIONS_SINCE)
+            .map_err(db)?
+            .map_or(0, |g| g.value()))
+    }
+
     /// Keep `version` of `ino` as replaced at `until`. Recording it again keeps
     /// the earliest replacement, so the result does not depend on arrival order.
     pub(super) fn retire(&mut self, ino: Ino, version: Version, until: Hlc) -> FsResult<()> {
@@ -148,10 +177,11 @@ impl Tables<'_> {
         now: Nanos,
         window: Nanos,
     ) -> FsResult<bool> {
+        let since = self.since()?;
         let last = o
             .winner()
             .zip(o.death())
-            .is_some_and(|(v, d)| kept(v.hlc, d, now, window));
+            .is_some_and(|(v, d)| last_kept(v.hlc, d, since, now, window));
         Ok(last
             || self
                 .versions_of(ino)?
@@ -191,6 +221,7 @@ impl Tables<'_> {
         window: Nanos,
         prune: bool,
     ) -> FsResult<HashMap<ChunkId, u64>> {
+        let since = self.since()?;
         let mut out = HashMap::new();
         let mut gone = Vec::new();
         for row in self.history.iter().map_err(db)? {
@@ -216,7 +247,7 @@ impl Tables<'_> {
             let (Some(death), Some(last)) = (o.death(), o.winner()) else {
                 continue;
             };
-            if kept(last.hlc, death, now, window)
+            if last_kept(last.hlc, death, since, now, window)
                 && let Content::Chunks(refs) = &last.content
             {
                 out.extend(refs.iter().map(|r| (r.id, u64::from(r.len))));
@@ -318,6 +349,7 @@ impl Tables<'_> {
         now: Nanos,
         window: Nanos,
     ) -> FsResult<BTreeMap<(Ino, String), Vec<Span>>> {
+        let since = self.since()?;
         let mut out: BTreeMap<(Ino, String), Vec<Span>> = BTreeMap::new();
         for row in self.objects.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
@@ -359,7 +391,7 @@ impl Tables<'_> {
                         end: None,
                         deleted: false,
                     }),
-                    Some(d) if kept(last.hlc, d, now, window) => spans.push(Span {
+                    Some(d) if last_kept(last.hlc, d, since, now, window) => spans.push(Span {
                         kind,
                         version: last.clone(),
                         end: Some(d),

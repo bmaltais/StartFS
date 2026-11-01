@@ -211,6 +211,11 @@ build's short-lived files on the node.
   clock is kept no more than one retention behind, so once the version is released the reclaim gate
   still needs a catch-up with every member from about then (a restore made elsewhere just before may
   be on its way). `purge` leaves versions alone.
+- A deletion stamped before versions began on the database is never a version: a database an
+  earlier release wrote records the 1.11.0 rollout (2026-11-01 18:00 UTC) as that start on first
+  open, a new one 0. Before it, GC did not hold a deleted file's chunks for the window (a purge, or a
+  retention shorter than the window, may have freed them), so such a version could not be restored.
+  A member that joins afterwards starts at 0 and may list those for the rest of their window.
 - Versions past the window are dropped by each GC pass, and a deleted object's register by the next
   settled compaction once it keeps no version (at once for a file that lasted under 30 s).
 - `startfs history PATH` finds the path through deleted directories and lists the kept versions of
