@@ -371,6 +371,24 @@ buffers (the differences are noise). A blank cell was not measured.
   Read-ahead was not measured on random access beyond the harness test, nor with more than one
   peer holding the data.
 
+## 11. Short-lived files and the replication hold
+
+`scripts/profile-churn.sh`: three loopback nodes (3 copies); on A, 50 files of 1 MiB of fresh
+random bytes are written, kept for the lifetime, then deleted. What the other two daemons wrote
+(`/proc/PID/io`) and the replica bytes they keep after (deleted chunks stay for the GC retention):
+
+| lifetime | hold 0: wrote / kept | hold 30 s (default): wrote / kept |
+|---|---|---|
+| 1 s | 116 / 100 MiB | 10 / 0 MiB |
+| 5 s | 115 / 100 MiB | 11 / 0 MiB |
+| 15 s | 116 / 100 MiB | 11 / 0 MiB |
+| 45 s | 116 / 100 MiB | 118 / 100 MiB |
+
+Without a hold even a file deleted after a second was pushed to both peers and kept there for the
+retention (the write buffer and the sweep of unreferenced staged chunks only catch what is deleted
+before the first push). What the peers write for a file deleted within the hold is the metadata
+of its create and delete.
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

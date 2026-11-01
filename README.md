@@ -398,6 +398,7 @@ Data lives in `~/.local/share/startfs` (override with `--data-dir`). Defaults:
 | `compression` | `auto` | `auto` compresses only chunks a quick sample shows to shrink, and keeps the result when it saves at least an eighth; `off` stores chunks as they are; `always` compresses every chunk and keeps any saving. Applies to chunks stored from now on |
 | `staging_bytes` | unset | most unreplicated writes held before writes are refused. Unset, only the free space of the staging partition bounds it: writes are refused (`ENOSPC`) once staging would use more than four fifths of the free space above 2 GiB, and resume as replication catches up |
 | `sync_quiet_ms` | 1000 | how long without a metadata commit before recent creates are made durable on disk |
+| `replication_hold_secs` | 30 | how long a chunk written on this node waits before it is sent to the others: a file deleted within it (a build's temporary files) never leaves the node, and no copy of it is kept elsewhere for the GC retention. Meanwhile the data is a single copy on this node's disk. Not applied while staging is more than half full; 0 sends at once |
 | `write_commit_delay_ms` | 1000 | how long a file must go unwritten before the background tick commits its buffered writes |
 | `write_buffer_bytes` | 8 MiB | most of one file's writes held in memory before a batch is committed (never below 8 MiB) |
 | `token_ttl_secs` | 86400 | join token lifetime |
