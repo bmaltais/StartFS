@@ -1,6 +1,7 @@
 //! Versioned history: an overwritten or deleted file keeps its earlier
 //! versions for the filesystem's window, so they can be listed and restored.
 
+use startfs_core::fs::{parse_restore_point, restore_point};
 use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_harness::{Cluster, noise};
@@ -153,4 +154,70 @@ fn a_member_caught_up_by_state_transfer_lists_the_same_versions() {
         assert_eq!(here.len(), 2, "{path}: {here:?}");
         assert_eq!(c.control(2).history(path).unwrap(), here, "{path}");
     }
+}
+
+/// The restore point `history` shows for the `n`th version of `path`, as a user would type it.
+fn point(c: &Cluster, path: &str, n: usize) -> Nanos {
+    let written = c.control(0).history(path).unwrap()[n].written;
+    parse_restore_point(&restore_point(written)).unwrap()
+}
+
+fn read(c: &Cluster, i: usize, dir: Ino, name: &str) -> Vec<u8> {
+    let fs = c.fs(i);
+    let f = fs.lookup(dir, name).unwrap();
+    fs.read(f.ino, 0, u32::MAX).unwrap()
+}
+
+#[test]
+fn an_overwritten_file_and_a_deleted_file_are_restored_on_every_member() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let a = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    put(&c.fs(0), "b", &noise(8 * 1024, 2));
+    pass(&c, HOUR, 10 * MINUTE);
+    c.fs(0).write(a, 0, &noise(8 * 1024, 3)).unwrap();
+    c.fs(1).unlink(ROOT_INO, "b").unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    let (at_a, at_b) = (point(&c, "/a", 0), point(&c, "/b", 0));
+    c.control(1).restore("/a", at_a).unwrap();
+    c.control(1).restore("/b", at_b).unwrap();
+    pass(&c, 10 * MINUTE, MINUTE);
+    for i in 0..3 {
+        assert_eq!(read(&c, i, ROOT_INO, "a"), noise(8 * 1024, 1), "node {i}");
+        assert_eq!(read(&c, i, ROOT_INO, "b"), noise(8 * 1024, 2), "node {i}");
+    }
+    // The restore is a write like any other: what it replaced is a version in turn.
+    let versions = c.control(2).history("/a").unwrap();
+    assert_eq!(versions.len(), 3, "{versions:?}");
+    assert!(versions[2].replaced.is_none());
+}
+
+#[test]
+fn a_file_restored_into_a_deleted_directory_brings_the_directory_back() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let fs = c.fs(0);
+    let dir = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    let f = fs.create(dir.ino, "a", 0o644).unwrap();
+    fs.write(f.ino, 0, &noise(8 * 1024, 1)).unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+    fs.unlink(dir.ino, "a").unwrap();
+    fs.rmdir(ROOT_INO, "d").unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    c.control(2).restore("/d/a", point(&c, "/d/a", 0)).unwrap();
+    pass(&c, 10 * MINUTE, MINUTE);
+    for i in 0..3 {
+        let d = c.fs(i).lookup(ROOT_INO, "d").unwrap();
+        assert_eq!(read(&c, i, d.ino, "a"), noise(8 * 1024, 1), "node {i}");
+    }
+}
+
+#[test]
+fn a_restore_point_where_the_path_held_nothing_is_refused() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let before = c.now() - 1_000_000_000;
+    put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    pass(&c, HOUR, 10 * MINUTE);
+    assert!(c.control(0).restore("/a", before).is_err());
+    assert!(c.control(0).restore("/nothing", c.now()).is_err());
 }

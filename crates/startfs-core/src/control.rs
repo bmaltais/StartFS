@@ -73,6 +73,11 @@ pub enum Request {
     History {
         path: String,
     },
+    /// Bring the file at a path back to the version it held at `at` (a restore point).
+    Restore {
+        path: String,
+        at: Nanos,
+    },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
         token: String,
@@ -815,6 +820,17 @@ impl Client {
     pub fn node_stats(&self) -> Result<Vec<NodeReport>, Error> {
         match self.call(&Request::NodeStats)? {
             Response::NodeStats(rows) => Ok(rows),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Bring the file at `path` back to what it held at `at`.
+    pub fn restore(&self, path: &str, at: Nanos) -> Result<(), Error> {
+        match self.call(&Request::Restore {
+            path: path.into(),
+            at,
+        })? {
+            Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }
     }

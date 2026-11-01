@@ -200,6 +200,7 @@ impl Tables<'_> {
 
 /// One state the file at a path has had: its version and how it ended.
 pub(super) struct Span {
+    pub(super) kind: FileKind,
     pub(super) version: Version,
     /// What replaced it; `None` while it is what the path holds.
     pub(super) end: Option<Hlc>,
@@ -257,9 +258,9 @@ impl Tables<'_> {
                 continue;
             }
             let o: Object = dec(v.value())?;
-            if o.kind.is_none_or(|k| k == FileKind::Dir) {
+            let Some(kind) = o.kind.filter(|k| *k != FileKind::Dir) else {
                 continue;
-            }
+            };
             let here = o
                 .names
                 .values()
@@ -271,6 +272,7 @@ impl Tables<'_> {
             for past in self.versions_of(ino)? {
                 if kept(past.version.hlc, past.until, now, window) {
                     out.push(Span {
+                        kind,
                         version: past.version,
                         end: Some(past.until),
                         deleted: false,
@@ -280,11 +282,13 @@ impl Tables<'_> {
             let Some(last) = o.winner() else { continue };
             match o.death() {
                 None => out.push(Span {
+                    kind,
                     version: last.clone(),
                     end: None,
                     deleted: false,
                 }),
                 Some(d) if kept(last.hlc, d, now, window) => out.push(Span {
+                    kind,
                     version: last.clone(),
                     end: Some(d),
                     deleted: true,
@@ -318,6 +322,68 @@ impl LocalFs {
                 size: s.version.size,
             })
             .collect())
+    }
+
+    /// Bring the file at `path` back to the version it held at `at`: written over
+    /// what the path holds now, or created again (in its deleted directory too).
+    /// It is an ordinary write, so it replicates, and what it replaces is kept
+    /// as a version in turn. Not found if the path held nothing kept at `at`.
+    pub fn restore(&self, path: &str, at: Nanos) -> FsResult<()> {
+        self.flush_all_logged(true, 0);
+        let (now, window) = (self.clock.now(), self.window());
+        self.run(true, |t| {
+            let (dir, name) = t.locate(path)?;
+            let Some(span) = t
+                .spans(dir, &name, now, window)?
+                .into_iter()
+                .filter(|s| s.version.hlc.wall <= at && s.end.is_none_or(|e| e.wall > at))
+                .max_by_key(|s| s.version.hlc)
+            else {
+                return Err(FsError::NotFound);
+            };
+            if span.end.is_none() {
+                return Ok(()); // the path holds it already
+            }
+            let v = span.version;
+            let mut inode = Inode {
+                kind: span.kind,
+                mode: v.mode,
+                nlink: 1,
+                size: v.size,
+                mtime: v.mtime,
+                ctime: now,
+                parent: dir,
+                content: v.content,
+                xattrs: v.xattrs,
+            };
+            if let Some(ino) = t.entry(dir, &name)? {
+                let current = t.inode(ino)?;
+                if current.kind != span.kind {
+                    return Err(FsError::Exists);
+                }
+                inode.nlink = current.nlink;
+                inode.parent = current.parent;
+                t.put(ino, &inode)?;
+                return self.emit_set(t, ino, &inode);
+            }
+            if t.inodes.get(dir).map_err(db)?.is_some() {
+                return self.add(t, dir, &name, inode).map(|_| ());
+            }
+            // A deleted directory: a file created in it brings its path back.
+            let ino = t.alloc_ino(self.node())?;
+            let snap = self.snapshot(&inode);
+            self.emit(
+                t,
+                Op::Create {
+                    ino,
+                    kind: span.kind,
+                    parent: dir,
+                    name,
+                    snap,
+                },
+            )?;
+            self.reconcile(t)
+        })
     }
 
     /// Set how long a replaced version is kept (the filesystem's window).

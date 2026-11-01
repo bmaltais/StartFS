@@ -35,6 +35,9 @@ commands:
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
   history PATH [--json]               list the versions kept of the file at PATH (under the mount,
                                       or in the filesystem), each named by its restore point
+  restore PATH --at POINT             bring the file at PATH back to what it held at POINT
+                                      (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it); what
+                                      it replaces is kept as a version, so a restore is undoable
   join TOKEN [--offer SIZE] [--site NAME]
                                       join the filesystem a token names, declaring where this
                                       node lives (home, cloud) so copies are spread across sites
@@ -74,6 +77,10 @@ enum CliError {
     ActivityNotOnOff,
     #[error("remove needs a member number (see `startfs status`)")]
     RemoveNeedsMember,
+    #[error(
+        "not a restore point: {0} (expected YYYYMMDD-HHMMSS[.fff] in UTC, as `startfs history` shows)"
+    )]
+    BadRestorePoint(String),
     #[error("not a size: {0}")]
     BadSize(String),
     #[error("{}: {source}", path.display())]
@@ -297,11 +304,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Ok(())
         }
         "history" => {
-            let path = absolute(
-                rest.iter()
-                    .find(|a| !a.starts_with('-'))
-                    .ok_or(CliError::Usage)?,
-            )?;
+            let path = absolute(positional(rest, &[]).ok_or(CliError::Usage)?)?;
             let versions = Client::new(socket).history(&path)?;
             if rest.iter().any(|a| a == "--json") {
                 println!(
@@ -311,6 +314,15 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             } else {
                 print!("{}", history_table(&path, &versions));
             }
+            Ok(())
+        }
+        "restore" => {
+            let point = flag_value(rest, "--at")?;
+            let path = absolute(positional(rest, &["--at"]).ok_or(CliError::Usage)?)?;
+            let at = startfs_core::fs::parse_restore_point(&point)
+                .ok_or_else(|| CliError::BadRestorePoint(point.clone()))?;
+            Client::new(socket).restore(&path, at)?;
+            println!("restored {path} to what it held at {point}");
             Ok(())
         }
         "stats" => {
@@ -326,6 +338,19 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         }
         _ => Err(CliError::Usage),
     }
+}
+
+/// The first argument that is neither a flag nor the value of one of `valued`.
+fn positional<'a>(args: &'a [String], valued: &[&str]) -> Option<&'a str> {
+    let mut args = args.iter();
+    while let Some(a) = args.next() {
+        if valued.contains(&a.as_str()) {
+            args.next();
+        } else if !a.starts_with('-') {
+            return Some(a);
+        }
+    }
+    None
 }
 
 /// A path as given, made absolute against the working directory (not resolved:
@@ -446,6 +471,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "create" => (&["--name", "--copies"], &["--example"], 0),
         "status" | "activity" | "stats" => (&[], &["--json"], 0),
         "history" => (&[], &["--json"], 1),
+        "restore" => (&["--at"], &[], 1),
         "join" => (&["--offer", "--site"], &[], 1),
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
