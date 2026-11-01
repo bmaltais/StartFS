@@ -42,9 +42,13 @@ const CONFLICTS: TableDefinition<u64, &[u8]> = TableDefinition::new("conflicts")
 const LOGBASE: TableDefinition<u32, u64> = TableDefinition::new("logbase");
 /// Chunks held here that no file references, and when GC first saw them so.
 const ORPHANS: TableDefinition<&[u8], u64> = TableDefinition::new("orphans");
+/// Earlier versions of objects, derived from the log: (object, the version's
+/// stamp as wall, counter, node) -> the encoded version and what replaced it.
+const HISTORY: TableDefinition<(u64, u64, u32, u32), &[u8]> = TableDefinition::new("history");
 
 mod compact;
 mod gc;
+mod history;
 mod merge;
 mod replicas;
 use replicas::Piece;
@@ -52,6 +56,7 @@ mod scrub;
 mod usage;
 mod writebuf;
 pub use gc::GcReport;
+pub use history::MIN_VERSION_LIFE;
 pub use merge::{CatchUp, ConflictCopy};
 pub use writebuf::DEFAULT_WRITE_BUFFER;
 
@@ -124,6 +129,7 @@ pub(crate) struct Tables<'a> {
     conflicts: Table<'a, u64, &'static [u8]>,
     orphans: Table<'a, &'static [u8], u64>,
     logbase: Table<'a, u32, u64>,
+    history: Table<'a, (u64, u64, u32, u32), &'static [u8]>,
 }
 
 impl Tables<'_> {
@@ -282,6 +288,8 @@ pub struct LocalFs {
     staging_limit: AtomicU64,
     /// What the cluster can hold, as the daemon last worked it out.
     usable_bytes: AtomicU64,
+    /// How long a replaced version is kept, in nanoseconds (the filesystem's window).
+    keep_versions: AtomicU64,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
     /// Decoded chunks recently read, so small reads do not decode a chunk each.
@@ -356,6 +364,9 @@ impl LocalFs {
             replicating: AtomicBool::new(false),
             staging_limit: AtomicU64::new(u64::MAX),
             usable_bytes: AtomicU64::new(0),
+            keep_versions: AtomicU64::new(
+                crate::config::DEFAULT_KEEP_VERSIONS_SECS * 1_000_000_000,
+            ),
             cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
             decoded: DecodedCache::new(DEFAULT_DECODED_BYTES),
             source: Mutex::new(None),
@@ -497,6 +508,7 @@ impl LocalFs {
                 conflicts: txn.open_table(CONFLICTS).map_err(db)?,
                 orphans: txn.open_table(ORPHANS).map_err(db)?,
                 logbase: txn.open_table(LOGBASE).map_err(db)?,
+                history: txn.open_table(HISTORY).map_err(db)?,
             };
             f(&mut t)
         };

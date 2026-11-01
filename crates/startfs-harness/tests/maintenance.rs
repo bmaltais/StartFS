@@ -334,7 +334,8 @@ fn a_node_offline_across_a_compaction_still_converges() {
 
 #[test]
 fn deleted_files_leave_no_metadata_behind_once_every_member_has_caught_up() {
-    let c = cluster(2, 3);
+    // No versions, which would keep the deleted files' records for their window.
+    let c = Cluster::with_filesystem(2, 3, "keep_versions_secs = 0");
     for i in 0..20 {
         put(&c.fs(0), &format!("f{i}"), b"x");
     }
@@ -371,7 +372,7 @@ fn member_id(c: &Cluster, i: usize) -> startfs_core::members::MemberId {
 
 #[test]
 fn gc_waits_for_a_partitioned_member_before_reclaiming() {
-    let c = Cluster::with_filesystem(2, 3, "gc_retention_secs = 7200");
+    let c = Cluster::with_filesystem(2, 3, "gc_retention_secs = 7200\nkeep_versions_secs = 0");
     put(&c.fs(0), "doomed", &noise(8 * 1024, 11));
     pass(&c, HOUR, Duration::from_secs(1200));
     let on = |c: &Cluster, i| c.control(i).status().unwrap().usage.chunks;

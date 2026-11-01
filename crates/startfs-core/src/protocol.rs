@@ -130,7 +130,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 16;
+pub const PROTOCOL_VERSION: u8 = 17;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -280,8 +280,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        16,
-        "b4012d5af912d5d69611004e4861de23beebaeab51dcf5205fdaef7e13ffd879",
+        17,
+        "79d2613e14ff3545a020926446376c6d240b266e9faa06331aa2832186f95020",
     );
 
     #[test]
@@ -309,6 +309,8 @@ mod tests {
             repair_grace_secs: 1800,
             gc_retention_secs: 604800,
             standin_days: 3,
+            keep_versions_secs: 86400,
+            keep_versions_rev: 2,
         };
         let samples = [
             Message::JoinReply(Ok(Admission {
@@ -353,6 +355,15 @@ mod tests {
                 },
             }),
             Message::Copies { copies: 3, rev: 2 },
+            Message::StateChunk(StateChunk {
+                pin: crate::oplog::StatePin {
+                    frontier: Frontier::from([(MemberId(1), 2)]),
+                    hlc: crate::oplog::Hlc::ZERO,
+                },
+                objects: vec![(3, vec![4])],
+                versions: vec![(3, vec![5])],
+                last: true,
+            }),
             Message::ChunkAck([1u8; 32], Replica::Missing),
             Message::StatsRequest,
             Message::Purge,

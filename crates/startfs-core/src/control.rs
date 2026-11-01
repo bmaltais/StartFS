@@ -98,6 +98,17 @@ pub struct FilesystemInfo {
     /// back; 0 means no stand-in copies are made for members that are only asleep.
     #[serde(default = "default_standin_days")]
     pub standin_days: u64,
+    /// How long an overwritten or deleted file keeps its earlier version, from
+    /// when it was replaced; 0 keeps none. `config --keep-versions` changes it.
+    #[serde(default = "default_keep_versions")]
+    pub keep_versions_secs: u64,
+    /// Bumped each time `keep_versions_secs` is changed; the highest wins.
+    #[serde(default)]
+    pub keep_versions_rev: u64,
+}
+
+fn default_keep_versions() -> u64 {
+    crate::config::DEFAULT_KEEP_VERSIONS_SECS
 }
 
 fn default_standin_days() -> u64 {

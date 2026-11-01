@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 /// Days the extra copies made for a sleeping member are kept once it is back.
 pub const DEFAULT_STANDIN_DAYS: u64 = 3;
 
+/// How long an overwritten or deleted file keeps its earlier version: 7 days,
+/// as long as GC keeps unreferenced chunks, so the defaults cost no extra disk.
+pub const DEFAULT_KEEP_VERSIONS_SECS: u64 = 7 * 24 * 3600;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -54,6 +58,10 @@ pub struct Config {
     /// made to cover for a sleeping member are kept after it is back, in case
     /// it sleeps again. 0 turns stand-in copies off. Fixed for the filesystem.
     pub standin_days: u64,
+    /// When this node creates a filesystem: how long an overwritten or deleted
+    /// file keeps its earlier version, in seconds from when it was replaced.
+    /// 0 keeps none. `startfs config --keep-versions` changes it for every member.
+    pub keep_versions_secs: u64,
     /// How long a chunk written here waits before it is sent to other members, in
     /// seconds. A file deleted within it (a build's temporary files) never leaves this
     /// node: no network, no copies elsewhere kept for the GC retention. The data is on
@@ -102,6 +110,7 @@ impl Default for Config {
             repair_grace_secs: 30 * 60,
             gc_retention_secs: 7 * 24 * 3600,
             standin_days: DEFAULT_STANDIN_DAYS,
+            keep_versions_secs: DEFAULT_KEEP_VERSIONS_SECS,
             replication_hold_secs: 30,
             repair_bytes_per_sec: 64 << 20,
             behind_inbox_messages: 5000,

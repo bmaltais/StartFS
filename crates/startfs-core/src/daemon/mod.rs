@@ -414,6 +414,10 @@ impl Daemon {
         self.refresh_staging_limit();
         self.fs
             .set_usable_bytes(status::usable_bytes(&self.membership.lock().unwrap()));
+        if let Some(f) = self.membership.lock().unwrap().filesystem() {
+            self.fs
+                .set_keep_versions(Duration::from_secs(f.keep_versions_secs));
+        }
         timer.phase(Phase::Sync);
         // A long queue is worked off over several ticks, so the rest of the
         // background work is not starved behind it.
