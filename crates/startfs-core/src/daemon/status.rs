@@ -501,9 +501,10 @@ impl Daemon {
                 &stranded,
             )
         });
-        // Members that are gone hold nothing back from the next restart: the data is
-        // safe when nothing is short of copies among the rest. One that is only briefly
-        // unseen may be back at once, so it still counts.
+        // A restart takes a member away for a while and loses nothing, so only a chunk down
+        // to its last copy holds it back: one short of a copy elsewhere (a laptop asleep
+        // with no room for stand-ins) does not. Members that are gone are left out, and one
+        // that is only briefly unseen may be back at once, so it still counts.
         let gone = |m: &MemberStatus| {
             m.state == NodeState::Down
                 && m.last_seen
@@ -520,7 +521,7 @@ impl Daemon {
                     &present,
                     &stranded,
                 ),
-                Verdict::Safe | Verdict::BestEffort
+                Verdict::Safe | Verdict::BestEffort | Verdict::Degraded
             )
         });
         Ok((

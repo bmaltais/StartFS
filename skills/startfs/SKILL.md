@@ -38,7 +38,7 @@ For several machines, run `startfs update` (or `startfs update vX.Y.Z`) on any m
 the release, then restart one at a time (same protocol) or all together on one go-signal (the protocol
 changes), with no ssh. `startfs status` shows each member staging, staged, waiting on its mount,
 restarting or failed, and a `split` line when members are on different protocols. A member whose mount is
-in use stages but waits: free the mount, or run `startfs update --force` on that node. Members that were
+in use stages but waits: free the mount, or run `startfs update --force` on any member to restart every busy one. Members that were
 away catch up when they return. Releases before the first with `startfs update` cannot be told, so that
 hop is the manual one below.
 

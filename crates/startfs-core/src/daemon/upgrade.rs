@@ -74,8 +74,6 @@ pub(super) struct Upgrades {
     file: SavedFile,
     saved: Saved,
     stage: Stage,
-    /// The user said to restart even though the mount is in use.
-    forced: bool,
     /// When this node's own upgrade pause ends.
     pause_until: Option<Nanos>,
     /// This node's own progress under the intent.
@@ -102,7 +100,6 @@ impl Upgrades {
             file,
             saved,
             stage: Stage::Idle,
-            forced: false,
             pause_until: None,
             progress: None,
             swapped_at: None,
@@ -128,8 +125,9 @@ impl Upgrades {
         match &mut self.saved.intent {
             Some(ours) if ours.rev > theirs.rev => {}
             Some(ours) if ours.rev == theirs.rev && ours.tag == theirs.tag => {
-                if theirs.go && !ours.go {
-                    ours.go = true;
+                if (theirs.go && !ours.go) || (theirs.force && !ours.force) {
+                    ours.go |= theirs.go;
+                    ours.force |= theirs.force;
                     self.save();
                 }
             }
@@ -143,7 +141,6 @@ impl Upgrades {
         self.saved.intent = Some(intent);
         self.saved.failure = None;
         self.stage = Stage::Idle;
-        self.forced = false;
         self.progress = None;
         self.save();
     }
@@ -230,8 +227,8 @@ impl Daemon {
         self.installer.lock().unwrap().clone()
     }
 
-    /// Answer `startfs update`: order the cluster to a release, or with `force` let
-    /// this node restart despite its mount being in use.
+    /// Answer `startfs update`: order the cluster to a release; with `force` every member
+    /// restarts even though its mount is in use.
     pub(super) fn update(
         &self,
         release: Option<String>,
@@ -276,9 +273,6 @@ impl Daemon {
         }
         {
             let mut up = self.upgrades.lock().unwrap();
-            if force {
-                up.forced = true;
-            }
             let same = up
                 .saved
                 .intent
@@ -291,7 +285,12 @@ impl Daemon {
                     rev,
                     issuer: Some(me),
                     go: false,
+                    force,
                 });
+            } else if force && let Some(intent) = up.saved.intent.as_mut() {
+                // The others learn it with the intent's gossip.
+                intent.force = true;
+                up.save();
             }
         }
         self.announce_upgrade();
@@ -416,6 +415,7 @@ impl Daemon {
                     rev,
                     issuer: None,
                     go: true,
+                    force: false,
                 });
             }
         }
@@ -517,7 +517,6 @@ impl Daemon {
                 }
                 up.stage = Stage::Idle;
                 up.progress = None;
-                up.forced = false;
                 up.save();
                 drop(up);
                 installer.discard();
@@ -565,7 +564,6 @@ impl Daemon {
                 up.saved.swapping = None;
                 up.save();
             }
-            up.forced = false;
             up.pause_until = None;
             up.swapped_at = None;
             up.progress = None;
@@ -624,14 +622,14 @@ impl Daemon {
         let recheck = up
             .mount
             .is_none_or(|(at, _)| now.saturating_sub(at) >= MOUNT_RECHECK.as_nanos() as u64);
-        if !up.forced
+        if !intent.force
             && recheck
             && let Some(busy) = installer.mount_in_use()
         {
             up.mount = Some((now, busy));
         }
-        let waiting = !up.forced && up.mount.is_none_or(|(_, busy)| busy);
-        let unknown = !up.forced && up.mount.is_none();
+        let waiting = !intent.force && up.mount.is_none_or(|(_, busy)| busy);
+        let unknown = !intent.force && up.mount.is_none();
         up.progress = Some(if waiting && !unknown {
             Progress::WaitingOnMount
         } else {

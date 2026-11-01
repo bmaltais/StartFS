@@ -41,8 +41,8 @@ commands:
   update [vX.Y.Z] [--force]           move every member to a release (the latest stable one when
                                       none is named): each stages it, then they restart one at a
                                       time, or all together when the protocol changes; follow it
-                                      with `status`. --force: restart this node although its
-                                      mount is in use
+                                      with `status`. --force: every member restarts although
+                                      its mount is in use
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
@@ -696,7 +696,7 @@ fn members_table(members: &[control::MemberStatus]) -> String {
                 out.push_str(&format!("  {:<wid$}  upgrade failed: {why}\n", ""));
             }
             Some(Progress::WaitingOnMount) => out.push_str(&format!(
-                "  {:<wid$}  processes are using its mount: free it, or run `startfs update --force` on that node\n",
+                "  {:<wid$}  processes are using its mount: free it, or run `startfs update --force`\n",
                 ""
             )),
             _ => {}

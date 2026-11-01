@@ -213,10 +213,13 @@ ADR 0007 and `daemon/upgrade.rs`. Every member stages the release through the `I
 one runs the embedded `scripts/install.sh` in stage, apply, latest and mount-check modes) and learns the
 target's protocol from the staged binary. Same protocol: a rolling upgrade, lowest member first, each
 announcing an upgrade pause (honoured in `with_view` and `status`: nothing new sent, no stand-ins, verdict
-kept) and starting only when nobody is paused or still away and nothing is short of copies. Different
+kept) and starting only when nobody is paused or still away and nothing is down to its last copy (a
+chunk short of a copy, such as one whose third copy is on a laptop asleep, does not hold a restart back:
+a restart loses nothing). Different
 protocol: a lockstep upgrade, one go-signal from the issuer once every member not absent has staged; stages
 expire after 10 minutes without the issuer; each node rolls back alone. A member is absent only after the
-asleep threshold. A busy mount holds the restart (staged, reported) until freed or `update --force`.
+asleep threshold. A busy mount holds the restart (staged, reported) until freed or `update --force`, which
+rides on the gossiped intent so one command releases every busy member.
 Not done: keeping the mount across the restart (out of scope), skipping the post-restart re-check, and
 authenticating the update request (the tailnet is trusted).
 

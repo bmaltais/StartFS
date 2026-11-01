@@ -356,6 +356,41 @@ fn a_busy_mount_stages_but_waits_for_the_user_and_is_reported() {
 }
 
 #[test]
+fn update_force_on_one_member_restarts_every_busy_member() {
+    let c = Cluster::with_filesystem(2, 3, "");
+    write_files(&c, 12);
+    c.publish(NEXT);
+    c.set_mount_in_use(1, true);
+    c.set_mount_in_use(2, true);
+    c.control(0).update(None).unwrap();
+    until(&c, || c.release_of(0) == NEXT);
+    c.elapse(30 * MINUTE);
+    assert!(!all_on(&c, NEXT), "the busy members wait");
+
+    // Forced from one member, without visiting the busy ones.
+    c.control(0).update_with(None, true).unwrap();
+    until(&c, || all_on(&c, NEXT));
+}
+
+#[test]
+fn a_member_asleep_with_copies_short_does_not_hold_up_a_rolling_upgrade() {
+    // Three copies on three members: with one asleep there is nowhere for a stand-in,
+    // so every chunk stays short a copy, yet none is down to its last.
+    let c = Cluster::with_filesystem(3, 3, "");
+    write_files(&c, 12);
+    c.crash(2);
+    c.elapse(30 * MINUTE);
+    assert_eq!(
+        c.control(0).status().unwrap().verdict,
+        Some(Verdict::Degraded)
+    );
+
+    c.publish(NEXT);
+    c.control(0).update(None).unwrap();
+    until(&c, || c.release_of(0) == NEXT && c.release_of(1) == NEXT);
+}
+
+#[test]
 fn a_busy_mount_that_is_freed_lets_the_member_restart_without_being_told() {
     let c = Cluster::with_filesystem(2, 2, "");
     c.publish(NEXT);
