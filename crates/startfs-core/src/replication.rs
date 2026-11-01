@@ -753,13 +753,14 @@ impl Replicator {
         busy
     }
 
-    /// A peer asks us to hold a chunk (or asks whether we do).
+    /// A peer asks us to hold a chunk (or asks whether we do). A chunk taken is on disk but not
+    /// yet synced: the caller syncs before it answers `Stored`.
     pub fn on_push(&self, view: &View<'_>, id: &ChunkId, data: Option<&[u8]>) -> Replica {
         match data {
             None => self.fs.replica_standing(id, view.offer),
             Some(bytes) if blake3::hash(bytes).as_bytes() == id => self
                 .fs
-                .store_replica(bytes, view.offer)
+                .store_replica_lazy(*id, bytes, view.offer)
                 .unwrap_or(Replica::Full),
             Some(_) => Replica::Full,
         }
