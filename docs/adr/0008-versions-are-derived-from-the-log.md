@@ -35,6 +35,9 @@ The window counts from when a version was replaced, not from when it was written
   now (or creates the file), as an ordinary write, so it replicates and can itself be undone. For a
   directory it does so for every file last placed under it, and brings back the deleted directories
   they need, so an `rm -rf` is undone in one step.
+- Versions begin when a database first runs a release that keeps them: a deletion stamped before
+  that (on a database an earlier release wrote, from the 1.11.0 rollout) is not one, since its
+  chunks may already be gone.
 - `purge` does not touch versions: what they hold is released by shortening the window.
 
 This changes the state transfer message, so it bumps the protocol version (ADR 0002).
