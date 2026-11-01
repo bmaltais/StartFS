@@ -31,7 +31,9 @@ and checks that it relearns the value.
   not heard itself for asleep or lost from that relayed time, not from its own start, so it does
   not wait out those delays again for a member long gone (never the other way: a relayed sighting
   does not make a member look more recently seen than the daemon's start). Down is still judged
-  on its own sightings: a peer just back from a suspend relays stale ones.
+  on its own sightings: a peer just back from a suspend relays stale ones. A member not heard
+  since the daemon started is relayed as unseen at least since then (or since what its peers
+  relayed), a lower bound, so the knowledge outlives one-at-a-time restarts.
 - The single-copy chunks a member that is not up last reported (`Health.reports`).
 - When each member was last seen asleep (`Health.slept`), which sets how long stand-in copies are
   kept. Ages are rounded up when sent, so a time handed from node to node never creeps later.

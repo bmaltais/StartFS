@@ -222,6 +222,32 @@ fn a_restarted_node_covers_for_a_member_long_asleep_without_waiting_the_stand_in
 }
 
 #[test]
+fn after_every_member_restarted_together_a_later_restart_still_covers_for_the_sleeper_at_once() {
+    let c = Cluster::with_filesystem(3, 5, "");
+    write_files(&c, 24);
+    c.crash(4);
+    c.elapse(10 * MINUTE);
+    // A lockstep upgrade: nobody has seen member 4 since it started.
+    for i in 0..4 {
+        c.crash(i);
+    }
+    for i in 0..4 {
+        c.restart(i);
+    }
+    c.elapse(10 * MINUTE);
+
+    c.crash(0);
+    c.restart(0);
+    settle(&c);
+    for i in 0..24 {
+        let f = c.fs(0).create(ROOT_INO, &format!("g{i}"), 0o644).unwrap();
+        c.fs(0).write(f.ino, 0, &noise(8 * 1024, 100 + i)).unwrap();
+    }
+    settle(&c);
+    assert!(!degraded(&c, &[0, 1, 2, 3]));
+}
+
+#[test]
 fn a_file_written_while_a_member_sleeps_is_covered_for_when_only_the_writer_is_left() {
     // Three copies on four members, one asleep: for a chunk placed on the sleeper the
     // only member left to stand in is the one that wrote it.
