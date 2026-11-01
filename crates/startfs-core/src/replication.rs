@@ -556,7 +556,7 @@ impl Replicator {
         }
         let track = st.tracks.get_mut(id).expect("tracked");
         track.queued_at.get_or_insert(view.now);
-        let held = self.fs.has_replica(id);
+        let mut held = self.fs.has_replica(id);
         let needed = standins_needed(view, &targets, &track.holders, held);
         if needed > 0 {
             let out: HashSet<MemberId> = skip
@@ -564,11 +564,29 @@ impl Replicator {
                 .chain(view.sleeping)
                 .copied()
                 .collect();
-            let stand_ins: Vec<MemberId> = place(id, view.members, view.members.len() as u32, &out)
-                .into_iter()
-                .filter(|m| *m != view.me && !track.holders.contains(m) && !targets.contains(m))
+            let candidates: Vec<MemberId> =
+                place(id, view.members, view.members.len() as u32, &out)
+                    .into_iter()
+                    .filter(|m| !track.holders.contains(m) && !targets.contains(m))
+                    .collect();
+            let mut stand_ins: Vec<MemberId> = candidates
+                .iter()
+                .copied()
+                .filter(|m| *m != view.me)
                 .take(needed as usize)
                 .collect();
+            // When no other member can take it, the writer keeps its own copy as the stand-in
+            // (a small cluster with one member asleep): releasing it would leave the chunk short
+            // until the sleeper is given up for lost.
+            if stand_ins.len() < needed as usize
+                && staged
+                && !held
+                && candidates.contains(&view.me)
+                && self.fs.promote(id, view.offer).ok() == Some(Replica::Stored)
+            {
+                held = true;
+                stand_ins.push(view.me);
+            }
             targets.extend(stand_ins);
         }
         // Of several holders, only one (picked per chunk by hash, so the work

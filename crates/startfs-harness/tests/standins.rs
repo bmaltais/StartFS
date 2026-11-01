@@ -199,3 +199,40 @@ fn a_restarted_node_relearns_from_the_others_whose_stand_ins_are_kept() {
     let left = left.expect("the others remember that member 3 slept");
     assert!(left > 22 * 3600 && left <= 24 * 3600, "{left}");
 }
+
+#[test]
+fn a_restarted_node_covers_for_a_member_long_asleep_without_waiting_the_stand_in_delay() {
+    // Five members, so every stand-in has a member other than the writer to go to.
+    let c = Cluster::with_filesystem(3, 5, "");
+    write_files(&c, 24);
+    c.crash(4);
+    c.elapse(10 * MINUTE);
+    c.crash(0);
+    c.restart(0);
+    settle(&c);
+
+    // Written within a minute of the restart: the others say member 4 has long been
+    // gone, so node 0 need not wait to see it unseen for itself.
+    for i in 0..24 {
+        let f = c.fs(0).create(ROOT_INO, &format!("g{i}"), 0o644).unwrap();
+        c.fs(0).write(f.ino, 0, &noise(8 * 1024, 100 + i)).unwrap();
+    }
+    settle(&c);
+    assert!(!degraded(&c, &[0, 1, 2, 3]));
+}
+
+#[test]
+fn a_file_written_while_a_member_sleeps_is_covered_for_when_only_the_writer_is_left() {
+    // Three copies on four members, one asleep: for a chunk placed on the sleeper the
+    // only member left to stand in is the one that wrote it.
+    let c = Cluster::with_filesystem(3, 4, "");
+    write_files(&c, 24);
+    c.crash(3);
+    c.elapse(10 * MINUTE);
+    for i in 0..24 {
+        let f = c.fs(0).create(ROOT_INO, &format!("g{i}"), 0o644).unwrap();
+        c.fs(0).write(f.ino, 0, &noise(8 * 1024, 100 + i)).unwrap();
+    }
+    c.elapse(10 * MINUTE);
+    assert!(!degraded(&c, &[0, 1, 2]));
+}

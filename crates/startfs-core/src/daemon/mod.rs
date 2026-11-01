@@ -722,8 +722,9 @@ impl Daemon {
         // A member that announced an upgrade pause is expected back: it is not counted
         // down or asleep, and is sent nothing new meanwhile.
         let paused = self.paused_members(now);
-        let lost = self.unseen_members(&members, me, grace, now);
-        let mut down = self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), now);
+        let lost = self.unseen_members(&members, me, grace, true, now);
+        let mut down =
+            self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), false, now);
         down.retain(|m| !paused.contains(m));
         let (mut sleeping, kept) = self.sleepers(&members, me, grace, standin_days, now);
         sleeping.retain(|m| !paused.contains(m));
@@ -781,7 +782,7 @@ impl Daemon {
         let sleeping = if settling {
             HashSet::new()
         } else {
-            self.unseen_members(members, me, grace.min(STANDIN_AFTER.as_secs()), now)
+            self.unseen_members(members, me, grace.min(STANDIN_AFTER.as_secs()), true, now)
         };
         let retention = Duration::from_secs(standin_days * 24 * 3600).as_nanos() as u64;
         let mut slept = self.slept.lock().unwrap();
@@ -807,21 +808,29 @@ impl Daemon {
         Some(Duration::from_nanos(left).as_secs())
     }
 
-    /// Members unseen for `secs`.
+    /// Members unseen for `secs`; with `relayed`, by what peers relayed too
+    /// ([`standing::unseen_since`]), for the long waits only.
     fn unseen_members(
         &self,
         members: &[Member],
         me: MemberId,
         grace: u64,
+        relayed: bool,
         now: Nanos,
     ) -> HashSet<MemberId> {
         let heard = self.heard.lock().unwrap();
+        let peer_health = self.peer_health.lock().unwrap();
         let grace = Duration::from_secs(grace).as_nanos() as u64;
         members
             .iter()
             .filter(|m| m.id != me)
             .filter(|m| {
-                let seen = heard.get(&m.endpoint).copied().unwrap_or(self.started);
+                let own = heard.get(&m.endpoint).copied();
+                let seen = if relayed {
+                    standing::unseen_since(own, m.id, &peer_health, self.started)
+                } else {
+                    own.unwrap_or(self.started)
+                };
                 now.saturating_sub(seen) >= grace
             })
             .map(|m| m.id)

@@ -27,7 +27,11 @@ and checks that it relearns the value.
 
 ## What is relayed
 
-- When each member was last seen (`Health.seen`).
+- When each member was last seen (`Health.seen`). A restarted daemon also takes a member it has
+  not heard itself for asleep or lost from that relayed time, not from its own start, so it does
+  not wait out those delays again for a member long gone (never the other way: a relayed sighting
+  does not make a member look more recently seen than the daemon's start). Down is still judged
+  on its own sightings: a peer just back from a suspend relays stale ones.
 - The single-copy chunks a member that is not up last reported (`Health.reports`).
 - When each member was last seen asleep (`Health.slept`), which sets how long stand-in copies are
   kept. Ages are rounded up when sent, so a time handed from node to node never creeps later.
