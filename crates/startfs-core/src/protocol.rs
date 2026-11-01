@@ -56,6 +56,9 @@ pub enum Message {
     /// protocol version (ADR 0006). It never goes through the enum's own encoding:
     /// see [`NOTICE_BYTE`].
     UpgradeNotice(UpgradeNotice),
+    /// How long the filesystem keeps versions, in seconds, and the revision of
+    /// that setting; the higher revision wins, a tie goes to the longer window.
+    KeepVersions { secs: u64, rev: u64 },
 }
 
 /// Which release the cluster is on, sent to a member that cannot otherwise hear
@@ -82,7 +85,7 @@ pub enum Category {
     Chunk,
     /// Operation log entries and state transfer.
     Metadata,
-    /// Hello, members, tokens, health, the copies setting and upgrades.
+    /// Hello, members, tokens, health, the copies and versions settings and upgrades.
     Gossip,
     /// Joining and storage-figure queries.
     Other,
@@ -193,9 +196,9 @@ impl Message {
     /// Whether an encoded message is periodic gossip that nothing waits on, so a node that is
     /// idle need not wake for it: it reads it at its next round.
     pub fn is_background(raw: &[u8]) -> bool {
-        // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`
-        // and `Upgrade`.
-        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16))
+        // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`,
+        // `Upgrade` and `KeepVersions`.
+        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16 | 18))
     }
 
     /// What an encoded message is for, as the activity view groups traffic.
@@ -207,7 +210,7 @@ impl Message {
         match raw.get(1) {
             Some(6..=9) => Category::Chunk,
             Some(1 | 2) => Category::Metadata,
-            Some(0 | 3 | 10..=12 | 13) => Category::Gossip,
+            Some(0 | 3 | 10..=12 | 13 | 18) => Category::Gossip,
             _ => Category::Other,
         }
     }
@@ -281,7 +284,7 @@ mod tests {
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
         17,
-        "79d2613e14ff3545a020926446376c6d240b266e9faa06331aa2832186f95020",
+        "d86acc7c2c54134c4fb8a82819f85de2ae63c800058062fad4628b9224c2c544",
     );
 
     #[test]
@@ -355,6 +358,7 @@ mod tests {
                 },
             }),
             Message::Copies { copies: 3, rev: 2 },
+            Message::KeepVersions { secs: 4, rev: 5 },
             Message::StateChunk(StateChunk {
                 pin: crate::oplog::StatePin {
                     frontier: Frontier::from([(MemberId(1), 2)]),
@@ -397,6 +401,7 @@ mod tests {
                     raw_chunks: 9,
                     zstd_chunks: 10,
                     zstd_plain_bytes: 11,
+                    version_bytes: 13,
                 },
                 pending_gc_bytes: 12,
             }),
@@ -444,6 +449,7 @@ mod tests {
             Message::Tokens(vec![]),
             Message::Health(Health::default()),
             Message::Copies { copies: 3, rev: 2 },
+            Message::KeepVersions { secs: 4, rev: 5 },
             Message::Upgrade(UpgradeGossip {
                 running: crate::upgrade::Release {
                     version: "1.10.0".into(),

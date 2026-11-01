@@ -567,8 +567,14 @@ impl Daemon {
                 .unwrap()
                 .copies_setting()
                 .map(|(copies, rev)| Message::Copies { copies, rev }.encode());
+            let versions_msg = self
+                .membership
+                .lock()
+                .unwrap()
+                .keep_versions_setting()
+                .map(|(secs, rev)| Message::KeepVersions { secs, rev }.encode());
             for p in &peers {
-                if let Some(msg) = &copies_msg {
+                for msg in copies_msg.iter().chain(&versions_msg) {
                     transport.send(*p, msg.clone());
                 }
                 transport.send(*p, members_msg.clone());

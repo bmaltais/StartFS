@@ -124,6 +124,18 @@ its own side); counters only cover the current daemon run; and `startfs config -
 resource figures and queue are live. Report the figures and the reading; do not claim a cause
 the table does not support.
 
+## Get an earlier version of a file back
+
+An overwritten or deleted file keeps its earlier version for 7 days (the filesystem's window) on
+every member. `startfs history PATH` lists the versions of the file at PATH (a path under the mount,
+or in the filesystem; deleted directories work too), oldest first, each named by its restore point
+(`YYYYMMDD-HHMMSS.mmm`, UTC) and whether it was replaced, deleted or is current. `startfs restore
+PATH --at POINT` brings the file back to what it held at that instant; it is a write like any other,
+so what it replaces is kept as a version and the restore can be undone the same way. Confirm the
+version with the user before restoring over a file they may have changed since. A state that lasted
+under 30 s is not kept. `startfs config --keep-versions 3d` (or `12h`, `0` for none) changes the
+window for every member; `status` shows the bytes only versions use.
+
 ## Free space after deleting files
 
 Deleted files keep their data for 7 days. If the user is short of disk now, or has just deleted a
@@ -131,7 +143,9 @@ test tree, `startfs purge` frees it on every member. It cannot be undone, so run
 user has said the deleted files are not needed. It refuses while any member is down (it names them;
 bring them back, or `startfs remove` one that is gone for good). Afterwards `startfs status` shows
 `garbage collection: purge in progress` while it works, and names a member holding it back. Only
-files deleted before the purge are freed; run it again if a daemon restarted meanwhile. Every member
+files deleted before the purge are freed, and not what a kept version still uses: to free that
+too, shorten the window first (`startfs config --keep-versions 0`), with the same care, since the
+versions are then gone. Run it again if a daemon restarted meanwhile. Every member
 must run protocol 12 (release 1.5.0 or newer).
 
 ## Retire or remove a machine

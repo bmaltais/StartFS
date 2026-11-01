@@ -5,7 +5,7 @@ A filesystem replicated across a group of machines (members) that each hold its 
 ## Language
 
 **Logical size**:
-The bytes the files in the visible tree add up to, what the user thinks they stored. `df` reports it as used.
+The bytes the files in the visible tree add up to, what the user thinks they stored. `df` reports it as used, plus the bytes only kept versions use.
 _Avoid_: Apparent size
 
 **Referenced bytes**:

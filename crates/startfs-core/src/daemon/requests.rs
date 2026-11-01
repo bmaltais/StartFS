@@ -47,8 +47,12 @@ impl Daemon {
                 copies,
                 activity,
                 site,
+                keep_versions_secs,
             } => {
                 self.configure(offer_bytes, weight_bytes, copies, activity, site)?;
+                if let Some(secs) = keep_versions_secs {
+                    self.membership.lock().unwrap().set_keep_versions(secs)?;
+                }
                 Response::Done
             }
             Request::Revoke { token } => {

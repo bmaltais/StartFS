@@ -51,6 +51,9 @@ pub enum Request {
         /// Declare where this node lives; empty clears it (it is then its own site).
         #[serde(default)]
         site: Option<String>,
+        /// Change how long the filesystem keeps versions, in seconds (for every member).
+        #[serde(default)]
+        keep_versions_secs: Option<u64>,
     },
     /// Make a token we issued stop working.
     Revoke {
@@ -250,6 +253,10 @@ pub struct Efficiency {
     /// Plaintext bytes of the chunks compressed with zstd.
     #[serde(default)]
     pub zstd_plain_bytes: u64,
+    /// Plaintext bytes of the distinct chunks that only kept versions use: what
+    /// history holds beyond the tree. `df` counts it as used.
+    #[serde(default)]
+    pub version_bytes: u64,
 }
 
 /// One node's storage figures: what it holds and how well it is stored.
@@ -705,6 +712,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -720,6 +728,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -734,6 +743,22 @@ impl Client {
             copies: Some(copies),
             activity: None,
             site: None,
+            keep_versions_secs: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Change how long the filesystem keeps versions, on every member; 0 keeps none.
+    pub fn set_keep_versions(&self, secs: u64) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            weight_bytes: None,
+            copies: None,
+            activity: None,
+            site: None,
+            keep_versions_secs: Some(secs),
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -748,6 +773,7 @@ impl Client {
             copies: None,
             activity: None,
             site: Some(site.into()),
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
@@ -762,6 +788,7 @@ impl Client {
             copies: None,
             activity: Some(on),
             site: None,
+            keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),

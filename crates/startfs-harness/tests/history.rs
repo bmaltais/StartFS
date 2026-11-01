@@ -221,3 +221,56 @@ fn a_restore_point_where_the_path_held_nothing_is_refused() {
     assert!(c.control(0).restore("/a", before).is_err());
     assert!(c.control(0).restore("/nothing", c.now()).is_err());
 }
+
+#[test]
+fn the_window_set_on_one_member_applies_on_every_member() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    c.control(1).set_keep_versions(3 * 86400).unwrap();
+    pass(&c, MINUTE, Duration::from_secs(10));
+    for i in 0..3 {
+        let f = c.control(i).status().unwrap().filesystem.unwrap();
+        assert_eq!(f.keep_versions_secs, 3 * 86400, "node {i}");
+    }
+}
+
+#[test]
+fn shortening_the_window_releases_the_versions_past_it() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let f = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    pass(&c, HOUR, 10 * MINUTE);
+    c.fs(0).write(f, 0, &noise(8 * 1024, 2)).unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+    assert_eq!(c.control(2).history("/a").unwrap().len(), 2);
+
+    c.control(2).set_keep_versions(0).unwrap();
+    pass(&c, 2 * HOUR, 10 * MINUTE);
+    assert_eq!(c.control(0).history("/a").unwrap().len(), 1);
+    assert_eq!(
+        total_replicas(&c),
+        2,
+        "the released version's chunks are trimmed"
+    );
+}
+
+#[test]
+fn status_and_df_count_the_bytes_only_versions_hold() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let f = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    put(&c.fs(0), "b", &noise(4 * 1024, 2));
+    pass(&c, HOUR, 10 * MINUTE);
+    c.fs(0).write(f, 0, &noise(9 * 1024, 3)).unwrap();
+    c.fs(0).unlink(ROOT_INO, "b").unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    for i in 0..3 {
+        let s = c.control(i).status().unwrap();
+        let e = s.efficiency;
+        assert_eq!(e.logical_bytes, 9 * 1024, "node {i}");
+        assert_eq!(e.version_bytes, 12 * 1024, "node {i}");
+        assert_eq!(
+            s.gc.pending_bytes, 0,
+            "node {i}: versions are not waiting for GC"
+        );
+        assert_eq!(c.fs(i).space().unwrap().used_bytes, 21 * 1024, "node {i}");
+    }
+}

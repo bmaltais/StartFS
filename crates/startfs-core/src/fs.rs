@@ -1251,7 +1251,8 @@ impl FsOps for LocalFs {
     }
 
     fn space(&self) -> FsResult<Space> {
-        let used_bytes = self.logical_bytes()?;
+        let (files, versions) = self.used_bytes()?;
+        let used_bytes = files + versions;
         Ok(Space {
             used_bytes,
             total_bytes: self.usable_bytes.load(Ordering::SeqCst).max(used_bytes),

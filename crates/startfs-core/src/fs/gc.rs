@@ -79,6 +79,11 @@ impl LocalFs {
                     continue;
                 }
                 let first = *since.entry(id.to_vec()).or_insert(now);
+                if versioned.contains_key(&id) {
+                    // Held by a version, not waiting for GC: its retention runs meanwhile.
+                    t.orphans.insert(id.as_slice(), first).map_err(db)?;
+                    continue;
+                }
                 let eligible_at = if purge_cutoff.is_some_and(|cutoff| first <= cutoff) {
                     first
                 } else {
@@ -88,7 +93,7 @@ impl LocalFs {
                 if held {
                     report.held_since = report.held_since.max(Some(eligible_at));
                 }
-                if now >= eligible_at && !held && !versioned.contains(&id) {
+                if now >= eligible_at && !held {
                     doomed.push(id);
                     t.orphans.remove(id.as_slice()).map_err(db)?;
                     report.reclaimed_chunks += 1;
@@ -129,7 +134,7 @@ impl LocalFs {
             // the tree leaves something out, since it reads every object's register.
             if !orphans.is_empty() {
                 let versioned = t.version_chunks(self.clock.now(), self.window(), false)?;
-                orphans.retain(|id| !versioned.contains(id));
+                orphans.retain(|id| !versioned.contains_key(id));
             }
             Ok(orphans)
         })?;

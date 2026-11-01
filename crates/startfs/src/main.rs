@@ -52,12 +52,15 @@ commands:
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
   config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off] [--site NAME]
+         [--keep-versions DURATION]
                                       change this node's space offer (sizes like 500M, 2T), its
                                       weight (the share of new copies it takes, in the same
                                       units; 0: follow the offer), the filesystem's number of
                                       copies on every node, or whether this node keeps the
                                       counters behind `activity` (until restart), or the site
-                                      this node declares (empty: none, so it is its own site)";
+                                      this node declares (empty: none, so it is its own site),
+                                      or how long every node keeps a replaced or deleted file's
+                                      earlier version (like 7d, 36h; 0: none)";
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
@@ -81,6 +84,8 @@ enum CliError {
         "not a restore point: {0} (expected YYYYMMDD-HHMMSS[.fff] in UTC, as `startfs history` shows)"
     )]
     BadRestorePoint(String),
+    #[error("not a duration: {0} (expected a number and a unit, like 7d, 36h, 90m or 30s; or 0)")]
+    BadDuration(String),
     #[error("not a size: {0}")]
     BadSize(String),
     #[error("{}: {source}", path.display())]
@@ -249,6 +254,11 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                     _ => return Err(CliError::ActivityNotOnOff),
                 };
                 Client::new(socket.clone()).set_activity(on)?;
+            }
+            if let Ok(window) = flag_value(rest, "--keep-versions") {
+                let secs =
+                    parse_duration(&window).ok_or_else(|| CliError::BadDuration(window.clone()))?;
+                Client::new(socket.clone()).set_keep_versions(secs)?;
             }
             if let Ok(copies) = flag_value(rest, "--copies") {
                 let copies = copies
@@ -477,7 +487,14 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "update" => (&[], &["--force"], 1),
         "remove" | "revoke" => (&[], &[], 1),
         "config" => (
-            &["--offer", "--weight", "--copies", "--activity", "--site"],
+            &[
+                "--offer",
+                "--weight",
+                "--copies",
+                "--activity",
+                "--site",
+                "--keep-versions",
+            ],
             &[],
             0,
         ),
@@ -531,6 +548,24 @@ fn parse_size(text: &str) -> Result<u64, CliError> {
         .ok()
         .and_then(|n| n.checked_mul(1 << shift))
         .ok_or_else(bad)
+}
+
+/// Seconds in a duration like `7d`, `36h`, `90m` or `30s`; a bare `0` is none.
+fn parse_duration(text: &str) -> Option<u64> {
+    if text == "0" {
+        return Some(0);
+    }
+    let unit = match text.chars().last()? {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return None,
+    };
+    text[..text.len() - 1]
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(unit)
 }
 
 fn optional_size(args: &[String], name: &str) -> Result<Option<u64>, CliError> {
@@ -867,8 +902,16 @@ fn ratio(a: u64, b: u64) -> Option<String> {
 /// of it, and this node's share of the replicas.
 fn efficiency_lines(s: &Status, copies: u32) -> String {
     let e = &s.efficiency;
+    let versions = match (&s.filesystem, e.version_bytes) {
+        (Some(f), bytes) if bytes > 0 => format!(
+            "  plus {} that only earlier versions use, kept {} after they were replaced (`startfs history PATH`)\n",
+            human(bytes),
+            time_left(f.keep_versions_secs)
+        ),
+        _ => String::new(),
+    };
     if e.logical_bytes == 0 {
-        return "storage: no files yet\n".into();
+        return format!("storage: no files yet\n{versions}");
     }
     let mut out = format!(
         "storage: {} in files, {} after dedup",
@@ -914,6 +957,7 @@ fn efficiency_lines(s: &Status, copies: u32) -> String {
             human(s.gc.pending_bytes)
         ));
     }
+    out.push_str(&versions);
     out
 }
 

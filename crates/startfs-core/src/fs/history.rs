@@ -9,7 +9,7 @@ use super::merge::{Object, Version};
 use super::*;
 use crate::chunkstore::ChunkId;
 use crate::control::VersionInfo;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// A state that lasted less than this is not kept: the files a build writes and
@@ -154,7 +154,7 @@ impl Tables<'_> {
         Ok(())
     }
 
-    /// The chunks of every version kept at `now`: the earlier versions of
+    /// The chunks (and their plaintext sizes) of every version kept at `now`: the earlier versions of
     /// objects, and the last version of each deleted one. Versions no longer
     /// kept are forgotten on the way when `prune` is set.
     pub(super) fn version_chunks(
@@ -162,8 +162,8 @@ impl Tables<'_> {
         now: Nanos,
         window: Nanos,
         prune: bool,
-    ) -> FsResult<HashSet<ChunkId>> {
-        let mut out = HashSet::new();
+    ) -> FsResult<HashMap<ChunkId, u64>> {
+        let mut out = HashMap::new();
         let mut gone = Vec::new();
         for row in self.history.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
@@ -171,7 +171,7 @@ impl Tables<'_> {
             if !kept(past.version.hlc, past.until, now, window) {
                 gone.push(k.value());
             } else if let Content::Chunks(refs) = past.version.content {
-                out.extend(refs.into_iter().map(|r| r.id));
+                out.extend(refs.into_iter().map(|r| (r.id, u64::from(r.len))));
             }
         }
         if prune {
@@ -191,7 +191,7 @@ impl Tables<'_> {
             if kept(last.hlc, death, now, window)
                 && let Content::Chunks(refs) = &last.content
             {
-                out.extend(refs.iter().map(|r| r.id));
+                out.extend(refs.iter().map(|r| (r.id, u64::from(r.len))));
             }
         }
         Ok(out)
