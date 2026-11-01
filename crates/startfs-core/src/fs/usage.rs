@@ -12,39 +12,21 @@ impl LocalFs {
     }
 
     /// What `df` counts as used: the bytes the files in the tree add up to, and the
-    /// bytes only kept versions use. Cheaper than [`Self::efficiency`], for `df`, which polls.
-    pub(super) fn used_bytes(&self) -> FsResult<(u64, u64)> {
+    /// bytes only kept versions use, as the last GC pass found them (working those out reads
+    /// every object's register, too much for `df`, which polls).
+    pub(super) fn used_bytes(&self) -> FsResult<u64> {
         self.flush_all_logged(false, 0);
-        let (now, window) = (self.clock.now(), self.window());
-        self.run(false, |t| {
+        let files = self.run(false, |t| {
             let mut total = 0;
-            let mut referenced: HashSet<ChunkId> = HashSet::new();
             for row in t.inodes.iter().map_err(db)? {
                 let inode = decode(row.map_err(db)?.1.value())?;
                 if inode.kind == FileKind::File {
                     total += inode.size;
-                    if let Content::Chunks(refs) = inode.content {
-                        referenced.extend(refs.into_iter().map(|r| r.id));
-                    }
                 }
             }
-            let versions = Self::only_versions(t, &referenced, now, window)?;
-            Ok((total, versions))
-        })
-    }
-
-    /// Plaintext bytes of the chunks kept versions use and the tree does not.
-    fn only_versions(
-        t: &mut Tables<'_>,
-        tree: &HashSet<ChunkId>,
-        now: Nanos,
-        window: Nanos,
-    ) -> FsResult<u64> {
-        Ok(t.version_chunks(now, window, false)?
-            .into_iter()
-            .filter(|(id, _)| !tree.contains(id))
-            .map(|(_, len)| len)
-            .sum())
+            Ok(total)
+        })?;
+        Ok(files + self.version_bytes.load(Ordering::SeqCst))
     }
 
     /// Logical size against the chunks the tree references, and how those
@@ -70,7 +52,7 @@ impl LocalFs {
                 }
             }
             let tree: HashSet<ChunkId> = referenced.keys().copied().collect();
-            out.version_bytes = Self::only_versions(t, &tree, now, window)?;
+            out.version_bytes = t.version_only_bytes(&tree, now, window)?;
             Ok(())
         })?;
         out.referenced_bytes = referenced.values().sum();

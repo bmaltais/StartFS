@@ -54,6 +54,12 @@ impl LocalFs {
                 }
             }
             let versioned = t.version_chunks(now, self.window(), true)?;
+            let only_versions = versioned
+                .iter()
+                .filter(|(id, _)| !referenced.contains(*id))
+                .map(|(_, len)| len)
+                .sum();
+            self.version_bytes.store(only_versions, Ordering::SeqCst);
             let mut present: HashMap<ChunkId, u64> = HashMap::new();
             for (id, size, _) in self.chunks.list()?.into_iter().chain(self.staging.list()?) {
                 *present.entry(id).or_default() += size;
@@ -80,7 +86,11 @@ impl LocalFs {
                 }
                 let first = *since.entry(id.to_vec()).or_insert(now);
                 if versioned.contains_key(&id) {
-                    // Held by a version, not waiting for GC: its retention runs meanwhile.
+                    // Held by a version, not waiting for GC: its retention runs meanwhile, but
+                    // never more than one retention behind, so that once the version is released
+                    // the gate still needs a catch-up from about then (a restore made elsewhere
+                    // just before may be on its way).
+                    let first = first.max(now.saturating_sub(retention));
                     t.orphans.insert(id.as_slice(), first).map_err(db)?;
                     continue;
                 }

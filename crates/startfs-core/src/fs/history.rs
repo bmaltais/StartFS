@@ -5,16 +5,16 @@
 //! so members holding the same entries hold the same versions; they live in
 //! their own table so that rebuilding the tree never decodes them.
 
-use super::merge::{Object, Version};
+use super::merge::{Object, Version, dec, enc, made_up};
 use super::*;
 use crate::chunkstore::ChunkId;
 use crate::control::VersionInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// A state that lasted less than this is not kept: the files a build writes and
 /// deletes within the replication hold still never leave the node.
-pub const MIN_VERSION_LIFE: Duration = Duration::from_secs(30);
+const MIN_VERSION_LIFE: Duration = Duration::from_secs(30);
 
 /// A restore point as `history` shows it: `YYYYMMDD-HHMMSS.mmm` in UTC.
 pub fn restore_point(wall: Nanos) -> String {
@@ -67,7 +67,8 @@ pub(super) struct Past {
     pub(super) until: Hlc,
 }
 
-type Key = (u64, u64, u32, u32);
+/// A row of the history table: the object, then the version's stamp.
+pub(super) type Key = (u64, u64, u32, u32);
 
 fn key(ino: Ino, h: Hlc) -> Key {
     (ino, h.wall, h.counter, h.node.0)
@@ -77,16 +78,8 @@ fn every(ino: Ino) -> std::ops::RangeInclusive<Key> {
     (ino, 0, 0, 0)..=(ino, u64::MAX, u32::MAX, u32::MAX)
 }
 
-fn enc<T: Serialize>(v: &T) -> Vec<u8> {
-    postcard::to_stdvec(v).expect("serialises")
-}
-
-fn dec<'a, T: Deserialize<'a>>(raw: &'a [u8]) -> FsResult<T> {
-    postcard::from_bytes(raw).map_err(|e| FsError::Io(format!("bad record: {e}")))
-}
-
 /// Whether a state that began at `start` and ended at `end` is kept at `now`.
-fn kept(start: Hlc, end: Hlc, now: Nanos, window: Nanos) -> bool {
+pub(super) fn kept(start: Hlc, end: Hlc, now: Nanos, window: Nanos) -> bool {
     end.wall.saturating_sub(start.wall) >= MIN_VERSION_LIFE.as_nanos() as u64
         && end.wall.saturating_add(window) > now
 }
@@ -146,6 +139,41 @@ impl Tables<'_> {
         self.retire(ino, past.version, past.until)
     }
 
+    /// Whether a deleted object still has a version kept at `now`: its last one,
+    /// or an earlier one. Its record stays while it does, so its path is known.
+    pub(super) fn keeps_versions(
+        &self,
+        ino: Ino,
+        o: &Object,
+        now: Nanos,
+        window: Nanos,
+    ) -> FsResult<bool> {
+        let last = o
+            .winner()
+            .zip(o.death())
+            .is_some_and(|(v, d)| kept(v.hlc, d, now, window));
+        Ok(last
+            || self
+                .versions_of(ino)?
+                .iter()
+                .any(|p| kept(p.version.hlc, p.until, now, window)))
+    }
+
+    /// Plaintext bytes of the chunks kept versions use and the tree (`tree`) does not.
+    pub(super) fn version_only_bytes(
+        &mut self,
+        tree: &HashSet<ChunkId>,
+        now: Nanos,
+        window: Nanos,
+    ) -> FsResult<u64> {
+        Ok(self
+            .version_chunks(now, window, false)?
+            .into_iter()
+            .filter(|(id, _)| !tree.contains(id))
+            .map(|(_, len)| len)
+            .sum())
+    }
+
     /// Forget every version of an object that is itself forgotten.
     pub(super) fn forget_versions(&mut self, ino: Ino) -> FsResult<()> {
         self.history
@@ -181,7 +209,7 @@ impl Tables<'_> {
         }
         for row in self.objects.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
-            if k.value() & (1 << 63) != 0 {
+            if made_up(k.value()) {
                 continue; // a conflict copy's own register
             }
             let o: Object = dec(v.value())?;
@@ -254,7 +282,7 @@ impl Tables<'_> {
         for row in self.objects.iter().map_err(db)? {
             let (k, v) = row.map_err(db)?;
             let ino = k.value();
-            if ino & (1 << 63) != 0 {
+            if made_up(ino) {
                 continue;
             }
             let o: Object = dec(v.value())?;

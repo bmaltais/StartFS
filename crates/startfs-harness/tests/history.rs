@@ -49,7 +49,9 @@ fn an_overwritten_files_earlier_data_is_kept_for_the_window_then_reclaimed() {
     pass(&c, 20 * HOUR, HOUR);
     assert_eq!(total_replicas(&c), 4, "reclaimed within the window");
 
-    pass(&c, 5 * HOUR, HOUR);
+    // Replaced at 1 h, so the window ends at 25 h and the retention with it: the longer of
+    // the two holds the data, not their sum (26 h).
+    pass(&c, 3 * HOUR + 30 * MINUTE, 10 * MINUTE);
     assert_eq!(total_replicas(&c), 2, "kept past the window");
 }
 
@@ -63,7 +65,8 @@ fn a_deleted_files_data_is_kept_for_the_window_then_reclaimed() {
     pass(&c, 20 * HOUR, HOUR);
     assert_eq!(total_replicas(&c), 2, "reclaimed within the window");
 
-    pass(&c, 6 * HOUR, HOUR);
+    // Deleted at 1 h: released at 25 h, not at the sum of window and retention (26 h).
+    pass(&c, 4 * HOUR + 30 * MINUTE, 10 * MINUTE);
     assert_eq!(total_replicas(&c), 0, "kept past the window");
 }
 

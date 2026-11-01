@@ -334,8 +334,8 @@ fn a_node_offline_across_a_compaction_still_converges() {
 
 #[test]
 fn deleted_files_leave_no_metadata_behind_once_every_member_has_caught_up() {
-    // No versions, which would keep the deleted files' records for their window.
-    let c = Cluster::with_filesystem(2, 3, "keep_versions_secs = 0");
+    // The files last under the 30 s that makes a version, so nothing keeps their records.
+    let c = cluster(2, 3);
     for i in 0..20 {
         put(&c.fs(0), &format!("f{i}"), b"x");
     }

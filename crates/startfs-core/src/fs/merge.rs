@@ -231,11 +231,17 @@ pub(super) fn lost_found_ino() -> Ino {
     u64::from_le_bytes(raw) | (1 << 63)
 }
 
-fn enc<T: Serialize>(v: &T) -> Vec<u8> {
+/// Whether the merge made the inode number up (a conflict copy or `lost+found`)
+/// rather than an object's own entries.
+pub(super) fn made_up(ino: Ino) -> bool {
+    ino & (1 << 63) != 0
+}
+
+pub(super) fn enc<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_stdvec(v).expect("serialises")
 }
 
-fn dec<'a, T: Deserialize<'a>>(raw: &'a [u8]) -> FsResult<T> {
+pub(super) fn dec<'a, T: Deserialize<'a>>(raw: &'a [u8]) -> FsResult<T> {
     postcard::from_bytes(raw).map_err(|e| FsError::Io(format!("bad record: {e}")))
 }
 
@@ -252,14 +258,12 @@ impl Tables<'_> {
             all.push((k.value(), dec::<Object>(v.value())?));
         }
         for (ino, mut o) in all {
-            if ino & (1 << 63) != 0 {
+            if made_up(ino) {
                 continue;
             }
             if o.kind.is_none() || !o.alive() {
                 // A deleted file is found by its last path while its versions are kept.
-                if o.death()
-                    .is_some_and(|d| d.wall.saturating_add(window) > now)
-                {
+                if self.keeps_versions(ino, &o, now, window)? {
                     continue;
                 }
                 self.objects.remove(ino).map_err(db)?;

@@ -207,16 +207,20 @@ build's short-lived files on the node.
 - The chunks of a kept version count as in use: the staging sweep keeps them, so they are replicated
   and repaired like the tree's, and GC reclaims them only once no kept version uses them. Such a
   chunk is still an orphan, so the GC retention runs alongside the window: it is held for the longer
-  of the two, not their sum. It is not counted as pending GC. `purge` leaves versions alone.
+  of the two, not their sum. It is not counted as pending GC. While a version holds it, its orphan
+  clock is kept no more than one retention behind, so once the version is released the reclaim gate
+  still needs a catch-up with every member from about then (a restore made elsewhere just before may
+  be on its way). `purge` leaves versions alone.
 - Versions past the window are dropped by each GC pass, and a deleted object's register by the next
-  settled compaction once its window has passed.
+  settled compaction once it keeps no version (at once for a file that lasted under 30 s).
 - `startfs history PATH` finds the path through deleted directories and lists the kept versions of
   every file or symlink last named there, each by its *restore point*, the instant it was written
   (`YYYYMMDD-HHMMSS.mmm`, UTC). `startfs restore PATH --at POINT` takes the version that the path held
   at that instant (a point stands for the end of the precision given) and writes it over what the
   path holds now, or creates the file again, in its deleted directory too; it is an ordinary write,
   so it replicates and can itself be undone. A path under the mount is taken as the file it shows.
-- `status` shows the bytes only versions use (`version_bytes`); `df` counts them as used.
+- `status` shows the bytes only versions use (`version_bytes`); `df` counts them as used, as the
+  last GC pass found them (up to 10 minutes old), since working them out reads every register.
 
 Not done: thinning (a file written every minute keeps one version per minute for the window, each a
 row of metadata), restoring a whole directory at once, and versions of directories themselves.
