@@ -255,6 +255,7 @@ had_binary=
 prev_saved=
 # Interrupted once the service may be stopped: put back the binary (only a finished copy)
 # and restart what was running, so the node is not left down on a half-done upgrade.
+# shellcheck disable=SC2329 # invoked by the trap below
 on_interrupt() {
   trap '' INT TERM HUP
   say "interrupted; restoring the previous state."

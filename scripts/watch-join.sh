@@ -19,6 +19,7 @@ JOINER=${JOINER:-vps2}; OFFER=${OFFER:-10G}
 BUSY_MAX=${BUSY_MAX:-90}; BUSY_SECS=${BUSY_SECS:-180}; TICK_MAX_MS=${TICK_MAX_MS:-10000}; DOWN_SECS=${DOWN_SECS:-45}
 HEALTHY_RSS_MIB=${HEALTHY_RSS_MIB:-1024}; JOINER_RSS_MIB=${JOINER_RSS_MIB:-2600}; DEADLINE=${DEADLINE:-1200}; GOOD=${GOOD:-1}
 read -ra HEALTHY <<< "${NODES:-local mini2 surface ocilab1 mini1}"
+# shellcheck disable=SC2088 # ~ expands in the shell that runs the command, local or remote
 BIN='~/.local/bin/startfs'
 LOG=${LOG:-/dev/null}
 T0=$(date +%s)
@@ -66,6 +67,7 @@ if [ -z "${SKIP_JOIN:-}" ]; then
   say "=== $JOINER: install $TAG without touching the service, keep the previous data dir aside"
   on "$JOINER" "curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | STARTFS_VERSION=$TAG STARTFS_NO_SERVICE=1 sh" 2>&1 | tail -3 | tee -a "$LOG"
   on "$JOINER" "$BIN --version" | grep -q "$WANT" || { say "$JOINER is not on $WANT, stopping"; exit 1; }
+  # shellcheck disable=SC2016 # expanded by the joiner's shell
   on "$JOINER" 'd=~/.local/share/startfs; if [ -e $d ]; then mv $d $d.attempt-$(date +%H%M%S) && echo moved; fi' | tee -a "$LOG"
   say "=== $JOINER: start the daemon and join with offer $OFFER"
   TOKEN=$(on local "$BIN token" | grep -o 'startfs1-[A-Za-z0-9_.@:-]*' | head -1)

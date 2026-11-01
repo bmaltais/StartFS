@@ -22,5 +22,5 @@ echo "whole flow (A daemon+create, B daemon+join, both list 2 nodes): $(elapsed 
 echo "commands: 4 (daemon, create, daemon, join); 2 if daemons come from a service unit"
 echo "--- status on B ---"; sf B status
 echo "hello" > "$WORK/A/mnt/x.txt"
-for i in $(seq 100); do [ -f "$WORK/B/mnt/x.txt" ] && break; sleep 0.1; done
+for _ in $(seq 100); do [ -f "$WORK/B/mnt/x.txt" ] && break; sleep 0.1; done
 echo "file written on A readable on B: $(cat "$WORK/B/mnt/x.txt")"

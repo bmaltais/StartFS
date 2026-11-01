@@ -14,6 +14,7 @@ FILES=${FILES:-6000}; SEED=${SEED:-$RANDOM$RANDOM}; WATCH_MAX=${WATCH_MAX:-900}
 TICK_MAX_MS=${TICK_MAX_MS:-10000}; BUSY_MAX=${BUSY_MAX:-90}; BUSY_SECS=${BUSY_SECS:-180}; DOWN_SECS=${DOWN_SECS:-45}
 SRC=${SRC:-${TMPDIR:-/tmp}/startfs-ingest-src}
 DEST=$HOME/StartFS/ingest-test-$SEED
+# shellcheck disable=SC2088 # ~ expands in the shell that runs the command, local or remote
 BIN='~/.local/bin/startfs'; T0=$(date +%s)
 say() { printf '[%4ds] %s\n' $(( $(date +%s) - T0 )) "$*"; }
 on() { local n=$1; shift; if [ "$n" = local ]; then bash -c "$*"; else ssh -o BatchMode=yes -o ConnectTimeout=8 "$n" "$*"; fi; }
@@ -35,7 +36,7 @@ mkdir -p "$DEST"; cp -r "$SRC/$SEED/." "$DEST/" & CP=$!
 VERDICT=GREEN; REASON=""; DOWNSINCE=0; SETTLED=0
 while :; do
   tmp=$(mktemp -d); for n in "${N[@]}"; do sample "$n" > "$tmp/$n" & done; wait
-  line="copy=$(kill -0 $CP 2>/dev/null && echo running || echo done)"
+  line="copy=$(kill -0 $CP 2>/dev/null && echo running || echo "done")"
   for n in "${N[@]}"; do
     read -r _ inbox busy tick data down queue < "$tmp/$n"
     line+=" | $n i=$inbox b=$busy t=${tick}ms q=$queue $data"
@@ -59,6 +60,6 @@ while :; do
 done
 say "peaks: node inbox busy% tick_ms queue"
 for n in "${N[@]}"; do printf '        %-8s %7s %5s %7s %6s\n' "$n" "${PEAK_INBOX[$n]}" "${PEAK_BUSY[$n]}" "${PEAK_TICK[$n]}" "${PEAK_Q[$n]}"; done
-rm -rf "$SRC/$SEED"
+rm -rf "${SRC:?}/$SEED"
 say "VERDICT: $VERDICT $REASON; test files are in $DEST (delete them, then run startfs purge)"
 [ $VERDICT = GREEN ]

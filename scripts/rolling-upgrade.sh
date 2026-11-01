@@ -69,7 +69,7 @@ wait_ready() {
   while :; do
     line=$(sample "$n" "$want") && ok=1 || ok=0
     el=$(( $(date +%s) - start ))
-    if [ $ok = 1 ] && [ "$el" -ge "$since" ]; then good=$((good + 1)); else good=0; fi
+    if [ "$ok" = 1 ] && [ "$el" -ge "$since" ]; then good=$((good + 1)); else good=0; fi
     say "$n: $line  [good $good/$GOOD, ${el}s]"
     [ "$good" -ge "$GOOD" ] && return 0
     [ "$el" -ge "$TIMEOUT" ] && { say "$n: NOT READY after ${TIMEOUT}s, stopping here"; return 1; }

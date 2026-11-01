@@ -38,6 +38,7 @@ if [ -n "${CAPBIG:-}" ]; then
 fi
 if [ -n "${CAP:-}" ]; then
   capscript J 200 "-p \"IOWriteIOPSMax=$DEV 500\" -p \"IOWriteBandwidthMax=$DEV 60M\""
+  # shellcheck disable=SC2034 # read by start_node through eval "wrap=\${WRAP_$name:-}"
   WRAP_J="$WORK/cap-J"
 fi
 say "starting 5 nodes"

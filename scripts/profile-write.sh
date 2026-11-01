@@ -24,7 +24,7 @@ if command -v strace >/dev/null && sudo -n strace -V >/dev/null 2>&1; then use_s
 # FILES is the number of files the command writes.
 run() {
   local label=$1 root=$2; shift 2
-  local sp= t0 u0 s0 u1 s1 wall cpu=""
+  local sp='' t0 u0 s0 u1 s1 wall cpu=""
   read -r u0 s0 <<<"$(awk '{print $14, $15}' "/proc/$PID_A/stat")"
   if [ -n "$use_strace" ] && [ "$root" = "$M" ]; then
     sudo -n strace -f -c -o "$WORK/strace.out" -p "$PID_A" 2>/dev/null & sp=$!

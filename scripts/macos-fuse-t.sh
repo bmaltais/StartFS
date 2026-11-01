@@ -5,6 +5,7 @@ set -eu
 brew tap macos-fuse-t/homebrew-cask
 brew install --cask fuse-t
 brew install pkg-config
+# shellcheck disable=SC2016 # ${libdir} is pkg-config's variable, written literally
 printf '%s\n' 'libdir=/usr/local/lib' 'Name: fuse' 'Description: FUSE-T as libfuse 2' \
   'Version: 2.9.9' 'Libs: -L${libdir} -Wl,-rpath,${libdir} -lfuse-t' \
   'Cflags: -I/usr/local/include/fuse' | sudo tee /usr/local/lib/pkgconfig/fuse.pc >/dev/null
