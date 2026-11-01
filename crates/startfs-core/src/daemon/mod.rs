@@ -284,6 +284,7 @@ impl Daemon {
         let fs = Arc::new(LocalFs::open(dir, node, config.cache_bytes, clock.clone())?);
         fs.set_staging_limit(staging_limit(&config, None, 0));
         fs.set_write_buffer_limit(config.write_buffer_bytes);
+        fs.set_write_commit_delay(Duration::from_millis(config.write_commit_delay_ms));
         let (read_cache, derived) = config.read_cache_limit(crate::config::total_ram_bytes());
         eprintln!(
             "startfs: read cache {} MiB ({})",

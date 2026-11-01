@@ -212,3 +212,34 @@ fn background_ticks_do_not_commit_a_file_that_is_still_being_written() {
         data.len()
     );
 }
+
+#[test]
+fn reopening_a_file_to_append_does_not_rewrite_its_tail_chunk_on_every_close() {
+    let c = Cluster::start_with_config(1, "write_commit_delay_ms = 1000");
+    let fs = c.fs(0);
+    let f = fs.create(ROOT_INO, "lib.a", 0o644).unwrap();
+    let body = noise(2 * MIB, 8);
+    fs.write(f.ino, 0, &body).unwrap();
+    fs.flush(f.ino).unwrap();
+    c.advance(std::time::Duration::from_secs(2));
+    c.tick();
+    let base = fs.stats().unwrap().stored_bytes;
+
+    // `ar`, a logger or `>>` in a loop: open, append a little, close.
+    let mut all = body.clone();
+    for i in 0..100u64 {
+        let piece = noise(4096, 100 + i);
+        fs.write(f.ino, all.len() as u64, &piece).unwrap();
+        fs.flush(f.ino).unwrap();
+        all.extend_from_slice(&piece);
+    }
+    let rewritten = fs.stats().unwrap().stored_bytes - base;
+    assert!(
+        rewritten < 2 * MIB as u64,
+        "{rewritten} bytes of chunks for 400 KiB appended"
+    );
+
+    c.advance(std::time::Duration::from_secs(2));
+    c.sync();
+    assert_eq!(read_all(&fs, f.ino), all);
+}

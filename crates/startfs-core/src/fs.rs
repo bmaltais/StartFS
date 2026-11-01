@@ -312,6 +312,8 @@ pub struct LocalFs {
     /// Signalled when a commit of a file's buffer ends.
     committed: Condvar,
     write_buffer_limit: AtomicU64,
+    /// How long the tick leaves a written file alone; a nonzero delay lets a close wait for it.
+    write_commit_delay: AtomicU64,
     /// The last commit failure logged by `flush_all_logged`.
     flush_error: Mutex<Option<String>>,
     /// Whether lazy commits have happened since the last durable one.
@@ -386,6 +388,7 @@ impl LocalFs {
             dirty: Mutex::new(HashMap::new()),
             committed: Condvar::new(),
             write_buffer_limit: AtomicU64::new(DEFAULT_WRITE_BUFFER),
+            write_commit_delay: AtomicU64::new(0),
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
             last_lazy: AtomicU64::new(0),
@@ -1113,7 +1116,7 @@ impl FsOps for LocalFs {
     }
 
     fn flush(&self, ino: Ino) -> FsResult<()> {
-        self.flush_ino(ino)
+        self.close_ino(ino)
     }
 
     fn fsync(&self, ino: Ino) -> FsResult<()> {

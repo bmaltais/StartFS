@@ -468,11 +468,14 @@ Limits found while validating v1 (details and numbers in `docs/validation.md`):
 - **Creates reach disk about a second late.** `create` and closing a file, whatever its size, do
   not wait for an fsync; the daemon makes them durable after `sync_quiet_ms` without activity, on `fsync`, before
   talking to peers and on clean shutdown. A power cut (not a killed process) can lose the last
-  second of creates and new file contents unless the file was fsynced. Overwriting or truncating
-  a file that has chunks still waits for disk, since the old chunks may be collected.
+  second of creates and new file contents unless the file was fsynced. Resizing
+  a file that has chunks to a size other than empty still waits for disk, since it stores new chunks.
 - **Writes are buffered.** A write is held in memory (up to `write_buffer_bytes` per file) and
   committed on `flush`, `fsync` and close, when the buffer fills, and once the file has been
   quiet for `write_commit_delay_ms`. Other nodes see a new file's content after that point.
+  Closing a file that already has chunks and is written at or before its end (an append or a
+  patch) leaves its commit to the same delay, so a loop that reopens a file to append stores its
+  tail chunk once, not at every close.
   Reads see buffered data at once, but if the daemon is killed before a commit, the
   buffered writes are lost, as with any POSIX filesystem that has not been synced. A clean
   shutdown commits them. A write can also fail at `flush`/`close` (for example with no space left),

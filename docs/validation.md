@@ -409,6 +409,27 @@ retention (the write buffer and the sweep of unreferenced staged chunks only cat
 before the first push). What the peers write for a file deleted within the hold is the metadata
 of its create and delete.
 
+## 12. Write amplification during a build (#165)
+
+`scripts/profile-amplification.sh` on one node through a real mount, bytes the daemon wrote per
+byte of payload (`/proc/PID/io`), 1.13.1 against the fix. A build was reported at about 12x (42 GiB
+written, 3.6 GiB stored); these steps reproduce its two causes.
+
+| Step | 1.13.1 | Fixed | Bound |
+|---|---|---|---|
+| write 300 objects (20 MiB) | 1.09x | 1.08x | 2x |
+| replace them (relink: `>` truncates first) | 7.07x | 1.30x | 2x |
+| append 400 x 4 KiB, reopening the file each time | 202x | 1.33x | 3x |
+| patch 50 files by 14 B | about 1 MiB per file | same | none |
+
+Each `setattr` (every `>` on an existing file, `touch`, `cp -p`) was a durable commit: an fsync
+and about 55 KiB of metadata pages, plus a read and re-store of the old content. It is lazy now,
+except a resize that stores new chunks. Each close of a file that already has chunks committed it,
+which stored the whole tail chunk again; it now waits for `write_commit_delay_ms` of quiet. A
+patch still stores one new chunk (up to 1 MiB) per patched file, the cost of the chunk size. The
+script exits non-zero when a bounded step goes over its bound (with `write_commit_delay_ms = 0`
+in `NODE_CONFIG`, the append step fails at 202x).
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU
