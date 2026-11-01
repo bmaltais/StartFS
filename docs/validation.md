@@ -464,8 +464,24 @@ After 1.13.3 (same sampler; the build cache shortcuts a rerun, so the loads diff
 So the fix helps under a moderate load and does not stop a heavy one from saturating the weak
 members. On a third 1.13.3 build (debug, 658 MB) the receiver's tick thread used about 38% of one
 core (mini1 36%, vps2 40%), 95% of it user time: a tick reported as busy spends most of its time
-waiting, not computing. What it waits on is not known yet (the pressure samples of that run were
-lost). #166 stays open.
+waiting for the CPU or the disk less than it looks: sampled ten times a second during a 130 s
+window with the build, the tick thread was running about 20% of the samples and in disk waits about
+10%, and the disk was busy 9 to 12% of the window (io pressure stalls under a second in total).
+
+Neither the disk nor the CPU is the limit, and what remains is a cost that follows the size of the
+tree. `PRE=30000 scripts/profile-burst.sh` first fills the filesystem with 30,000 tiny files, then
+runs the same 4000-chunk burst (single runs, tick thread CPU during the burst only):
+
+| tree on B | replicated | receive phase | longest tick | tick thread CPU |
+|---|---|---|---|---|
+| empty | 5.4 s | 18 ms | 72 ms | 2.3 s user, 0.9 s system |
+| 30,000 files | 10.4 s | 48 ms | 313 ms | 7.6 s user, 0.6 s system |
+
+Twenty thousand tiny files alone (no chunks) cost the receiver 14.5 s of user CPU, 0.7 ms per file.
+Section 7 says the same thing: each tick that applies entries rebuilds the tree by reading all of
+it, and the live one holds more than 26,000 objects. That is the next thing to fix for a build to
+stop saturating the weak members; the chunk sync of this section does not touch it. #166 stays open
+until that is measured on the live cluster.
 
 ## Defects found, not fixed
 
