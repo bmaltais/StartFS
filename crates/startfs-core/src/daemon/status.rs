@@ -145,27 +145,35 @@ impl Daemon {
     pub(super) fn local_health(&self) -> Health {
         let now = self.clock.now();
         // A member not heard since this daemon started is passed on as unseen at least since
-        // then, or since what the peers relayed: a lower bound, so the cluster keeps knowing
-        // how long it has been gone through restarts, as long as one member keeps running.
+        // what the peers relayed (never later than this start): a lower bound, so the cluster
+        // keeps knowing how long it has been gone through restarts, as long as one member keeps
+        // running. With nothing relayed, this daemon's own start is passed on only once it has
+        // run for the stand-in delay: a member that just restarted gossips before it has heard
+        // anyone, and its fresh start would otherwise win over what the others know (receivers
+        // take the latest sighting) and reset it at every rolling restart.
         let seen = {
             let membership = self.membership.lock().unwrap();
             let heard = self.heard.lock().unwrap();
             let peer_health = self.peer_health.lock().unwrap();
+            let settled =
+                now.saturating_sub(self.started) >= super::STANDIN_AFTER.as_nanos() as u64;
             membership
                 .members()
                 .iter()
                 .filter(|m| Some(m.id) != membership.me())
-                .map(|m| {
-                    let at = unseen_since(
-                        heard.get(&m.endpoint).copied(),
-                        m.id,
-                        &peer_health,
-                        self.started,
-                    );
-                    Sighting {
+                .filter_map(|m| {
+                    let own = heard.get(&m.endpoint).copied();
+                    let relayed = peer_health
+                        .values()
+                        .any(|(_, h)| h.seen.iter().any(|s| s.member == m.id));
+                    if own.is_none() && !relayed && !settled {
+                        return None;
+                    }
+                    let at = unseen_since(own, m.id, &peer_health, self.started);
+                    Some(Sighting {
                         member: m.id,
                         secs_ago: now.saturating_sub(at) / NANOS_PER_SEC,
-                    }
+                    })
                 })
                 .collect()
         };

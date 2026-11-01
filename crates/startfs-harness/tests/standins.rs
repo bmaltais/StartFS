@@ -248,6 +248,28 @@ fn after_every_member_restarted_together_a_later_restart_still_covers_for_the_sl
 }
 
 #[test]
+fn a_rolling_restart_does_not_reset_how_long_a_sleeper_has_been_gone() {
+    let c = Cluster::with_filesystem(3, 5, "");
+    write_files(&c, 24);
+    c.crash(4);
+    c.elapse(30 * MINUTE);
+    // Every awake member restarts, one after the other, as a rolling upgrade does, and
+    // gossips before it has heard from anyone, as a real daemon does on its first round.
+    for i in 0..4 {
+        c.crash(i);
+        c.restart(i);
+        c.keepalive(i);
+        settle(&c);
+    }
+    for viewer in 0..4 {
+        let seen = c.control(viewer).status().unwrap().members[4]
+            .last_seen
+            .unwrap();
+        assert!(seen.secs_ago >= 30 * 60, "node {viewer}: {seen:?}");
+    }
+}
+
+#[test]
 fn a_file_written_while_a_member_sleeps_is_covered_for_when_only_the_writer_is_left() {
     // Three copies on four members, one asleep: for a chunk placed on the sleeper the
     // only member left to stand in is the one that wrote it.
