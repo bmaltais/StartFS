@@ -836,9 +836,16 @@ impl LocalFs {
     }
 
     /// Apply entries received from a peer; returns how many were new.
+    ///
+    /// Each entry is carried into the visible tree by touching only the rows
+    /// of the object it changed ([`Self::patch_tree`]); one that the patch
+    /// cannot place with certainty (a name collision, a directory that moves,
+    /// a hard link) leaves the tree to a full [`Self::reconcile`], which
+    /// every entry still ends in if any one needed it.
     pub fn apply_remote(&self, entries: &[Entry]) -> FsResult<usize> {
         self.run(true, |t| {
             let mut applied = 0;
+            let mut full = t.counters.get(STALE).map_err(db)?.is_some();
             for e in entries {
                 if e.seq != t.next_seq(e.origin)? {
                     continue; // duplicate, or a gap the peer will fill in order
@@ -847,14 +854,149 @@ impl LocalFs {
                     let mut h = self.hlc.lock().unwrap();
                     *h = Hlc::observe(*h, e.hlc, self.clock.now());
                 }
+                let ino = match &e.op {
+                    Op::Create { ino, .. }
+                    | Op::Set { ino, .. }
+                    | Op::Link { ino, .. }
+                    | Op::Rename { ino, .. }
+                    | Op::Unlink { ino, .. } => *ino,
+                };
+                let before = if full {
+                    None
+                } else {
+                    self.tree_reads.fetch_add(1, Ordering::Relaxed);
+                    Some((t.object(ino)?, t.collides(ino)?))
+                };
                 self.record(t, e)?;
                 applied += 1;
+                if let Some((old, collided)) = before {
+                    full = !self.patch_tree(t, ino, &old, collided)?;
+                }
             }
-            if applied > 0 {
+            if full && applied > 0 {
                 self.settle(t)?;
             }
             Ok(applied)
         })
+    }
+
+    /// Whether `dir` can take a name without the tree around it changing: the
+    /// root, or a live directory that shows.
+    fn plain_dir(&self, t: &Tables<'_>, dir: Ino) -> FsResult<bool> {
+        if dir == ROOT_INO {
+            return Ok(true);
+        }
+        if t.dir(dir).is_err() {
+            return Ok(false);
+        }
+        self.tree_reads.fetch_add(1, Ordering::Relaxed);
+        let o = t.object(dir)?;
+        Ok(o.kind == Some(FileKind::Dir) && o.alive())
+    }
+
+    /// Bring the tree rows of one object up to date after an entry changed it
+    /// from `old`, the way [`Self::reconcile`] would show it. Returns false,
+    /// having written nothing, when the change could reach beyond the object's
+    /// own rows, which only a rebuild settles.
+    fn patch_tree(
+        &self,
+        t: &mut Tables<'_>,
+        ino: Ino,
+        old: &Object,
+        collided: bool,
+    ) -> FsResult<bool> {
+        self.tree_reads.fetch_add(1, Ordering::Relaxed);
+        let new = t.object(ino)?;
+        let Some(kind) = new.kind else {
+            return Ok(false);
+        };
+        if collided || t.collides(ino)? || old.kind.is_some_and(|k| k != kind) {
+            return Ok(false);
+        }
+        let is_dir = kind == FileKind::Dir;
+        let (before, after) = (Self::shown_names(old), Self::shown_names(&new));
+        if before.len() > 1 || after.len() > 1 {
+            return Ok(false); // a hard link: its link count and parent follow all its names
+        }
+        if is_dir {
+            // A directory may only appear, or change its attributes where it
+            // is: moving or removing one reaches its children, conflict paths
+            // and cycles.
+            let appears = old.kind.is_none();
+            if after.is_empty() || (!appears && before != after) {
+                return Ok(false);
+            }
+            // Objects placed in a directory not known yet hide until it is.
+            if appears && t.counters.get(UNREACHED).map_err(db)?.is_some() {
+                return Ok(false);
+            }
+        } else if old.heads.len() > 1 || new.heads.len() > 1 {
+            return Ok(false); // conflict copies take their names from the object's
+        }
+        if let Some((_, loc)) = before.first()
+            && (!self.plain_dir(t, loc.1)? || t.entry(loc.1, &loc.2)? != Some(ino))
+        {
+            return Ok(false);
+        }
+        if let Some((_, loc)) = after.first() {
+            let taken = t.entry(loc.1, &loc.2)?.is_some_and(|other| other != ino);
+            if taken || !self.plain_dir(t, loc.1)? || t.copies_at(loc.1, &loc.2)? {
+                return Ok(false);
+            }
+        }
+        if before.first().map(|(_, l)| (l.1, &l.2)) != after.first().map(|(_, l)| (l.1, &l.2))
+            && let Some((_, loc)) = before.first()
+        {
+            t.dirents.remove((loc.1, loc.2.as_str())).map_err(db)?;
+            t.names.remove((loc.1, loc.2.as_str())).map_err(db)?;
+        }
+        match (after.first(), new.winner()) {
+            (Some((slot, loc)), Some(v)) => {
+                let inode = Inode {
+                    kind,
+                    mode: v.mode,
+                    nlink: if is_dir { 2 } else { 1 },
+                    size: v.size,
+                    mtime: v.mtime,
+                    ctime: v.mtime,
+                    parent: loc.1,
+                    content: v.content.clone(),
+                    xattrs: v.xattrs.clone(),
+                };
+                let raw = encode(&inode);
+                let same = t
+                    .inodes
+                    .get(ino)
+                    .map_err(db)?
+                    .is_some_and(|g| g.value() == raw.as_slice());
+                if !same {
+                    t.inodes.insert(ino, raw.as_slice()).map_err(db)?;
+                }
+                t.dirents.insert((loc.1, loc.2.as_str()), ino).map_err(db)?;
+                t.set_slots(loc.1, &loc.2, &[(ino, *slot)])?;
+            }
+            _ => {
+                if !before.is_empty() {
+                    t.inodes.remove(ino).map_err(db)?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// The names a directory listing shows for the object, when it shows at all
+    /// (a directory only kept for what is in it is not told apart: callers
+    /// treat a directory with none as beyond a patch).
+    fn shown_names(o: &Object) -> Vec<(Hlc, Loc)> {
+        if o.kind.is_none() || o.winner().is_none() {
+            return Vec::new();
+        }
+        o.live().into_iter().map(|(s, l)| (s, l.clone())).collect()
+    }
+
+    /// Rebuild the visible tree from the registers, whatever its state.
+    pub fn rebuild_tree(&self) -> FsResult<()> {
+        self.run(true, |t| self.reconcile(t))
     }
 
     /// Start a batch of peer messages: applying their entries records them but
@@ -890,6 +1032,12 @@ impl LocalFs {
         } else {
             self.reconcile(t)
         }
+    }
+
+    /// How many objects were read so far to keep the tree up to date with
+    /// peers' entries: what that costs follows this, not the entries' bytes.
+    pub fn tree_objects_read(&self) -> u64 {
+        self.tree_reads.load(Ordering::Relaxed)
     }
 
     /// Conflict copies currently in the tree.
@@ -993,6 +1141,8 @@ impl LocalFs {
             let (k, v) = row.map_err(db)?;
             objects.insert(k.value(), dec(v.value())?);
         }
+        self.tree_reads
+            .fetch_add(objects.len() as u64, Ordering::Relaxed);
 
         // Live objects, plus any directory a live object needs to sit in: a
         // write into a deleted directory recreates the path, for every name.
@@ -1197,7 +1347,16 @@ impl LocalFs {
             inode.nlink = n;
             want.inodes.insert(ino, encode(&inode));
         }
+        let unreached = placed
+            .iter()
+            .filter(|p| !want.inodes.contains_key(&p.ino))
+            .count();
         want.write(t)?;
+        if unreached > 0 {
+            t.counters.insert(UNREACHED, unreached as u64).map_err(db)?;
+        } else {
+            t.counters.remove(UNREACHED).map_err(db)?;
+        }
         t.counters.remove(STALE).map_err(db)?;
         Ok(())
     }
