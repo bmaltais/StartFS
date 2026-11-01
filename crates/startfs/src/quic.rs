@@ -114,6 +114,8 @@ struct Shared {
     inbox_bytes: AtomicU64,
     /// Chunk bytes queued or in flight to each peer.
     backlog: Mutex<HashMap<NodeId, u64>>,
+    /// How many times messages to each peer were dropped or may have been lost.
+    losses: Mutex<HashMap<NodeId, u64>>,
     /// When a frame from each peer last arrived, handled by the daemon or not.
     heard: Mutex<HashMap<NodeId, Instant>>,
     /// The upgrade notice to hand to a peer refused for its protocol version.
@@ -187,6 +189,11 @@ impl Shared {
             check_allowed(&peer, &this.allowed_tags)
         })
         .await?
+    }
+
+    /// Messages to `peer` were dropped, or may have been lost with a connection.
+    fn lost(&self, peer: NodeId) {
+        *self.losses.lock().unwrap().entry(peer).or_default() += 1;
     }
 
     fn fail(&self, peer: NodeId, why: Error) {
@@ -263,6 +270,7 @@ impl QuicTransport {
             inbox_messages: AtomicU64::new(0),
             inbox_bytes: AtomicU64::new(0),
             backlog: Mutex::new(HashMap::new()),
+            losses: Mutex::new(HashMap::new()),
             heard: Mutex::new(HashMap::new()),
             notice: Mutex::new(None),
         });
@@ -350,6 +358,16 @@ impl Transport for QuicTransport {
             .inbox_bytes
             .fetch_sub(body.len() as u64, Ordering::Relaxed);
         Some((from, body))
+    }
+
+    fn losses(&self, to: NodeId) -> u64 {
+        self.shared
+            .losses
+            .lock()
+            .unwrap()
+            .get(&to)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn backlog(&self, to: NodeId) -> u64 {
@@ -486,6 +504,8 @@ async fn serve_connection(shared: Arc<Shared>, incoming: quinn::Incoming) {
             && instance.or(old_instance).is_some()
             && let Some(link) = shared.links.lock().unwrap().remove(&peer)
         {
+            // What the old daemon had received and not handled went with it.
+            shared.lost(peer);
             link.close(CLOSE_SUPERSEDED.into(), b"peer restarted");
         }
     }
@@ -668,16 +688,20 @@ async fn peer_sender(
     while let Some((msg, held)) = queue.recv().await {
         if msg.len() > MAX_MESSAGE {
             shared.fail(peer, Error::MessageTooLarge(msg.len()));
+            shared.lost(peer);
             continue;
         }
         if link
             .as_ref()
             .is_some_and(|l| l.conn.close_reason().is_some())
         {
+            // What was written to it and not yet read may be gone.
+            shared.lost(peer);
             link = None;
         }
         if link.is_none() {
             if failed_at.is_some_and(|t| t.elapsed() < RETRY_AFTER) {
+                shared.lost(peer);
                 continue;
             }
             match connect(&shared, &endpoint, peer, addr).await {
@@ -689,6 +713,7 @@ async fn peer_sender(
                 }
                 Err(why) => {
                     shared.fail(peer, why);
+                    shared.lost(peer);
                     failed_at = Some(Instant::now());
                     continue;
                 }
@@ -720,6 +745,7 @@ async fn peer_sender(
                 }
             });
         } else if write_frame(&mut l.control, &msg).await.is_err() {
+            shared.lost(peer);
             link = None;
         }
     }

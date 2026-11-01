@@ -61,4 +61,10 @@ pub trait Transport: Send + Sync {
     fn backlog(&self, _to: NodeId) -> u64 {
         0
     }
+    /// How many times messages to `to` were dropped or may have been lost (a connection
+    /// that broke or a peer that restarted with messages on the way); it only grows. A
+    /// sender that assumed delivery sends again what the peer has not confirmed.
+    fn losses(&self, _to: NodeId) -> u64 {
+        0
+    }
 }

@@ -31,6 +31,8 @@ struct State {
     traffic: Vec<(NodeId, NodeId, Vec<u8>)>,
     /// How many times a node told its transport where a member listens.
     address_lookups: u64,
+    /// Messages dropped on each directed link.
+    losses: HashMap<(NodeId, NodeId), u64>,
 }
 
 impl State {
@@ -188,6 +190,7 @@ impl Transport for SimTransport {
         }
         let mut s = self.net.state.lock().unwrap();
         if !s.reachable(self.node, to) {
+            *s.losses.entry((self.node, to)).or_default() += 1;
             return;
         }
         s.traffic.push((self.node, to, msg.clone()));
@@ -245,6 +248,11 @@ impl Transport for SimTransport {
             .sum()
     }
 
+    fn losses(&self, to: NodeId) -> u64 {
+        let s = self.net.state.lock().unwrap();
+        s.losses.get(&(self.node, to)).copied().unwrap_or(0)
+    }
+
     fn inbox(&self) -> Option<Inbox> {
         let now = self.net.clock.now();
         let s = self.net.state.lock().unwrap();
@@ -269,6 +277,7 @@ impl Transport for SimTransport {
         if s.reachable(m.from, m.to) {
             Some((m.from, self.inbound(m.msg)))
         } else {
+            *s.losses.entry((m.from, m.to)).or_default() += 1;
             None
         }
     }

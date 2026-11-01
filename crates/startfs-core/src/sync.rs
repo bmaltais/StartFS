@@ -19,6 +19,13 @@ pub const HELLO_INTERVAL: Duration = Duration::from_secs(5);
 const BATCH: usize = 256;
 /// Default bound on the encoded size of one state chunk.
 pub const STATE_CHUNK_BYTES: usize = 1 << 20;
+/// How long a peer may make no progress on what was sent to it before it is sent again, for
+/// losses the transport does not report. A hello says what the peer held when it was sent, so
+/// it lags what is in flight: what it lacks is sent again only after the transport reports a
+/// loss ([`Transport::losses`]) or after this long. Resending on every hello sent the
+/// in-flight entries again each time, and on a slow link the copies queued up faster than
+/// they drained, until the daemon ran out of memory.
+pub const STALL: Duration = Duration::from_secs(60);
 
 /// A state transfer under way to a peer.
 struct Transfer {
@@ -39,6 +46,14 @@ struct Peer {
     /// everything up to that (its own word, not a second-hand one).
     synced: Option<Nanos>,
     last_hello: Option<Nanos>,
+    /// Since when the peer has been sent what it had not confirmed, and has not moved on
+    /// since; `None` when nothing it lacks is outstanding.
+    waiting_since: Option<Nanos>,
+    /// The transport's loss count for the peer when last looked at.
+    losses: u64,
+    /// Something sent to the peer may not have arrived: its next hello says where to
+    /// start again.
+    lost: bool,
     /// The state transfer being sent to the peer, if one is under way.
     transfer: Option<Transfer>,
 }
@@ -93,11 +108,45 @@ impl Syncer {
         }
         match msg {
             Message::Hello(f) => {
+                let now = self.clock.now();
                 let peer = self.peers.get_mut(&from).expect("known peer");
                 let first = peer.known.is_none();
-                peer.known = Some(f.clone());
+                let before = peer.confirmed.as_ref();
+                let went_back = before.is_some_and(|b| b.iter().any(|(o, s)| f.get(o) < Some(s)));
+                // Progress on what was sent; the peer's own writes say nothing about it.
+                let moved_on = peer.known.as_ref().is_some_and(|k| {
+                    k.iter().any(|(o, sent)| {
+                        let had = before.and_then(|b| b.get(o)).copied().unwrap_or(0);
+                        *sent > had && f.get(o).copied().unwrap_or(0) > had
+                    })
+                });
+                let caught_up = peer.known.as_ref().is_some_and(|k| covers(&f, k));
+                if caught_up {
+                    peer.waiting_since = None;
+                } else if moved_on {
+                    peer.waiting_since = Some(now);
+                }
+                // A state transfer moves the peer's frontier only with its last chunk.
+                let stalled = peer.transfer.is_none()
+                    && peer
+                        .waiting_since
+                        .is_some_and(|t| now.saturating_sub(t) >= STALL.as_nanos() as u64);
+                if went_back || peer.lost {
+                    peer.transfer = None;
+                }
+                if first || went_back || stalled || peer.lost {
+                    // Start again from what the peer holds by its own word.
+                    peer.known = Some(f.clone());
+                    peer.waiting_since = None;
+                    peer.lost = false;
+                } else if let Some(known) = peer.known.as_mut() {
+                    for (o, s) in &f {
+                        let k = known.entry(*o).or_default();
+                        *k = (*k).max(*s);
+                    }
+                }
                 peer.confirmed = Some(f);
-                peer.confirmed_at = Some(self.clock.now());
+                peer.confirmed_at = Some(now);
                 self.note_synced(from);
                 if first && let Ok(f) = self.fs.frontier() {
                     // The peer may not have heard from us yet: say what we hold.
@@ -220,7 +269,9 @@ impl Syncer {
         let Ok(chunk) = self.fs.state_chunk(&t.pin, t.after, self.chunk_bytes) else {
             return false;
         };
+        let now = self.clock.now();
         let p = self.peers.get_mut(&id).expect("known peer");
+        p.waiting_since.get_or_insert(now);
         if chunk.last {
             p.known = Some(t.pin.frontier.clone());
         } else {
@@ -237,6 +288,12 @@ impl Syncer {
         let now = self.clock.now();
         let ids: Vec<NodeId> = self.peers.keys().copied().collect();
         for id in ids {
+            let losses = self.transport.losses(id);
+            let p = self.peers.get_mut(&id).expect("known peer");
+            if losses != p.losses {
+                p.losses = losses;
+                p.lost = true;
+            }
             let due = self.peers[&id]
                 .last_hello
                 .is_none_or(|t| now.saturating_sub(t) >= HELLO_INTERVAL.as_nanos() as u64);
@@ -269,6 +326,7 @@ impl Syncer {
                 continue;
             }
             let p = self.peers.get_mut(&id).expect("known peer");
+            p.waiting_since.get_or_insert(now);
             let known = p.known.as_mut().expect("checked above");
             for e in &entries {
                 known.insert(e.origin, e.seq + 1);
@@ -278,4 +336,9 @@ impl Syncer {
         }
         busy
     }
+}
+
+/// Whether `a` holds at least everything `b` does.
+fn covers(a: &Frontier, b: &Frontier) -> bool {
+    b.iter().all(|(o, s)| a.get(o).is_some_and(|x| x >= s))
 }

@@ -464,6 +464,10 @@ impl Transport for CountingTransport {
         self.inner.last_error(node)
     }
 
+    fn losses(&self, to: NodeId) -> u64 {
+        self.inner.losses(to)
+    }
+
     fn last_heard(&self, node: NodeId) -> Option<Duration> {
         self.inner.last_heard(node)
     }
