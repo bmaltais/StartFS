@@ -86,3 +86,45 @@ fn a_peer_that_was_slow_is_tried_again_once_the_reader_forgets_it() {
     read_file(&c, 5);
     assert_eq!(asked(&c)[before..], [NodeId(1)]);
 }
+
+/// How long, on the simulated clock, one read takes.
+fn read_time(c: &Cluster, i: u64) -> Duration {
+    let start = c.now();
+    read_file(c, i);
+    Duration::from_nanos(c.now() - start)
+}
+
+/// Time the three peers (5, 30 and 30 ms away), then cut the nearest one off.
+fn cluster_with_silent_nearest(files: u64) -> Cluster {
+    let c = cluster_with_files(files);
+    for (peer, ms) in [(1, 5), (2, 30), (3, 30)] {
+        c.network()
+            .set_delay(READER, NodeId(peer), Duration::from_millis(ms));
+    }
+    for i in 0..3 {
+        read_file(&c, i);
+    }
+    c.network()
+        .set_delay(READER, NodeId(1), Duration::from_secs(3600));
+    c
+}
+
+#[test]
+fn a_read_does_not_wait_out_a_silent_peer_before_asking_another() {
+    let c = cluster_with_silent_nearest(8);
+    let took = read_time(&c, 3);
+    // The silent peer gets 20 ms, then a 30 ms peer answers; without hedging the read waits out
+    // the daemon's whole reply wait (300 ms of simulated time) first.
+    assert!(took < Duration::from_millis(150), "read took {took:?}");
+}
+
+#[test]
+fn a_peer_that_let_a_read_down_is_asked_later_than_one_that_answers() {
+    let c = cluster_with_silent_nearest(8);
+    for i in 3..6 {
+        read_file(&c, i);
+    }
+    let before = asked(&c).len();
+    read_file(&c, 6);
+    assert_ne!(asked(&c)[before..][0], NodeId(1));
+}

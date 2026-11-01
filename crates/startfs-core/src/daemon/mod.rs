@@ -49,6 +49,13 @@ pub type WaitHook = Arc<dyn Fn() + Send + Sync>;
 /// How many times a request waits (calling the hook each time) for an answer.
 const WAIT_ROUNDS: usize = 300;
 
+/// A peer that has not answered a chunk request after this many times its usual round trip (at
+/// least `HEDGE_MIN`, or `HEDGE_UNTIMED` for a peer never timed) is asked in parallel with the
+/// next one instead of waited out.
+const HEDGE_FACTOR: u64 = 3;
+const HEDGE_MIN: Nanos = Duration::from_millis(20).as_nanos() as Nanos;
+const HEDGE_UNTIMED: Nanos = Duration::from_millis(200).as_nanos() as Nanos;
+
 /// The most a tick spends waiting on peers for the chunks a commit of buffered writes needs: a
 /// commit that cannot get them is retried later, but a tick that waits longer stalls
 /// replication and everything else it does.
@@ -1008,10 +1015,7 @@ impl Daemon {
                 let answered = reply
                     .as_ref()
                     .map_or_else(|| self.clock.now(), |(at, _)| *at);
-                self.latency
-                    .lock()
-                    .unwrap()
-                    .record(peer, answered.saturating_sub(sent), answered);
+                self.record_round_trip(peer, sent, answered);
                 if let Some((_, Some(data))) = reply
                     && accept(id, &data)
                 {
@@ -1025,38 +1029,94 @@ impl Daemon {
         answers
     }
 
-    /// Ask peers until one supplies the chunk: the ones that answer fastest
-    /// first, those not yet timed before those that are not up.
+    /// Ask peers until one supplies the chunk: the ones that answer fastest first, those not yet
+    /// timed before those that are not up. A peer that has not answered after a few times its
+    /// usual round trip is not waited out: the next one is asked as well, and the first good
+    /// answer from either wins.
     fn fetch_chunk(&self, id: &ChunkId, accept: &dyn Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+        enum Step {
+            Reply(NodeId, Nanos, ChunkAnswer),
+            Hedge,
+        }
         let transport = self.transport()?;
         let (peers, _) = self.ranked_peers();
         FETCH.with(|f| f.set((f.get().0, false)));
-        for peer in peers {
-            if self.fetch_over_budget() {
-                self.fetch_found_silence();
-                break;
+        let mut next = peers.into_iter().peekable();
+        // The peers asked and not yet answered, with when each was asked.
+        let mut waiting: Vec<(NodeId, Nanos)> = Vec::new();
+        let result = loop {
+            if waiting.is_empty() || self.should_hedge(&waiting, next.peek().is_some()) {
+                if self.fetch_over_budget() {
+                    self.fetch_found_silence();
+                    break None;
+                }
+                let Some(peer) = next.next() else { break None };
+                self.chunk_replies.lock().unwrap().remove(&(peer, *id));
+                waiting.push((peer, self.clock.now()));
+                transport.send(peer, Message::ChunkRequest(*id).encode());
             }
-            self.chunk_replies.lock().unwrap().remove(&(peer, *id));
-            let sent = self.clock.now();
-            transport.send(peer, Message::ChunkRequest(*id).encode());
-            let reply = self.wait_for(|| self.chunk_replies.lock().unwrap().remove(&(peer, *id)));
-            if reply.is_none() {
-                self.activity.timed_out(peer);
-                self.fetch_found_silence();
+            let more = next.peek().is_some();
+            let step = self.wait_for(|| {
+                let mut replies = self.chunk_replies.lock().unwrap();
+                for (peer, _) in &waiting {
+                    if let Some((at, answer)) = replies.remove(&(*peer, *id)) {
+                        return Some(Step::Reply(*peer, at, answer));
+                    }
+                }
+                drop(replies);
+                (more && self.should_hedge(&waiting, true)).then_some(Step::Hedge)
+            });
+            match step {
+                Some(Step::Hedge) => {}
+                Some(Step::Reply(peer, at, answer)) => {
+                    let at_index = waiting.iter().position(|(p, _)| *p == peer).unwrap();
+                    let (_, sent) = waiting.remove(at_index);
+                    self.record_round_trip(peer, sent, at);
+                    if let Some(data) = answer
+                        && accept(&data)
+                    {
+                        break Some(data);
+                    }
+                }
+                // Nobody answered in time.
+                None => {
+                    let now = self.clock.now();
+                    for (peer, sent) in waiting.drain(..) {
+                        self.activity.timed_out(peer);
+                        self.fetch_found_silence();
+                        self.record_round_trip(peer, sent, now);
+                    }
+                }
             }
-            let answered = reply
-                .as_ref()
-                .map_or_else(|| self.clock.now(), |(at, _)| *at);
-            self.latency
-                .lock()
-                .unwrap()
-                .record(peer, answered.saturating_sub(sent), answered);
-            if let Some((_, Some(data))) = reply
-                && accept(&data)
-            {
-                return Some(data);
-            }
+        };
+        // Peers passed over for a faster answer count as at least as slow as they have been so
+        // far, so the next read does not start with them again.
+        let now = self.clock.now();
+        for (peer, sent) in waiting {
+            self.record_round_trip(peer, sent, now);
         }
-        None
+        result
+    }
+
+    /// Fold a request sent at `sent` and answered (or given up on) at `at` into the peer's
+    /// round-trip estimate.
+    fn record_round_trip(&self, peer: NodeId, sent: Nanos, at: Nanos) {
+        self.latency
+            .lock()
+            .unwrap()
+            .record(peer, at.saturating_sub(sent), at);
+    }
+
+    /// Whether the latest request has gone unanswered for long enough to ask another peer too.
+    fn should_hedge(&self, waiting: &[(NodeId, Nanos)], another: bool) -> bool {
+        let Some(&(peer, sent)) = waiting.last() else {
+            return false;
+        };
+        let now = self.clock.now();
+        let patience = match self.latency.lock().unwrap().estimate(peer, now) {
+            Some(rtt) => rtt.saturating_mul(HEDGE_FACTOR as Nanos).max(HEDGE_MIN),
+            None => HEDGE_UNTIMED,
+        };
+        another && now.saturating_sub(sent) >= patience
     }
 }
