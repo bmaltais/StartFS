@@ -33,6 +33,8 @@ commands:
   purge                               free the data of deleted files on every member now, instead
                                       of after the retention period (not undoable)
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
+  history PATH [--json]               list the versions kept of the file at PATH (under the mount,
+                                      or in the filesystem), each named by its restore point
   join TOKEN [--offer SIZE] [--site NAME]
                                       join the filesystem a token names, declaring where this
                                       node lives (home, cloud) so copies are spread across sites
@@ -294,6 +296,23 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             );
             Ok(())
         }
+        "history" => {
+            let path = absolute(
+                rest.iter()
+                    .find(|a| !a.starts_with('-'))
+                    .ok_or(CliError::Usage)?,
+            )?;
+            let versions = Client::new(socket).history(&path)?;
+            if rest.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string(&versions).map_err(CliError::Json)?
+                );
+            } else {
+                print!("{}", history_table(&path, &versions));
+            }
+            Ok(())
+        }
         "stats" => {
             let client = Client::new(socket);
             let rows = client.node_stats()?;
@@ -307,6 +326,39 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         }
         _ => Err(CliError::Usage),
     }
+}
+
+/// A path as given, made absolute against the working directory (not resolved:
+/// the file it names may be gone).
+fn absolute(path: &str) -> Result<String, CliError> {
+    if path.starts_with('/') {
+        return Ok(path.to_string());
+    }
+    let cwd = std::env::current_dir().map_err(CliError::DataDir)?;
+    Ok(cwd.join(path).display().to_string())
+}
+
+/// One line per version, oldest first, each named by its restore point.
+fn history_table(path: &str, versions: &[control::VersionInfo]) -> String {
+    use startfs_core::fs::restore_point;
+    let mut out = format!(
+        "{path}: {} version{} (restore points in UTC; `startfs restore {path} --at POINT`)\n",
+        versions.len(),
+        if versions.len() == 1 { "" } else { "s" }
+    );
+    for v in versions {
+        let ended = match (v.replaced, v.deleted) {
+            (None, _) => "current".to_string(),
+            (Some(t), true) => format!("deleted {}", restore_point(t)),
+            (Some(t), false) => format!("replaced {}", restore_point(t)),
+        };
+        out.push_str(&format!(
+            "  {}  {:>10}  {ended}\n",
+            restore_point(v.written),
+            human(v.size)
+        ));
+    }
+    out
 }
 
 /// One line per member: what it stores, how well, and its share of the replicas.
@@ -393,6 +445,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "daemon" => (&["--mount"], &[], 0),
         "create" => (&["--name", "--copies"], &["--example"], 0),
         "status" | "activity" | "stats" => (&[], &["--json"], 0),
+        "history" => (&[], &["--json"], 1),
         "join" => (&["--offer", "--site"], &[], 1),
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
@@ -502,6 +555,9 @@ fn daemon(
         advertised_host(host),
     )?;
     let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
+    if let Some(mp) = &mountpoint {
+        d.set_mountpoint(mp.clone());
+    }
     // Before the first tick: what an earlier swap left open is settled here.
     d.set_installer(Arc::new(ScriptInstaller::new(
         &data_dir,

@@ -56,7 +56,7 @@ mod scrub;
 mod usage;
 mod writebuf;
 pub use gc::GcReport;
-pub use history::MIN_VERSION_LIFE;
+pub use history::{MIN_VERSION_LIFE, parse_restore_point, restore_point};
 pub use merge::{CatchUp, ConflictCopy};
 pub use writebuf::DEFAULT_WRITE_BUFFER;
 

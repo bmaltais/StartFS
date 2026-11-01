@@ -14,6 +14,25 @@ impl Daemon {
             .unwrap_or_else(|e| Response::Error(e.to_string()))
     }
 
+    /// Say where the filesystem is mounted, so the CLI can name a file by its path there.
+    pub fn set_mountpoint(&self, mountpoint: std::path::PathBuf) {
+        *self.mountpoint.lock().unwrap() = Some(mountpoint);
+    }
+
+    /// A path as the filesystem knows it: one under the mount loses the mountpoint.
+    fn fs_path(&self, path: &str) -> String {
+        let mount = self.mountpoint.lock().unwrap().clone();
+        match mount.and_then(|m| {
+            std::path::Path::new(path)
+                .strip_prefix(m)
+                .ok()
+                .map(|p| p.to_path_buf())
+        }) {
+            Some(rest) => format!("/{}", rest.display()),
+            None => path.to_string(),
+        }
+    }
+
     fn control_reply(&self, req: Request) -> Result<Response, Error> {
         Ok(match req {
             Request::Create { name, copies } => Response::Created {
@@ -57,6 +76,7 @@ impl Daemon {
             Request::NodeStats => Response::NodeStats(self.node_reports()?),
             Request::Activity => Response::Activity(Box::new(self.activity_report()?)),
             Request::Status => Response::Status(Box::new(self.status()?)),
+            Request::History { path } => Response::History(self.fs.history(&self.fs_path(&path))?),
         })
     }
 }

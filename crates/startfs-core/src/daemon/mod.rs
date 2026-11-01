@@ -185,6 +185,8 @@ pub struct Daemon {
     purging: Mutex<Option<Nanos>>,
     /// Fetches and swaps releases for an upgrade the cluster coordinates.
     installer: Mutex<Arc<dyn Installer>>,
+    /// Where the filesystem is mounted, so paths under it can be named as such.
+    mountpoint: Mutex<Option<PathBuf>>,
     /// The upgrade under way and what the other members said about it.
     upgrades: Mutex<upgrade::Upgrades>,
 }
@@ -294,6 +296,7 @@ impl Daemon {
                 stopping: AtomicBool::new(false),
                 purging: Mutex::new(None),
                 installer: Mutex::new(Arc::new(NoInstaller)),
+                mountpoint: Mutex::new(None),
                 dir: dir.to_path_buf(),
                 upgrades: Mutex::new(upgrade::Upgrades::open(dir)),
                 fs,

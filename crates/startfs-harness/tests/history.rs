@@ -1,6 +1,7 @@
 //! Versioned history: an overwritten or deleted file keeps its earlier
 //! versions for the filesystem's window, so they can be listed and restored.
 
+use startfs_core::net::NodeId;
 use startfs_core::ops::*;
 use startfs_harness::{Cluster, noise};
 use std::time::Duration;
@@ -77,4 +78,79 @@ fn a_state_that_lasted_under_half_a_minute_is_not_kept() {
 
     pass(&c, 2 * HOUR, 10 * MINUTE);
     assert_eq!(total_replicas(&c), 2, "only the current version is held");
+}
+
+#[test]
+fn history_lists_an_overwritten_files_versions_oldest_first() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let f = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    let first = c.now();
+    pass(&c, HOUR, 10 * MINUTE);
+    c.fs(0).write(f, 0, &noise(9 * 1024, 2)).unwrap();
+    let second = c.now();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    // Any member answers, since every member derives the same versions.
+    let versions = c.control(2).history("/a").unwrap();
+    assert_eq!(versions.len(), 2, "{versions:?}");
+    let (old, new) = (&versions[0], &versions[1]);
+    assert_eq!((old.size, new.size), (8 * 1024, 9 * 1024));
+    assert!(old.written >= first && old.written < second, "{versions:?}");
+    assert!(new.written >= second, "{versions:?}");
+    assert_eq!(old.replaced, Some(new.written));
+    assert_eq!(new.replaced, None, "the current version");
+    assert!(!old.deleted && !new.deleted);
+}
+
+#[test]
+fn history_lists_a_deleted_file_inside_a_deleted_directory() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let fs = c.fs(0);
+    let dir = fs.mkdir(ROOT_INO, "d", 0o755).unwrap();
+    let f = fs.create(dir.ino, "a", 0o644).unwrap();
+    fs.write(f.ino, 0, &noise(8 * 1024, 1)).unwrap();
+    pass(&c, HOUR, 10 * MINUTE);
+    fs.unlink(dir.ino, "a").unwrap();
+    fs.rmdir(ROOT_INO, "d").unwrap();
+    let gone = c.now();
+    pass(&c, HOUR, 10 * MINUTE);
+
+    let versions = c.control(1).history("/d/a").unwrap();
+    assert_eq!(versions.len(), 1, "{versions:?}");
+    assert_eq!(versions[0].size, 8 * 1024);
+    assert!(versions[0].deleted);
+    assert!(versions[0].replaced.is_some_and(|t| t >= gone));
+}
+
+#[test]
+fn history_of_a_path_that_never_existed_is_not_found() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    assert!(c.control(0).history("/nothing").is_err());
+}
+
+#[test]
+fn a_member_caught_up_by_state_transfer_lists_the_same_versions() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let a = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    pass(&c, HOUR, 10 * MINUTE);
+    // Node 2 holds `a` as it is now, and never hears of `b` or what follows.
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    let b = put(&c.fs(0), "b", &noise(8 * 1024, 2));
+    pass(&c, HOUR, 10 * MINUTE);
+    c.fs(0).write(a, 0, &noise(9 * 1024, 3)).unwrap();
+    c.fs(0).write(b, 0, &noise(9 * 1024, 4)).unwrap();
+    pass(&c, 3 * HOUR, 30 * MINUTE);
+    assert!(
+        c.control(0).status().unwrap().log.entries < 3,
+        "the log was not compacted, so no state transfer is needed"
+    );
+
+    c.network().heal();
+    pass(&c, HOUR, 10 * MINUTE);
+    for path in ["/a", "/b"] {
+        let here = c.control(0).history(path).unwrap();
+        assert_eq!(here.len(), 2, "{path}: {here:?}");
+        assert_eq!(c.control(2).history(path).unwrap(), here, "{path}");
+    }
 }

@@ -69,6 +69,10 @@ pub enum Request {
         #[serde(default)]
         force: bool,
     },
+    /// The versions of the file at a path (in the filesystem, or under the mount).
+    History {
+        path: String,
+    },
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
         token: String,
@@ -350,6 +354,18 @@ pub struct LogStatus {
     pub objects: u64,
 }
 
+/// One version of the file at a path, as `history` lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    /// When it was written: the restore point that names it.
+    pub written: Nanos,
+    /// When it was overwritten or deleted; `None` for what the path holds now.
+    pub replaced: Option<Nanos>,
+    /// Whether it ended with the file's deletion.
+    pub deleted: bool,
+    pub size: u64,
+}
+
 /// Who a purge was sent to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurgeReport {
@@ -483,6 +499,7 @@ pub enum Response {
     Purged(PurgeReport),
     Updating(UpdateReport),
     NodeStats(Vec<NodeReport>),
+    History(Vec<VersionInfo>),
     Error(String),
 }
 
@@ -798,6 +815,14 @@ impl Client {
     pub fn node_stats(&self) -> Result<Vec<NodeReport>, Error> {
         match self.call(&Request::NodeStats)? {
             Response::NodeStats(rows) => Ok(rows),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// The versions of the file at `path`, oldest first.
+    pub fn history(&self, path: &str) -> Result<Vec<VersionInfo>, Error> {
+        match self.call(&Request::History { path: path.into() })? {
+            Response::History(v) => Ok(v),
             other => Err(unexpected(other)),
         }
     }

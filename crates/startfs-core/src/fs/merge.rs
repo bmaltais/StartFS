@@ -189,7 +189,7 @@ fn conflict_name(name: &str, from: Hlc) -> String {
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC.
-fn stamp(wall: Nanos) -> String {
+pub(super) fn stamp(wall: Nanos) -> String {
     let secs = wall / 1_000_000_000;
     let (days, rest) = (secs / 86_400, secs % 86_400);
     // Civil-from-days (proleptic Gregorian), after Howard Hinnant.

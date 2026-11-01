@@ -8,12 +8,57 @@
 use super::merge::{Object, Version};
 use super::*;
 use crate::chunkstore::ChunkId;
+use crate::control::VersionInfo;
 use std::collections::HashSet;
 use std::time::Duration;
 
 /// A state that lasted less than this is not kept: the files a build writes and
 /// deletes within the replication hold still never leave the node.
 pub const MIN_VERSION_LIFE: Duration = Duration::from_secs(30);
+
+/// A restore point as `history` shows it: `YYYYMMDD-HHMMSS.mmm` in UTC.
+pub fn restore_point(wall: Nanos) -> String {
+    format!(
+        "{}.{:03}",
+        super::merge::stamp(wall),
+        wall % 1_000_000_000 / 1_000_000
+    )
+}
+
+/// The instant a restore point names: `YYYYMMDD-HHMMSS`, optionally with up to
+/// nine digits of fractions of a second, in UTC. It stands for the end of the
+/// precision given, so the restore point `history` shows for a version names
+/// that version even though its stamp is finer than what is shown.
+pub fn parse_restore_point(text: &str) -> Option<Nanos> {
+    let (secs, frac) = text.split_once('.').unwrap_or((text, ""));
+    let (date, time) = secs.split_once('-')?;
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(date, 8) || !digits(time, 6) || frac.len() > 9 || !digits(frac, frac.len()) {
+        return None;
+    }
+    let num = |s: &str| s.parse::<i64>().ok();
+    let (y, m, d) = (num(&date[..4])?, num(&date[4..6])?, num(&date[6..])?);
+    let (hh, mm, ss) = (num(&time[..2])?, num(&time[2..4])?, num(&time[4..])?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    // Days-from-civil (proleptic Gregorian), after Howard Hinnant.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()?;
+    let unit = 10u64.pow(9 - frac.len() as u32);
+    let frac = if frac.is_empty() {
+        0
+    } else {
+        frac.parse::<u64>().ok()?
+    };
+    Some(secs * 1_000_000_000 + frac * unit + (unit - 1))
+}
 
 /// One earlier version of an object, and the stamp of what replaced it.
 #[derive(Serialize, Deserialize, Clone)]
@@ -153,7 +198,128 @@ impl Tables<'_> {
     }
 }
 
+/// One state the file at a path has had: its version and how it ended.
+pub(super) struct Span {
+    pub(super) version: Version,
+    /// What replaced it; `None` while it is what the path holds.
+    pub(super) end: Option<Hlc>,
+    pub(super) deleted: bool,
+}
+
+impl Tables<'_> {
+    /// The directory and name a path ends in, through deleted directories too.
+    pub(super) fn locate(&self, path: &str) -> FsResult<(Ino, String)> {
+        let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+        let (name, dirs) = parts.split_last().ok_or(FsError::Invalid)?;
+        let mut dir = ROOT_INO;
+        for d in dirs {
+            dir = match self.entry(dir, d)? {
+                Some(ino) if self.inode(ino)?.kind == FileKind::Dir => ino,
+                _ => self.deleted_dir(dir, d)?.ok_or(FsError::NotFound)?,
+            };
+        }
+        Ok((dir, (*name).to_string()))
+    }
+
+    /// The directory last deleted from `parent` under `name`.
+    fn deleted_dir(&self, parent: Ino, name: &str) -> FsResult<Option<Ino>> {
+        let mut found: Option<(Hlc, Ino)> = None;
+        for row in self.objects.iter().map_err(db)? {
+            let (k, v) = row.map_err(db)?;
+            let o: Object = dec(v.value())?;
+            if o.kind != Some(FileKind::Dir) || o.alive() {
+                continue;
+            }
+            if let Some((_, (at, p, n))) = o.home()
+                && *p == parent
+                && n == name
+                && found.is_none_or(|(f, _)| *at > f)
+            {
+                found = Some((*at, k.value()));
+            }
+        }
+        Ok(found.map(|(_, ino)| ino))
+    }
+
+    /// Every kept state of the files and symlinks named `name` in `dir`, oldest first.
+    pub(super) fn spans(
+        &self,
+        dir: Ino,
+        name: &str,
+        now: Nanos,
+        window: Nanos,
+    ) -> FsResult<Vec<Span>> {
+        let mut out = Vec::new();
+        for row in self.objects.iter().map_err(db)? {
+            let (k, v) = row.map_err(db)?;
+            let ino = k.value();
+            if ino & (1 << 63) != 0 {
+                continue;
+            }
+            let o: Object = dec(v.value())?;
+            if o.kind.is_none_or(|k| k == FileKind::Dir) {
+                continue;
+            }
+            let here = o
+                .names
+                .values()
+                .filter_map(|n| n.loc.as_ref())
+                .any(|(_, p, n)| *p == dir && n == name);
+            if !here {
+                continue;
+            }
+            for past in self.versions_of(ino)? {
+                if kept(past.version.hlc, past.until, now, window) {
+                    out.push(Span {
+                        version: past.version,
+                        end: Some(past.until),
+                        deleted: false,
+                    });
+                }
+            }
+            let Some(last) = o.winner() else { continue };
+            match o.death() {
+                None => out.push(Span {
+                    version: last.clone(),
+                    end: None,
+                    deleted: false,
+                }),
+                Some(d) if kept(last.hlc, d, now, window) => out.push(Span {
+                    version: last.clone(),
+                    end: Some(d),
+                    deleted: true,
+                }),
+                Some(_) => {}
+            }
+        }
+        out.sort_by_key(|s| s.version.hlc);
+        Ok(out)
+    }
+}
+
 impl LocalFs {
+    /// The versions of the file at `path`, oldest first: those still kept and
+    /// what the path holds now. Not found if the path has neither.
+    pub fn history(&self, path: &str) -> FsResult<Vec<VersionInfo>> {
+        let (now, window) = (self.clock.now(), self.window());
+        let spans = self.run(false, |t| {
+            let (dir, name) = t.locate(path)?;
+            t.spans(dir, &name, now, window)
+        })?;
+        if spans.is_empty() {
+            return Err(FsError::NotFound);
+        }
+        Ok(spans
+            .into_iter()
+            .map(|s| VersionInfo {
+                written: s.version.hlc.wall,
+                replaced: s.end.map(|e| e.wall),
+                deleted: s.deleted,
+                size: s.version.size,
+            })
+            .collect())
+    }
+
     /// Set how long a replaced version is kept (the filesystem's window).
     pub fn set_keep_versions(&self, window: Duration) {
         self.keep_versions
