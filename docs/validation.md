@@ -453,7 +453,19 @@ acknowledged is lost.
 On the live cluster (1.13.2, a cold build of gliff on the mount, 2026-11-01): mini1 reached 97% busy
 with a receive phase of 237 ms per tick, 896 messages in its inbox and a longest tick of 2.2 s; vps2
 100% busy, 252 ms, 808 messages; this node, sending, had 1349 sends time out and 1347 retried.
-The same run after the fix is still to be done.
+After 1.13.3 (same sampler; the build cache shortcuts a rerun, so the loads differ):
+
+| Build | Written | mini1 busy, receive, inbox | vps2 busy, receive, inbox | Sends timed out |
+|---|---|---|---|---|
+| release, 1.13.2 (above) | 966 MB in 105 s | 97%, 237 ms, 896 | 100%, 252 ms, 808 | 1349 |
+| release, 1.13.3 | 548 MB in 34 s | 62%, 83 ms, 296 | 72%, 132 ms, 693 | 25 |
+| debug, 1.13.3 | 1.3 GB in 61 s | 100%, 368 ms, 1446 | 100%, 286 ms, 1681 | 5101 |
+
+So the fix helps under a moderate load and does not stop a heavy one from saturating the weak
+members. On a third 1.13.3 build (debug, 658 MB) the receiver's tick thread used about 38% of one
+core (mini1 36%, vps2 40%), 95% of it user time: a tick reported as busy spends most of its time
+waiting, not computing. What it waits on is not known yet (the pressure samples of that run were
+lost). #166 stays open.
 
 ## Defects found, not fixed
 
