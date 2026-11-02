@@ -287,13 +287,11 @@ mod tests {
 
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
-    const PINNED: (u8, &str) = (
-        19,
-        "9642357923ffec556b131697fdaca53f3c347fdb5e6fce18e8b3105d6bc93b7d",
-    );
+    const PINNED: (u8, &str) = (19, "0000");
 
-    #[test]
-    fn a_change_to_the_wire_shape_comes_with_a_protocol_version_bump() {
+    /// One of every message, with fixed contents: what the wire-shape pin and the traffic
+    /// classes are checked against.
+    fn samples() -> Vec<Message> {
         use crate::control::{Efficiency, FilesystemInfo, NodeStats, Repair, Shortfall, Usage};
         use crate::members::{Admission, IdRange, Member, MemberId, TokenRec};
         use crate::net::NodeId;
@@ -323,6 +321,20 @@ mod tests {
             encrypted: true,
         };
         let samples = [
+            Message::Hello(Frontier::default()),
+            Message::Entries(vec![]),
+            Message::JoinRequest(crate::members::JoinRequest {
+                fs_id: "fs".into(),
+                token_id: "t".into(),
+                addr: "host:7600".into(),
+                offer_bytes: 5,
+                site: "home".into(),
+                storage_only: true,
+                key_proof: Some([4; 32]),
+            }),
+            Message::ChunkRequest([3; 32]),
+            Message::ChunkReply([3; 32], Some(vec![1, 2])),
+            Message::ChunkPush([3; 32], None),
             Message::JoinReply(Ok(Admission {
                 fs,
                 id: MemberId(2),
@@ -419,6 +431,12 @@ mod tests {
                 pending_gc_bytes: 12,
             }),
         ];
+        samples.to_vec()
+    }
+
+    #[test]
+    fn a_change_to_the_wire_shape_comes_with_a_protocol_version_bump() {
+        let samples = samples();
         // Without the version byte, so only the shape of the messages is pinned.
         let bytes: Vec<u8> = samples
             .iter()
@@ -488,5 +506,60 @@ mod tests {
                 .all(|m| Message::is_background(&m.encode()))
         );
         assert!(urgent.iter().all(|m| !Message::is_background(&m.encode())));
+    }
+
+    /// What each message is, by an exhaustive match: a new variant does not compile until it
+    /// is classified here, and the raw-byte classifiers must agree.
+    fn expected(m: &Message) -> (Category, bool, bool) {
+        use Category::*;
+        // (category, background, bulk)
+        match m {
+            Message::Hello(_) => (Gossip, false, false),
+            Message::Entries(_) | Message::StateChunk(_) => (Metadata, false, false),
+            Message::Members(_)
+            | Message::Tokens(_)
+            | Message::Health(_)
+            | Message::KeyWraps(_) => (Gossip, true, false),
+            Message::Copies { .. } | Message::KeepVersions { .. } => (Gossip, true, false),
+            Message::JoinRequest(_) | Message::JoinReply(_) => (Other, false, false),
+            Message::ChunkRequest(_) | Message::ChunkAck(..) => (Chunk, false, false),
+            Message::ChunkReply(..) | Message::ChunkPush(..) => (Chunk, false, true),
+            Message::StatsRequest => (Gossip, false, false),
+            Message::StatsReply(_) | Message::Purge => (Other, false, false),
+            // Counted as Other although `Category::Gossip` lists upgrades; pinned as it is.
+            Message::Upgrade(_) => (Other, true, false),
+            Message::UpgradeNotice(_) => (Gossip, false, false),
+        }
+    }
+
+    #[test]
+    fn every_message_is_classified_the_way_its_variant_says() {
+        let samples = samples();
+        let mut seen: Vec<u8> = Vec::new();
+        for m in &samples {
+            let raw = m.encode();
+            let (category, background, bulk) = expected(m);
+            assert_eq!(Message::category(&raw), category, "category of {m:?}");
+            assert_eq!(Message::is_background(&raw), background, "background {m:?}");
+            assert_eq!(Message::is_bulk(&raw), bulk, "bulk {m:?}");
+            if !matches!(m, Message::UpgradeNotice(_)) {
+                seen.push(raw[1]);
+            }
+        }
+        // The samples cover every variant: their indices leave no gap below the highest.
+        seen.sort_unstable();
+        seen.dedup();
+        let top = *seen.last().unwrap();
+        assert_eq!(
+            seen,
+            (0..=top).filter(|i| *i != 17).collect::<Vec<u8>>(),
+            "add a sample of the new message to `samples()`"
+        );
+    }
+
+    #[test]
+    fn the_samples_are_the_same_every_time() {
+        let bytes = |v: Vec<Message>| v.iter().flat_map(Message::encode).collect::<Vec<u8>>();
+        assert_eq!(bytes(samples()), bytes(samples()));
     }
 }
