@@ -507,7 +507,11 @@ impl LocalFs {
                 size += p.data.len() as u64;
             }
             out.extend_from_slice(&refs[tail_from..]);
-            size += i.size - bounds[tail_from];
+            // The old chunks kept after the new ones. Inline content has none: all of it
+            // was in the window, so counting `i.size` again would add phantom zeros.
+            if inline.is_none() {
+                size += i.size - bounds[tail_from];
+            }
             return Ok(Some(Spliced {
                 content: Content::Chunks(out),
                 size,

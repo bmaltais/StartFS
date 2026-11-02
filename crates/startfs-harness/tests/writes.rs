@@ -159,6 +159,41 @@ fn random_writes_truncates_and_appends_match_whole_file_rewriting() {
     }
 }
 
+/// A file committed while it is small enough to be stored inline, then written on past that,
+/// keeps the size of what was written (it grew by the inline bytes a second time, as zeros at
+/// its end: a linker then rejected an rlib that was otherwise whole).
+#[test]
+fn a_small_file_written_on_past_the_inline_limit_keeps_its_size() {
+    let c = Cluster::start(1);
+    let fs = c.fs(0);
+    for (first, more_at, more) in [
+        (262usize, 262usize, 45_824usize),
+        (262, 0, 45_824),
+        (100, 5_000, 45_824),
+    ] {
+        let f = fs
+            .create(ROOT_INO, &format!("f-{first}-{more_at}"), 0o644)
+            .unwrap();
+        let mut model = noise(first, 1);
+        fs.write(f.ino, 0, &model).unwrap();
+        fs.flush(f.ino).unwrap();
+        let bytes = noise(more, 2);
+        fs.write(f.ino, more_at as u64, &bytes).unwrap();
+        fs.flush(f.ino).unwrap();
+        model.resize(model.len().max(more_at + more), 0);
+        model[more_at..more_at + more].copy_from_slice(&bytes);
+        assert_eq!(
+            fs.getattr(f.ino).unwrap().size,
+            model.len() as u64,
+            "{first} then {more} at {more_at}"
+        );
+        assert!(
+            read_all(&fs, f.ino) == model,
+            "{first} then {more} at {more_at}: bytes"
+        );
+    }
+}
+
 /// Writes at scattered offsets, overlapping each other and what is committed, as a linker
 /// writes: every read sees the latest bytes, and the file ends up cut into the same chunks as
 /// the same bytes written in one go.
