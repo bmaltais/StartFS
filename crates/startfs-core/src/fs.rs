@@ -1112,17 +1112,19 @@ impl FsOps for LocalFs {
         let buffered = self.buffered_part(ino, offset, to);
         self.fetching_view(|t, spill| {
             let i = Self::file(t, ino)?;
-            let size = i.size.max(buffered.as_ref().map_or(0, |b| b.2));
+            let size = i.size.max(buffered.as_ref().map_or(0, |b| b.1));
             let end = to.min(size);
             if offset >= end {
                 return Ok(Vec::new());
             }
             let mut out = self.read_committed(&i, offset, end.min(i.size), spill)?;
             out.resize((end - offset) as usize, 0);
-            if let Some((at, part, _)) = &buffered
-                && !part.is_empty()
-            {
-                out[(*at - offset) as usize..][..part.len()].copy_from_slice(part);
+            for (at, part) in buffered.iter().flat_map(|b| &b.0) {
+                let at = (*at - offset) as usize;
+                if at < out.len() {
+                    let n = part.len().min(out.len() - at);
+                    out[at..at + n].copy_from_slice(&part[..n]);
+                }
             }
             Ok(out)
         })

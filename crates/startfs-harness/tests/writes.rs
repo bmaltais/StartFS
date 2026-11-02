@@ -159,6 +159,65 @@ fn random_writes_truncates_and_appends_match_whole_file_rewriting() {
     }
 }
 
+/// Writes at scattered offsets, overlapping each other and what is committed, as a linker
+/// writes: every read sees the latest bytes, and the file ends up cut into the same chunks as
+/// the same bytes written in one go.
+#[test]
+fn scattered_overlapping_writes_read_back_and_chunk_like_one_write() {
+    for seed in 1..=8u64 {
+        let c = Cluster::start(1);
+        let fs = c.fs(0);
+        let f = fs.create(ROOT_INO, "f", 0o644).unwrap();
+        let mut model: Vec<u8> = Vec::new();
+        let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = |bound: usize| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 11) as usize % bound.max(1)
+        };
+        for step in 0..150 {
+            match next(20) {
+                0 => fs.flush(f.ino).unwrap(),
+                1 => {
+                    let from = next(model.len() + 1);
+                    let len = next(6 * MIB);
+                    let got = fs.read(f.ino, from as u64, len as u32).unwrap();
+                    let end = (from + len).min(model.len());
+                    assert_eq!(got, model[from..end], "seed {seed} step {step} read");
+                }
+                _ => {
+                    let len = match next(4) {
+                        0 => 1 + next(100),
+                        1 | 2 => 1 + next(64 * 1024),
+                        _ => 1 + next(MIB),
+                    };
+                    let at = next(24 * MIB);
+                    let bytes = noise(len, seed * 1000 + step);
+                    fs.write(f.ino, at as u64, &bytes).unwrap();
+                    if model.len() < at + len {
+                        model.resize(at + len, 0);
+                    }
+                    model[at..at + len].copy_from_slice(&bytes);
+                }
+            }
+        }
+        assert_eq!(read_all(&fs, f.ino), model, "seed {seed} before flush");
+        fs.flush(f.ino).unwrap();
+        assert_eq!(read_all(&fs, f.ino), model, "seed {seed} after flush");
+
+        let before = fs.stats().unwrap().chunks;
+        let copy = fs.create(ROOT_INO, "copy", 0o644).unwrap();
+        fs.write(copy.ino, 0, &model).unwrap();
+        fs.flush(copy.ino).unwrap();
+        assert_eq!(
+            fs.stats().unwrap().chunks,
+            before,
+            "seed {seed}: different chunks"
+        );
+    }
+}
+
 #[test]
 fn a_flushed_file_replicates_and_stages_only_its_own_size() {
     const BIG: u64 = 10 << 30;
