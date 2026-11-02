@@ -4,6 +4,7 @@
 use super::Daemon;
 use super::standing::is_up;
 use crate::control::{FilesystemInfo, Verdict};
+use crate::crypto::{FsKey, RecoveryKey};
 use crate::error::Error;
 use crate::members::{JoinRequest, MemberId, Membership, Token};
 use crate::net::{NodeId, Transport};
@@ -61,7 +62,12 @@ impl Daemon {
         offer_bytes: Option<u64>,
         site: String,
         storage_only: bool,
+        recovery_key: Option<String>,
     ) -> Result<(), Error> {
+        let recovery = recovery_key
+            .as_deref()
+            .map(RecoveryKey::parse)
+            .transpose()?;
         if storage_only && offer_bytes.unwrap_or(self.config.offer_bytes) == 0 {
             return Err(Error::StorageOnlyWithoutOffer);
         }
@@ -90,6 +96,7 @@ impl Daemon {
                 offer_bytes: offer,
                 site: site.trim().to_string(),
                 storage_only,
+                key_proof: recovery.as_ref().map(RecoveryKey::proof),
             })
             .encode(),
         );
@@ -104,6 +111,22 @@ impl Daemon {
                     addr: token.addr.clone(),
                 },
             })??;
+        // Open the filesystem key before anything is kept: a key that does not open it
+        // leaves this node as it was.
+        let fs_key = if reply.fs.encrypted {
+            let recovery = recovery.as_ref().ok_or(Error::RecoveryKeyNeeded)?;
+            let wrap = reply
+                .key_wraps
+                .iter()
+                .find(|w| w.accepts(&recovery.proof()))
+                .ok_or(Error::RecoveryKeyWrong)?;
+            Some(wrap.unwrap(recovery)?)
+        } else {
+            None
+        };
+        if let Some(key) = fs_key {
+            self.fs.set_encryption(key)?;
+        }
         self.fs.set_node(reply.id);
         {
             let mut membership = self.membership.lock().unwrap();
@@ -150,7 +173,12 @@ impl Daemon {
     }
 
     /// Start a filesystem with this node as its first member; returns the first join token.
-    pub(super) fn create_filesystem(&self, name: String, copies: u32) -> Result<String, Error> {
+    pub(super) fn create_filesystem(
+        &self,
+        name: String,
+        copies: u32,
+        encrypt: bool,
+    ) -> Result<(String, Option<String>), Error> {
         let mut membership = self.membership.lock().unwrap();
         if membership.filesystem().is_some() {
             return Err(Error::AlreadyInFilesystem);
@@ -173,14 +201,62 @@ impl Daemon {
                 standin_days: self.config.standin_days,
                 keep_versions_secs: self.config.keep_versions_secs,
                 keep_versions_rev: 0,
+                encrypted: encrypt,
             },
             endpoint,
             self.addr(),
             self.config.offer_bytes,
         )?;
+        let recovery = if encrypt {
+            let (key, recovery) = (FsKey::generate(), RecoveryKey::generate());
+            self.fs.set_encryption(key.clone())?;
+            membership.add_key_wrap(recovery.wrap(&key))?;
+            Some(recovery.to_string())
+        } else {
+            None
+        };
         let token = self.mint(&mut membership)?;
         self.fs.set_replicating();
-        Ok(token)
+        Ok((token, recovery))
+    }
+
+    /// Make another recovery key for the filesystem, from the key this running member holds,
+    /// and tell the others its wrap. Nothing is re-encrypted; the older keys keep working.
+    pub(super) fn new_recovery_key(&self) -> Result<String, Error> {
+        let key = self.fs.encryption_key().ok_or_else(|| {
+            if self
+                .membership
+                .lock()
+                .unwrap()
+                .filesystem()
+                .is_some_and(|f| f.encrypted)
+            {
+                Error::NoKeyHere
+            } else {
+                Error::NotEncrypted
+            }
+        })?;
+        let recovery = RecoveryKey::generate();
+        self.membership
+            .lock()
+            .unwrap()
+            .add_key_wrap(recovery.wrap(&key))?;
+        self.announce_key_wraps();
+        Ok(recovery.to_string())
+    }
+
+    fn announce_key_wraps(&self) {
+        let Some(transport) = self.transport() else {
+            return;
+        };
+        let (peers, wraps) = {
+            let m = self.membership.lock().unwrap();
+            (m.peers(), m.key_wraps())
+        };
+        let msg = Message::KeyWraps(wraps).encode();
+        for p in peers {
+            transport.send(p, msg.clone());
+        }
     }
 
     /// Mint another join token and tell the other members about it.

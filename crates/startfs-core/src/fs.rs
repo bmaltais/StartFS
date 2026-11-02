@@ -289,6 +289,11 @@ fn readahead(refs: &[ChunkRef]) -> Vec<ChunkId> {
 
 pub struct LocalFs {
     db: Database,
+    /// The node's data directory: where the filesystem key is kept.
+    dir: std::path::PathBuf,
+    /// The key chunks and metadata are encrypted under, once the node belongs to an
+    /// encrypted filesystem.
+    key: Mutex<Option<crate::crypto::FsKey>>,
     /// Replica storage: chunks this node is responsible for.
     chunks: ChunkStore,
     /// Chunks written here that are not yet on all the nodes placement chose.
@@ -393,10 +398,20 @@ impl LocalFs {
             .set_cache_size(METADATA_CACHE_BYTES)
             .create(dir.join("meta.redb"))
             .map_err(db)?;
+        let key = crate::crypto::FsKey::load(dir).map_err(db)?;
+        let chunks = ChunkStore::open(&dir.join("chunks"))?;
+        let staging = ChunkStore::open(&dir.join("staging"))?.recording_additions();
+        let cache = ChunkCache::open(&dir.join("cache"), cache_bytes)?;
+        for store in [&chunks, &staging] {
+            store.set_key(key.as_ref());
+        }
+        cache.set_key(key.as_ref());
         let fs = Self {
             db: database,
-            chunks: ChunkStore::open(&dir.join("chunks"))?,
-            staging: ChunkStore::open(&dir.join("staging"))?.recording_additions(),
+            dir: dir.to_path_buf(),
+            key: Mutex::new(key),
+            chunks,
+            staging,
             replicating: AtomicBool::new(false),
             storage_only: AtomicBool::new(false),
             staging_limit: AtomicU64::new(u64::MAX),
@@ -407,7 +422,7 @@ impl LocalFs {
             keep_versions: AtomicU64::new(
                 crate::config::DEFAULT_KEEP_VERSIONS_SECS * 1_000_000_000,
             ),
-            cache: ChunkCache::open(&dir.join("cache"), cache_bytes)?,
+            cache,
             decoded: DecodedCache::new(DEFAULT_DECODED_BYTES),
             source: Mutex::new(None),
             clock,
@@ -515,6 +530,23 @@ impl LocalFs {
     /// Cap the memory used to keep recently read chunks decoded; 0 turns it off.
     pub fn set_read_cache_limit(&self, bytes: u64) {
         self.decoded.set_limit(bytes);
+    }
+
+    /// The filesystem key this node holds, if its filesystem is encrypted.
+    pub fn encryption_key(&self) -> Option<crate::crypto::FsKey> {
+        self.key.lock().unwrap().clone()
+    }
+
+    /// Start encrypting under `key`: keep it for the next start, then seal what is stored
+    /// from now on. Chunks stored before keep reading as they were.
+    pub fn set_encryption(&self, key: crate::crypto::FsKey) -> FsResult<()> {
+        key.save(&self.dir).map_err(db)?;
+        for store in [&self.chunks, &self.staging] {
+            store.set_key(Some(&key));
+        }
+        self.cache.set_key(Some(&key));
+        *self.key.lock().unwrap() = Some(key);
+        Ok(())
     }
 
     /// Choose whether chunks this node stores from now on are compressed.

@@ -13,6 +13,7 @@
 //! overlap, so two members admitting at the same moment cannot assign the same id.
 
 use crate::control::FilesystemInfo;
+use crate::crypto::KeyWrap;
 use crate::error::Error;
 use crate::net::NodeId;
 use crate::ops::Nanos;
@@ -125,6 +126,9 @@ pub struct Admission {
     /// The ids the new member may hand out to others.
     pub ids: IdRange,
     pub members: Vec<Member>,
+    /// Every recovery key's wrap of the filesystem key (empty when not encrypted).
+    #[serde(default)]
+    pub key_wraps: Vec<KeyWrap>,
 }
 
 /// A new node's request to the member named in its token: admit me.
@@ -141,6 +145,10 @@ pub struct JoinRequest {
     /// Whether the joiner is to be a storage-only member.
     #[serde(default)]
     pub storage_only: bool,
+    /// Proof of holding a recovery key (see `RecoveryKey::proof`), which an encrypted
+    /// filesystem asks for before it tells a node anything.
+    #[serde(default)]
+    pub key_proof: Option<[u8; 32]>,
 }
 
 /// A join token as every member knows it. `expires` never changes and `revoked`
@@ -187,6 +195,9 @@ pub struct Membership {
     tokens: Vec<TokenRec>,
     /// Set by `join` or `config`; otherwise the config file's offer applies.
     offer: Option<u64>,
+    /// The filesystem key sealed under each recovery key; any member can serve them.
+    #[serde(default)]
+    key_wraps: Vec<KeyWrap>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -314,6 +325,32 @@ impl Membership {
         self.save()
     }
 
+    /// Every recovery key's wrap, for gossip and for a node joining.
+    pub fn key_wraps(&self) -> Vec<KeyWrap> {
+        self.key_wraps.clone()
+    }
+
+    /// Keep another recovery key's wrap.
+    pub fn add_key_wrap(&mut self, wrap: KeyWrap) -> Result<(), Error> {
+        self.merge_key_wraps(vec![wrap]);
+        self.save()
+    }
+
+    /// Fold in a peer's wraps; wraps are never removed. Returns whether anything changed.
+    pub fn merge_key_wraps(&mut self, theirs: Vec<KeyWrap>) -> bool {
+        let mut changed = false;
+        for w in theirs {
+            if !self.key_wraps.iter().any(|m| m.id == w.id) {
+                self.key_wraps.push(w);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_or_report();
+        }
+        changed
+    }
+
     /// Mint a join token valid until `expires`; returns the token text.
     pub fn mint_token(&mut self, expires: Nanos) -> Result<String, Error> {
         let (Some(fs), Some(me)) = (&self.fs, self.members.get(&self.me)) else {
@@ -381,6 +418,15 @@ impl Membership {
         if fs.id != request.fs_id {
             return Err(denied());
         }
+        if fs.encrypted {
+            let proof = request.key_proof.ok_or(Error::RecoveryKeyNeeded)?;
+            if !self.key_wraps.iter().any(|w| w.accepts(&proof)) {
+                return Err(Error::RecoveryKeyWrong);
+            }
+            if request.storage_only {
+                return Err(Error::StorageOnlyEncrypted);
+            }
+        }
         let rec = self
             .tokens
             .iter()
@@ -423,12 +469,14 @@ impl Membership {
             id,
             ids: handed,
             members: self.records(),
+            key_wraps: self.key_wraps.clone(),
         })
     }
 
     /// Become a member, as told by the admitting member.
     pub fn install(&mut self, adm: Admission, offer: u64) -> Result<(), Error> {
         self.fs = Some(adm.fs);
+        self.key_wraps = adm.key_wraps;
         self.me = adm.id;
         self.ids = adm.ids;
         self.members = adm.members.into_iter().map(|m| (m.id, m)).collect();

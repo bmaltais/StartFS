@@ -90,6 +90,11 @@ impl ChunkCache {
         }
     }
 
+    /// Seal chunks cached from now on under `key`.
+    pub fn set_key(&self, key: Option<&crate::crypto::FsKey>) {
+        self.store.set_key(key);
+    }
+
     /// Choose whether chunks cached from now on are compressed.
     pub fn set_compression(&self, mode: crate::chunkstore::Compression) {
         self.store.set_compression(mode);

@@ -59,8 +59,9 @@ impl Node {
         match self.call(Request::Create {
             name: "home".into(),
             copies,
+            encrypt: false,
         }) {
-            Response::Created { token } => token,
+            Response::Created { token, .. } => token,
             other => panic!("create: {other:?}"),
         }
     }
@@ -71,6 +72,7 @@ impl Node {
             offer_bytes: None,
             site: String::new(),
             storage_only: false,
+            recovery_key: None,
         })
     }
 
@@ -130,6 +132,7 @@ fn a_joined_node_sees_metadata_and_reads_chunks_from_its_peer() {
         offer_bytes: Some(0),
         site: String::new(),
         storage_only: false,
+        recovery_key: None,
     });
     assert!(matches!(joined, Response::Joined), "{joined:?}");
 

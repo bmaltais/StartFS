@@ -586,9 +586,9 @@ impl Daemon {
         let Some(transport) = self.transport() else {
             return false;
         };
-        let (peers, members, tokens) = {
+        let (peers, members, tokens, wraps) = {
             let m = self.membership.lock().unwrap();
-            (m.peers(), m.records(), m.token_records())
+            (m.peers(), m.records(), m.token_records(), m.key_wraps())
         };
         let now = self.clock.now();
         {
@@ -607,6 +607,7 @@ impl Daemon {
             *last = Some(now);
             let members_msg = Message::Members(members).encode();
             let tokens_msg = Message::Tokens(tokens).encode();
+            let wraps_msg = (!wraps.is_empty()).then(|| Message::KeyWraps(wraps).encode());
             let health_msg = Message::Health(self.local_health()).encode();
             let upgrade_msg = Message::Upgrade(self.upgrade_gossip()).encode();
             let copies_msg = self
@@ -627,6 +628,9 @@ impl Daemon {
                 }
                 transport.send(*p, members_msg.clone());
                 transport.send(*p, tokens_msg.clone());
+                if let Some(msg) = &wraps_msg {
+                    transport.send(*p, msg.clone());
+                }
                 transport.send(*p, health_msg.clone());
                 transport.send(*p, upgrade_msg.clone());
             }

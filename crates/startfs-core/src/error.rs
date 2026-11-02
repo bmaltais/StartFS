@@ -32,6 +32,20 @@ pub enum Error {
     BadRelease(String),
     #[error("cannot find the latest release: {0}")]
     NoRelease(String),
+    #[error("this filesystem is encrypted: joining needs its recovery key (--key)")]
+    RecoveryKeyNeeded,
+    #[error("the recovery key does not open this filesystem")]
+    RecoveryKeyWrong,
+    #[error("this filesystem is not encrypted")]
+    NotEncrypted,
+    #[error("this node does not hold the key to this encrypted filesystem")]
+    NoKeyHere,
+    #[error("storage-only members of an encrypted filesystem are not supported yet")]
+    StorageOnlyEncrypted,
+    #[error(transparent)]
+    Crypto(#[from] crate::crypto::CryptoError),
+    #[error("cannot keep the filesystem key: {0}")]
+    SaveKey(std::io::Error),
     #[error("no such token")]
     NoSuchToken,
     #[error("token not recognised")]
