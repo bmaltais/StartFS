@@ -17,6 +17,7 @@ Read during review, not implementation. Mechanical rules live in CI (`.github/wo
 ## Concurrency
 
 - The harness runs `tick` inside any thread that waits on a peer, so a lock held across a chunk fetch or the wait hook is re-entered by that same thread. Code reachable from `tick` takes such a lock with `try_lock` and skips the round when it is busy.
+- A `run`/`run_as` closure holds the node lock, which the tick and every filesystem operation wait on. Slow work (chunking, hashing, compression, chunk I/O, anything that waits on a peer) is done before taking it; the closure only checks and applies the result.
 
 ## Docs
 
