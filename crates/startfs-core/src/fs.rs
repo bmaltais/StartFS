@@ -389,23 +389,28 @@ const METADATA_CACHE_BYTES: usize = 64 << 20;
 
 /// The metadata file in `dir`: encrypted under `key` when the node has one.
 fn open_database(dir: &Path, key: Option<&crate::crypto::FsKey>) -> FsResult<Database> {
-    let builder_with = || {
-        let mut b = Database::builder();
-        b.set_cache_size(METADATA_CACHE_BYTES);
-        b
-    };
     match key {
-        None => builder_with().create(dir.join(PLAIN_DB)).map_err(db),
+        None => database_builder().create(dir.join(PLAIN_DB)).map_err(db),
         Some(key) => {
             // A plain file left by a start that was cut short while the node began
             // encrypting is superseded: the encrypted one was finished first.
             remove_if_present(&dir.join(PLAIN_DB))?;
-            let file =
-                crate::metacrypt::EncryptedFile::open(&dir.join(SEALED_DB), key.sector_cipher())
-                    .map_err(db)?;
-            builder_with().create_with_backend(file).map_err(db)
+            sealed_database(dir, key)
         }
     }
+}
+
+fn database_builder() -> redb::Builder {
+    let mut builder = Database::builder();
+    builder.set_cache_size(METADATA_CACHE_BYTES);
+    builder
+}
+
+/// The encrypted metadata file in `dir`, created if absent.
+fn sealed_database(dir: &Path, key: &crate::crypto::FsKey) -> FsResult<Database> {
+    let file = crate::metacrypt::EncryptedFile::open(&dir.join(SEALED_DB), key.sector_cipher())
+        .map_err(db)?;
+    database_builder().create_with_backend(file).map_err(db)
 }
 
 fn remove_if_present(path: &Path) -> FsResult<()> {
@@ -432,10 +437,6 @@ impl LocalFs {
         let chunks = ChunkStore::open(&dir.join("chunks"))?;
         let staging = ChunkStore::open(&dir.join("staging"))?.recording_additions();
         let cache = ChunkCache::open(&dir.join("cache"), cache_bytes)?;
-        for store in [&chunks, &staging] {
-            store.set_key(key.as_ref());
-        }
-        cache.set_key(key.as_ref());
         let fs = Self {
             db: RwLock::new(Arc::new(database)),
             dir: dir.to_path_buf(),
@@ -476,6 +477,7 @@ impl LocalFs {
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
+        fs.apply_key(fs.encryption_key().as_ref());
         fs.init()?;
         Ok(fs)
     }
@@ -572,11 +574,24 @@ impl LocalFs {
         self.key.lock().unwrap().clone()
     }
 
+    /// Seal what the chunk stores and the cache take from now on under `key`.
+    fn apply_key(&self, key: Option<&crate::crypto::FsKey>) {
+        for store in [&self.chunks, &self.staging] {
+            store.set_key(key);
+        }
+        self.cache.set_key(key);
+    }
+
     /// Start encrypting under `key`: keep it for the next start, then seal what is stored
     /// from now on. Chunks stored before keep reading as they were.
     pub fn set_encryption(&self, key: crate::crypto::FsKey) -> FsResult<()> {
-        if self.key.lock().unwrap().is_some() {
-            return Ok(());
+        if let Some(held) = &*self.key.lock().unwrap() {
+            // The same key again is fine; another filesystem's key is not.
+            return if *held == key {
+                Ok(())
+            } else {
+                Err(FsError::Invalid)
+            };
         }
         // Metadata first. The node must be fresh: what the plain database holds is not
         // carried over. The encrypted file is finished before the key is kept, and a start
@@ -586,21 +601,13 @@ impl LocalFs {
         }
         let guard = self.lock.lock().unwrap();
         remove_if_present(&self.dir.join(SEALED_DB))?;
-        let file =
-            crate::metacrypt::EncryptedFile::open(&self.dir.join(SEALED_DB), key.sector_cipher())
-                .map_err(db)?;
-        let mut builder = Database::builder();
-        builder.set_cache_size(METADATA_CACHE_BYTES);
-        let sealed = builder.create_with_backend(file).map_err(db)?;
+        let sealed = sealed_database(&self.dir, &key)?;
         *self.db.write().unwrap() = Arc::new(sealed);
         drop(guard);
         self.init()?;
         key.save(&self.dir).map_err(db)?;
         remove_if_present(&self.dir.join(PLAIN_DB))?;
-        for store in [&self.chunks, &self.staging] {
-            store.set_key(Some(&key));
-        }
-        self.cache.set_key(Some(&key));
+        self.apply_key(Some(&key));
         *self.key.lock().unwrap() = Some(key);
         Ok(())
     }

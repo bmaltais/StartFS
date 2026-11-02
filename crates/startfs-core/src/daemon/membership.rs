@@ -189,6 +189,14 @@ impl Daemon {
         if encrypt && !self.fs.frontier()?.is_empty() {
             return Err(Error::EncryptNeedsFresh);
         }
+        // Keys first: if the node cannot start encrypting, nothing else has changed.
+        let keys = if encrypt {
+            let (key, recovery) = (FsKey::generate(), RecoveryKey::generate());
+            self.fs.set_encryption(key.clone())?;
+            Some((key, recovery))
+        } else {
+            None
+        };
         let mut raw = [0u8; 16];
         getrandom::fill(&mut raw).expect("os randomness");
         let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
@@ -210,14 +218,11 @@ impl Daemon {
             self.addr(),
             self.config.offer_bytes,
         )?;
-        let recovery = if encrypt {
-            let (key, recovery) = (FsKey::generate(), RecoveryKey::generate());
-            self.fs.set_encryption(key.clone())?;
+        let recovery = keys.map(|(key, recovery)| {
             membership.add_key_wrap(recovery.wrap(&key))?;
-            Some(recovery.to_string())
-        } else {
-            None
-        };
+            Ok::<_, Error>(recovery.to_string())
+        });
+        let recovery = recovery.transpose()?;
         let token = self.mint(&mut membership)?;
         self.fs.set_replicating();
         Ok((token, recovery))

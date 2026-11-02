@@ -52,6 +52,15 @@ WireGuard). Protocol 19 (ADR 0002): wraps, a key proof in the join request, `enc
 
 ## Consequences
 
+- A member that holds `fs.key` can read what it stores, so while every member is keyed this
+  protects stolen or copied data, not a replica host's operator. Keyless hosting is the follow-up.
+- `membership.json` (members, tokens, wraps) is not encrypted; wraps are safe to expose, tokens expire.
+- Wraps are never revoked: a leaked recovery key stays valid. Rotating the filesystem key is future work.
+- `recover` still needs a join token; it does not discover replicas on its own.
+- An all-zero sector reads as a hole (plaintext zeros), so someone who can write the file can zero a
+  sector without notice beyond the database's own checksums.
+- Each chunk grows by 40 bytes plus the 8-byte header; ratios were not re-measured with `scripts/`.
+
 - XTS has no authentication: a writer to the metadata file can scramble sectors (the database's
   checksums notice) or restore an older sector. Chunks are authenticated.
 - Storage-only members hold the key for now, so joining one to an encrypted filesystem is refused. The
