@@ -480,8 +480,8 @@ runs the same 4000-chunk burst (single runs, tick thread CPU during the burst on
 Twenty thousand tiny files alone (no chunks) cost the receiver 14.5 s of user CPU, 0.7 ms per file.
 Section 7 says the same thing: each tick that applies entries rebuilds the tree by reading all of
 it, and the live one holds more than 26,000 objects. That is the next thing to fix for a build to
-stop saturating the weak members; the chunk sync of this section does not touch it. #166 stays open
-until that is measured on the live cluster.
+stop saturating the weak members; the chunk sync of this section does not touch it (fixed in
+1.13.4, #210; the rest of the story follows).
 
 The tree rebuild was made incremental (1.13.4, #210) and the writer's own saturation fixed (1.13.6),
 after which the receivers were the limit again. A throwaway lab (writer and four peers on loopback,
@@ -502,6 +502,7 @@ Live, the same three-minute uncached gliff build on the mount (`scripts/sample-a
 |---|---|---|---|
 | 1.13.7 | 99%, 165 ms, 515 | 100%, 339 ms, 4027 | 2414 |
 | 1.13.8 | 97%, 105 ms, 132 | 100%, 331 ms, 376 | 106 |
+| 1.13.9 | 96%, 70 ms, 91 | 99%, 240 ms, 83 | 0 |
 
 A synced 8 KiB write takes 6.2 ms on vps2's disk and 5.4 ms on mini1's (`dd oflag=dsync`), and with
 5 ms added to every fsync in the lab all the receiver's remaining syncs were metadata commits, one per
@@ -519,6 +520,11 @@ stop at its durable frontier. Lab, receiver with +5 ms per fsync and a 25% CPU c
 `what_a_member_claimed_survives_a_power_cut_there` guards that a power cut never takes back what a
 member's hellos or passed-on entries claimed (the harness's `power_cut` now loses lazy metadata
 commits, as redb does after an unclean stop).
+
+1.13.9 is the lazy apply: in the live row above the receivers keep up with the build (inboxes under
+100, no sends timed out; both builds compiled the same 202 crates in the three minutes). #166 and
+#210 are closed on it. Their peak busy is still 96 to 99%; what that time goes to during a build is
+not broken down, since the sampler keeps only the peak.
 
 ## Defects found, not fixed
 
