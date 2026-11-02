@@ -4,9 +4,22 @@ use super::Daemon;
 use crate::chunkstore::ChunkId;
 use crate::error::Error;
 use crate::net::{NodeId, Transport};
+use crate::oplog::Entry;
 use crate::protocol::{Message, Replica};
 
 impl Daemon {
+    /// Apply the entries several peers sent during one drain, in one commit.
+    pub(super) fn handle_peer_entries(&self, batches: Vec<(NodeId, Vec<Entry>)>) {
+        if batches.is_empty() {
+            return;
+        }
+        // The replies expose log entries: make them durable first.
+        self.fs.sync_logged();
+        if let Some(s) = self.syncer.lock().unwrap().as_mut() {
+            s.handle_entries(batches);
+        }
+    }
+
     /// Act on one message a peer sent.
     pub(super) fn handle_peer_message(
         &self,
