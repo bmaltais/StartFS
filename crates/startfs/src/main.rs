@@ -11,12 +11,12 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
-use startfs_core::status_view::{human, ratio, render, state_word};
+use startfs_core::status_view::{human, ratio, render, state_word, watch_frame};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
@@ -26,10 +26,12 @@ commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
   create --name NAME --copies N [--example]
                                       create a filesystem and print its join token
-  status [--verbose] [--json]         show a summary of this node's filesystem: the verdict and its
+  status [--verbose] [--json] [--watch [--interval SECONDS]]
+                                      show a summary of this node's filesystem: the verdict and its
                                       cause, the members, what needs attention (--verbose, -v: also
                                       storage, cache, scrub, log; --json: everything, as JSON, for
-                                      scripts and GUIs)
+                                      scripts and GUIs; --watch: redraw it in place every
+                                      2 seconds, or every SECONDS, until Ctrl-C)
   activity [--json]                   show this node's recent traffic, tick timings, queues and
                                       memory over the last minute (--json: as JSON)
   purge                               free the data of deleted files on every member now, instead
@@ -78,6 +80,12 @@ enum CliError {
     MissingValue(String),
     #[error("cannot encode the status as JSON: {0}")]
     Json(serde_json::Error),
+    #[error("--watch redraws the text view; it cannot be combined with --json")]
+    WatchWithJson,
+    #[error("--watch needs a terminal to draw on")]
+    WatchNeedsTerminal,
+    #[error("not an interval: {0} (expected seconds, 0.2 or more)")]
+    BadInterval(String),
     #[error("--copies must be a number")]
     CopiesNotANumber,
     #[error("--activity must be on or off")]
@@ -284,6 +292,20 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Ok(())
         }
         "status" => {
+            let verbose = rest.iter().any(|a| a == "--verbose" || a == "-v");
+            if rest.iter().any(|a| a == "--watch") {
+                if rest.iter().any(|a| a == "--json") {
+                    return Err(CliError::WatchWithJson);
+                }
+                let interval = match rest.iter().position(|a| a == "--interval") {
+                    Some(i) => parse_interval(
+                        rest.get(i + 1)
+                            .ok_or_else(|| CliError::MissingValue("--interval".to_string()))?,
+                    )?,
+                    None => Duration::from_secs(2),
+                };
+                return watch_status(&Client::new(socket), verbose, interval);
+            }
             let status = Client::new(socket).status()?;
             if rest.iter().any(|a| a == "--json") {
                 println!(
@@ -291,10 +313,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                     serde_json::to_string(&status).map_err(CliError::Json)?
                 );
             } else {
-                print!(
-                    "{}",
-                    render(&status, rest.iter().any(|a| a == "--verbose" || a == "-v"))
-                );
+                print!("{}", render(&status, verbose));
             }
             Ok(())
         }
@@ -488,6 +507,84 @@ fn node_stats_table(rows: &[control::NodeReport], copies: u32) -> String {
     out
 }
 
+/// Seconds between two refreshes of `--watch`; at least 0.2, so it cannot spin.
+fn parse_interval(text: &str) -> Result<Duration, CliError> {
+    match text.parse::<f64>() {
+        Ok(s) if s.is_finite() && (0.2..=3600.0).contains(&s) => Ok(Duration::from_secs_f64(s)),
+        _ => Err(CliError::BadInterval(text.to_string())),
+    }
+}
+
+static WATCH_STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_watch_signal(_: libc::c_int) {
+    WATCH_STOP.store(true, Ordering::SeqCst);
+}
+
+/// The terminal's size as (rows, cols), or a plain 24x80 when it will not say.
+fn terminal_size() -> (usize, usize) {
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ fills the winsize it is given.
+    let ok = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) } == 0;
+    if ok && ws.ws_row > 0 && ws.ws_col > 0 {
+        (usize::from(ws.ws_row), usize::from(ws.ws_col))
+    } else {
+        (24, 80)
+    }
+}
+
+/// `startfs status --watch`: redraw the summary in place on the terminal's alternate screen
+/// until Ctrl-C (or SIGTERM), then give the screen and the cursor back. The daemon is asked
+/// once per refresh and only while this runs; a daemon that cannot be reached shows as a
+/// line and the watch carries on.
+fn watch_status(client: &Client, verbose: bool, interval: Duration) -> Result<(), CliError> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdout().is_terminal() {
+        return Err(CliError::WatchNeedsTerminal);
+    }
+    // SAFETY: the handler only stores to an atomic flag, which is async-signal-safe.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            on_watch_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            on_watch_signal as *const () as libc::sighandler_t,
+        );
+    }
+    let mut out = std::io::stdout();
+    let mut draw = |bytes: &[u8]| out.write_all(bytes).and_then(|()| out.flush()).is_ok();
+    if !draw(b"\x1b[?1049h\x1b[?25l\x1b[2J") {
+        return Ok(());
+    }
+    while !WATCH_STOP.load(Ordering::SeqCst) {
+        let mut text = match client.status() {
+            Ok(status) => render(&status, verbose),
+            Err(e) => format!("cannot reach the daemon: {e}\n"),
+        };
+        text.push_str(&format!(
+            "\nwatching every {}s, Ctrl-C to quit\n",
+            interval.as_secs_f64()
+        ));
+        let (rows, cols) = terminal_size();
+        if !draw(watch_frame(&text, rows, cols).as_bytes()) {
+            break; // the terminal is gone
+        }
+        let until = Instant::now() + interval;
+        while Instant::now() < until && !WATCH_STOP.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    draw(b"\x1b[?25h\x1b[?1049l");
+    Ok(())
+}
+
 /// Prints the token alone, so scripts can capture it, or with `--example` the command to
 /// paste on the other machine.
 fn print_token(token: &str, rest: &[String]) {
@@ -505,7 +602,11 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
     let (valued, alone, positional): (&[&str], &[&str], usize) = match command {
         "daemon" => (&["--mount"], &[], 0),
         "create" => (&["--name", "--copies"], &["--example"], 0),
-        "status" => (&[], &["--json", "--verbose", "-v"], 0),
+        "status" => (
+            &["--interval"],
+            &["--json", "--verbose", "-v", "--watch"],
+            0,
+        ),
         "activity" | "stats" => (&[], &["--json"], 0),
         "history" => (&[], &["--json"], 1),
         "restore" => (&["--at"], &[], 1),

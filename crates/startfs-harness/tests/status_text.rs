@@ -144,3 +144,52 @@ fn nine_members_with_one_away_fit_in_fifteen_lines() {
     assert!(text.lines().count() <= 15, "{text}");
     assert!(text.starts_with("DEGRADED: "), "{text}");
 }
+
+#[test]
+fn a_watch_frame_overwrites_in_place_and_follows_a_member_changing_state() {
+    use startfs_core::status_view::watch_frame;
+    let c = Cluster::start(3);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(1).join(&token, Some(0)).unwrap();
+    c.control(2).join(&token, Some(0)).unwrap();
+    c.sync();
+    c.advance(HELLO_INTERVAL);
+    c.sync();
+    let before = render(&c.control(0).status().unwrap(), false);
+
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(2)], &[NodeId(1)]]);
+    c.crash(1);
+    for _ in 0..4 {
+        c.advance(HELLO_INTERVAL);
+        c.sync();
+    }
+    c.advance(Duration::from_secs(10 * 60));
+    c.sync();
+    let after = render(&c.control(0).status().unwrap(), false);
+    assert_ne!(before, after, "the member going down shows in the text");
+
+    for (text, rows) in [(&before, 40), (&after, 40), (&after, 3)] {
+        let frame = watch_frame(text, rows, 60);
+        assert!(frame.starts_with("\x1b[H"), "starts at the top left");
+        assert!(frame.ends_with("\x1b[J"), "erases what is below");
+        let body = frame
+            .trim_start_matches("\x1b[H")
+            .trim_end_matches("\x1b[J");
+        let shown: Vec<&str> = body.split('\n').collect();
+        assert!(
+            shown.len() <= rows,
+            "never taller than the screen: no scrolling"
+        );
+        for line in shown {
+            assert!(
+                line.ends_with("\x1b[K"),
+                "every line erases its own leftovers"
+            );
+            assert!(
+                line.trim_end_matches("\x1b[K").chars().count() <= 60,
+                "clipped to the width"
+            );
+        }
+    }
+}

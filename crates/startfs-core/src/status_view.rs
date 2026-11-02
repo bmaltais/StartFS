@@ -369,6 +369,24 @@ fn headline(s: &Status, verdict: Verdict, fs: &FilesystemInfo) -> String {
     format!("{label}: {}", causes.join(", "))
 }
 
+/// One refresh of `startfs status --watch` for a terminal of `rows` x `cols`: the cursor goes
+/// home and each line is overwritten in place, clipped to the width and to the height so the
+/// screen never scrolls, with whatever the previous frame left on a line or below erased. So
+/// a member that changes state between two refreshes redraws without flicker or leftovers.
+pub fn watch_frame(text: &str, rows: usize, cols: usize) -> String {
+    let mut out = String::from("\x1b[H");
+    let lines: Vec<&str> = text.lines().take(rows.max(1)).collect();
+    for (i, line) in lines.iter().enumerate() {
+        out.extend(line.chars().take(cols.max(1)));
+        out.push_str("\x1b[K");
+        if i + 1 < lines.len() {
+            out.push('\n');
+        }
+    }
+    out.push_str("\x1b[J");
+    out
+}
+
 /// `startfs status` as text. `verbose` adds the diagnostic detail: storage and
 /// dedup, compression, cache, scrub, metadata log, garbage collection.
 pub fn render(s: &Status, verbose: bool) -> String {

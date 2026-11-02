@@ -668,3 +668,33 @@ fn a_daemon_without_tailscale_installed_runs_on_loopback() {
     }
     drop(daemon);
 }
+
+#[test]
+fn status_watch_refuses_what_it_cannot_draw() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let _daemon = start_daemon(data);
+    stdout(&startfs(
+        data,
+        &["create", "--name", "home", "--copies", "1"],
+    ));
+
+    for (args, message) in [
+        (&["status", "--watch", "--json"][..], "cannot be combined"),
+        (
+            &["status", "--watch", "--interval", "0"][..],
+            "not an interval",
+        ),
+        (
+            &["status", "--watch", "--interval", "x"][..],
+            "not an interval",
+        ),
+        // stdout is a pipe here, not a terminal
+        (&["status", "--watch"][..], "needs a terminal"),
+    ] {
+        let out = startfs(data, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(err.contains(message), "{args:?}: {err}");
+    }
+}
