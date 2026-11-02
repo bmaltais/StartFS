@@ -161,3 +161,38 @@ fn a_restarted_member_finds_its_key_and_reads_everything() {
     assert_eq!(c.fs(1).read(ino, 0, body.len() as u32).unwrap(), body);
     assert!(c.data_dir(1).join("fs.key").exists());
 }
+
+/// The same files on a plain and an encrypted single-node filesystem.
+fn workload(c: &Cluster) {
+    let text = b"line of a log file that compresses very well. ".repeat(3000);
+    put(&c.fs(0), "log.txt", &text);
+    put(&c.fs(0), "log-copy.txt", &text);
+    put(&c.fs(0), "photo.bin", &noise(300_000, 5));
+    c.sync();
+}
+
+#[test]
+fn encryption_leaves_dedup_and_compression_alone_and_costs_a_few_bytes_a_chunk() {
+    let plain = Cluster::with_filesystem(1, 1, "");
+    let (sealed, _key) = Cluster::with_encrypted_filesystem(1, 1);
+    workload(&plain);
+    workload(&sealed);
+    let (p, s) = (
+        plain.control(0).status().unwrap(),
+        sealed.control(0).status().unwrap(),
+    );
+
+    // Dedup and compression decide the same chunks, so these match exactly.
+    assert_eq!(p.usage.chunks, s.usage.chunks);
+    assert_eq!(p.efficiency.referenced_bytes, s.efficiency.referenced_bytes);
+    assert_eq!(p.efficiency.zstd_chunks, s.efficiency.zstd_chunks);
+    assert_eq!(p.efficiency.raw_chunks, s.efficiency.raw_chunks);
+    assert!(s.efficiency.zstd_chunks > 0, "{:?}", s.efficiency);
+
+    // Each sealed chunk grows by its nonce and tag, nothing more.
+    let extra = s.usage.stored_bytes - p.usage.stored_bytes;
+    assert_eq!(
+        extra,
+        p.usage.chunks * startfs_core::crypto::SEAL_OVERHEAD as u64
+    );
+}
