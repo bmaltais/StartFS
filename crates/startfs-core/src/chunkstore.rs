@@ -15,19 +15,21 @@
 //! The header can serve as AEAD associated data later, and the cipher byte
 //! lets encrypted and plain chunks coexist without a migration.
 
+use crate::crypto::{ChunkCipher, FsKey, SEAL_OVERHEAD};
 use crate::ops::{FsError, FsResult, StoreStats};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub type ChunkId = [u8; 32];
 
 pub const HEADER_LEN: usize = 8;
 const FORMAT_VERSION: u8 = 1;
 const CIPHER_NONE: u8 = 0;
+const CIPHER_XCHACHA: u8 = 1;
 const CODEC_RAW: u8 = 0;
 const CODEC_ZSTD: u8 = 1;
 const ZSTD_LEVEL: i32 = 3;
@@ -98,8 +100,8 @@ fn looks_compressible(data: &[u8]) -> bool {
     saves_enough(packed, PROBE_SPANS * PROBE_SPAN)
 }
 
-/// The envelope for `data` under the compression policy `mode`.
-fn encode(data: &[u8], mode: Compression) -> Vec<u8> {
+/// The envelope for `data` under the compression policy `mode`, sealed when `cipher` is given.
+fn encode(id: &ChunkId, data: &[u8], mode: Compression, cipher: Option<&ChunkCipher>) -> Vec<u8> {
     let packed = match mode {
         Compression::Off => None,
         Compression::Always => zstd_pack(data).filter(|z| z.len() < data.len()),
@@ -114,11 +116,30 @@ fn encode(data: &[u8], mode: Compression) -> Vec<u8> {
         CODEC_RAW
     };
     let body = packed.as_deref().unwrap_or(data);
-    let mut envelope = Vec::with_capacity(HEADER_LEN + body.len());
-    envelope.extend_from_slice(&[FORMAT_VERSION, CIPHER_NONE, codec, 0]);
+    let mut envelope = Vec::with_capacity(HEADER_LEN + body.len() + SEAL_OVERHEAD);
+    let cipher_id = if cipher.is_some() {
+        CIPHER_XCHACHA
+    } else {
+        CIPHER_NONE
+    };
+    envelope.extend_from_slice(&[FORMAT_VERSION, cipher_id, codec, 0]);
     envelope.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    envelope.extend_from_slice(body);
+    match cipher {
+        Some(c) => {
+            let sealed = c.seal(&seal_aad(id, &envelope), body);
+            envelope.extend_from_slice(&sealed);
+        }
+        None => envelope.extend_from_slice(body),
+    }
     envelope
+}
+
+/// What a sealed body is bound to: its header and the chunk it belongs to, so a body cannot be
+/// moved to another chunk's file.
+fn seal_aad(id: &ChunkId, header: &[u8]) -> Vec<u8> {
+    let mut aad = header[..HEADER_LEN].to_vec();
+    aad.extend_from_slice(id);
+    aad
 }
 
 /// The plaintext length from an envelope's header (at least [`HEADER_LEN`] bytes).
@@ -163,6 +184,8 @@ pub struct ChunkStore {
     unsynced: Mutex<HashSet<ChunkId>>,
     /// A [`Compression`] as a number; read when a chunk is stored.
     compression: AtomicU8,
+    /// Seals chunks stored from now on; chunks already stored keep the cipher they have.
+    cipher: RwLock<Option<Arc<ChunkCipher>>>,
 }
 
 /// Chunk files written within this long before the dirty marker may not have
@@ -181,6 +204,7 @@ impl ChunkStore {
             added: None,
             unsynced: Mutex::new(HashSet::new()),
             compression: AtomicU8::new(Compression::default().as_u8()),
+            cipher: RwLock::new(None),
         };
         store.recover()?;
         let found = store.scan()?;
@@ -193,6 +217,12 @@ impl ChunkStore {
     /// stored keep the codec they have, and read back the same either way.
     pub fn set_compression(&self, mode: Compression) {
         self.compression.store(mode.as_u8(), Ordering::SeqCst);
+    }
+
+    /// Encrypt chunks stored from now on under `key`, and read chunks sealed under it. Chunks
+    /// stored before keep the cipher they have, so plain and sealed chunks coexist.
+    pub fn set_key(&self, key: Option<&FsKey>) {
+        *self.cipher.write().unwrap() = key.map(|k| Arc::new(k.chunk_cipher()));
     }
 
     /// Remember each chunk added from now on, for [`Self::take_added`].
@@ -249,9 +279,12 @@ impl ChunkStore {
         if !durable {
             self.expect_unsynced(id)?;
         }
+        let cipher = self.cipher.read().unwrap().clone();
         let envelope = encode(
+            &id,
             data,
             Compression::from_u8(self.compression.load(Ordering::SeqCst)),
+            cipher.as_deref(),
         );
         let dir = path.parent().expect("chunk path has a parent");
         fs::create_dir_all(dir).map_err(io)?;
@@ -411,7 +444,7 @@ impl ChunkStore {
         let mut file = fs::File::open(self.path(id)).map_err(io)?;
         let mut header = [0u8; HEADER_LEN];
         file.read_exact(&mut header).map_err(|_| corrupt())?;
-        if header[0] != FORMAT_VERSION || header[1] != CIPHER_NONE {
+        if header[0] != FORMAT_VERSION || !matches!(header[1], CIPHER_NONE | CIPHER_XCHACHA) {
             return Err(corrupt());
         }
         let len = plain_len(&header) as usize;
@@ -424,6 +457,12 @@ impl ChunkStore {
             .saturating_sub(HEADER_LEN as u64);
         let mut body = Vec::with_capacity(body_len as usize);
         file.read_to_end(&mut body).map_err(io)?;
+        if header[1] == CIPHER_XCHACHA {
+            let cipher = self.cipher.read().unwrap().clone().ok_or_else(corrupt)?;
+            body = cipher
+                .open(&seal_aad(id, &header), &body)
+                .map_err(|_| corrupt())?;
+        }
         let data = match header[2] {
             CODEC_RAW => body,
             CODEC_ZSTD => zstd::bulk::decompress(&body, len).map_err(|_| corrupt())?,
@@ -555,5 +594,70 @@ impl ChunkStore {
             }
         }
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sfchunks-{name}-{}", std::process::id()));
+        #[allow(
+            clippy::let_underscore_must_use,
+            reason = "a leftover from an earlier run"
+        )]
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn file_bytes(store: &ChunkStore, id: &ChunkId) -> Vec<u8> {
+        fs::read(store.path(id)).unwrap()
+    }
+
+    #[test]
+    fn a_sealed_chunk_reads_back_and_its_file_holds_no_plaintext() {
+        let dir = scratch("seal");
+        let store = ChunkStore::open(&dir).unwrap();
+        store.set_key(Some(&FsKey::generate()));
+        let data = b"a very distinctive plaintext ".repeat(100);
+        let id = store.put(&data).unwrap();
+        assert_eq!(store.get(&id).unwrap(), data);
+        let raw = file_bytes(&store, &id);
+        assert!(!raw.windows(20).any(|w| w == &data[..20]));
+        assert_eq!(raw[1], CIPHER_XCHACHA);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn plain_and_sealed_chunks_coexist_and_a_sealed_one_needs_its_key() {
+        let dir = scratch("mixed");
+        let store = ChunkStore::open(&dir).unwrap();
+        let plain_id = store.put(b"stored before the key").unwrap();
+        let key = FsKey::generate();
+        store.set_key(Some(&key));
+        let sealed_id = store.put(b"stored after the key").unwrap();
+        assert_eq!(store.get(&plain_id).unwrap(), b"stored before the key");
+        assert_eq!(store.get(&sealed_id).unwrap(), b"stored after the key");
+
+        let reopened = ChunkStore::open(&dir).unwrap();
+        assert!(reopened.get(&sealed_id).is_err(), "no key, no plaintext");
+        reopened.set_key(Some(&FsKey::generate()));
+        assert!(reopened.get(&sealed_id).is_err(), "wrong key");
+        reopened.set_key(Some(&key));
+        assert_eq!(reopened.get(&sealed_id).unwrap(), b"stored after the key");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_sealed_chunk_moved_to_another_name_is_refused() {
+        let dir = scratch("moved");
+        let store = ChunkStore::open(&dir).unwrap();
+        store.set_key(Some(&FsKey::generate()));
+        let a = store.put(b"chunk a").unwrap();
+        let b = store.put(b"chunk b").unwrap();
+        fs::copy(store.path(&a), store.path(&b)).unwrap();
+        assert!(store.get(&b).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
