@@ -7,6 +7,7 @@
 //! re-chunking from the first affected chunk until a new cut lands on an old
 //! boundary gives the same chunks as chunking the whole file.
 
+use super::replicas::Pinned;
 use super::*;
 use crate::chunker::MAX_CHUNK;
 use std::sync::atomic::Ordering;
@@ -38,10 +39,12 @@ impl Dirty {
 
 /// What a commit produced: the file's new content and size, and the tail of
 /// the region it kept back in the buffer (a batch ends only on a real cut).
-struct Spliced {
+struct Spliced<'a> {
     content: Content,
     size: u64,
     rest: Option<Dirty>,
+    /// The new chunks, stored and pinned until the file refers to them.
+    _pinned: Option<Pinned<'a>>,
 }
 
 /// How long a background commit leaves a file alone after its `failures`th failure in a row:
@@ -169,19 +172,7 @@ impl LocalFs {
                 }
             }
         };
-        let done = self.fetching_as(true, Durability::None, |t, spill| {
-            let mut i = Self::file(t, ino)?;
-            let Some(spliced) = self.splice(&i, &d, last, spill)? else {
-                return Ok(None);
-            };
-            i.content = spliced.content;
-            i.size = spliced.size;
-            i.mtime = d.mtime;
-            i.ctime = d.mtime;
-            t.put(ino, &i)?;
-            self.emit_set_at(t, ino, &i, d.mtime)?;
-            Ok(Some(spliced.rest))
-        });
+        let done = self.commit_buffer(ino, &d, last);
         let mut dirty = self.dirty.lock().unwrap();
         let out = match done {
             Ok(Some(rest)) => {
@@ -214,6 +205,55 @@ impl LocalFs {
         out
     }
 
+    /// Splice a buffer into its file. The chunk work (reading the neighbouring
+    /// chunks, cutting, hashing, compressing, storing) runs without the node lock,
+    /// on a snapshot of the file; only applying the result takes it, and does so
+    /// only if the file is still as it was, else the splice starts again.
+    /// Returns the tail kept back, or `None` when nothing was ready to commit.
+    fn commit_buffer(&self, ino: Ino, d: &Dirty, last: bool) -> FsResult<Option<Option<Dirty>>> {
+        loop {
+            let snap = self.view(|v| Self::file(v, ino))?;
+            let was = encode(&snap);
+            let mut spill = Spill::default();
+            let spliced = loop {
+                spill.miss = None;
+                match self.splice(&snap, d, last, &mut spill) {
+                    Err(FsError::Unavailable) if spill.miss.is_some() => {
+                        let id = spill.miss.take().expect("checked");
+                        let data = self.fetch_remote(&id)?;
+                        spill.got.insert(id, data);
+                    }
+                    other => break other,
+                }
+            };
+            let spliced = match spliced {
+                Ok(s) => s,
+                // A chunk of the snapshot may have gone with a change made since.
+                Err(_) if encode(&self.view(|v| Self::file(v, ino))?) != was => continue,
+                Err(e) => return Err(e),
+            };
+            let Some(spliced) = spliced else {
+                return Ok(None);
+            };
+            let applied = self.run_as(true, Durability::None, |t| {
+                let mut i = Self::file(t, ino)?;
+                if encode(&i) != was {
+                    return Ok(false);
+                }
+                i.content = spliced.content.clone();
+                i.size = spliced.size;
+                i.mtime = d.mtime;
+                i.ctime = d.mtime;
+                t.put(ino, &i)?;
+                self.emit_set_at(t, ino, &i, d.mtime)?;
+                Ok(true)
+            })?;
+            if applied {
+                return Ok(Some(spliced.rest));
+            }
+        }
+    }
+
     /// Mark a file's buffer as no longer being committed.
     fn release_buffer(dirty: &mut HashMap<Ino, Dirty>, ino: Ino) {
         if let Some(d) = dirty.get_mut(&ino) {
@@ -228,7 +268,7 @@ impl LocalFs {
         d: &Dirty,
         last: bool,
         spill: &mut Spill,
-    ) -> FsResult<Option<Spliced>> {
+    ) -> FsResult<Option<Spliced<'_>>> {
         let re = d.end();
         let new_total = i.size.max(re);
         let rs = d.start.min(i.size);
@@ -266,6 +306,7 @@ impl LocalFs {
                     size: new_total,
                     content: Content::Inline(win),
                     rest: None,
+                    _pinned: None,
                 }));
             }
             let pieces: Vec<Piece<'_>> = chunker::split(&win).into_iter().map(Piece::new).collect();
@@ -322,6 +363,7 @@ impl LocalFs {
             }
             let committed = &pieces[..used];
             self.make_room(committed)?;
+            let pinned = self.pin(committed.iter().map(|p| p.id));
             let mut out: Vec<ChunkRef> = refs[..a].to_vec();
             let mut size = sa;
             for p in committed {
@@ -337,6 +379,7 @@ impl LocalFs {
                 content: Content::Chunks(out),
                 size,
                 rest,
+                _pinned: Some(pinned),
             }));
         }
     }

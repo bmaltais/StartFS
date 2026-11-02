@@ -328,6 +328,9 @@ pub struct LocalFs {
     stale: AtomicBool,
     /// Objects read to bring the tree up to date with peers' entries.
     tree_reads: AtomicU64,
+    /// Chunks a write commit has stored and not yet made a file refer to: garbage
+    /// collection takes them as referenced (see [`Pinned`]).
+    pinned: Mutex<HashMap<ChunkId, u32>>,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -400,6 +403,7 @@ impl LocalFs {
             batching: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             tree_reads: AtomicU64::new(0),
+            pinned: Mutex::new(HashMap::new()),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
