@@ -173,7 +173,12 @@ must run protocol 12 (release 1.5.0 or newer).
 It moves data. `startfs join TOKEN --site NAME` or `startfs config --site NAME` declares where a
 machine lives (home, cloud; empty clears it); copies of each chunk are then spread across sites,
 so one off-site machine holds at least 1/N of the data, and `status` warns when the sites cannot
-be spanned. A member that is up but backed up shows as `up, 3 min behind (10k messages
+be spanned. A machine that should only hold copies (an always-on box, a cloud node) joins with
+`startfs join TOKEN --storage-only`: it keeps a replica and takes part in repair, but refuses to
+mount and refuses every file operation. `startfs config --storage-only` / `--no-storage-only`
+change the role later (unmount first; it must offer space), and `status` shows it as
+`storage-only`. It bumps the protocol version, so upgrade every member together. A member that
+is up but backed up shows as `up, 3 min behind (10k messages
 queued)` in `status`, with a warning; the others send it nothing new until it catches up, so
 do not restart it and do not lower its offer for that. Global flags
 `--data-dir DIR` and `--config FILE` go before the command.

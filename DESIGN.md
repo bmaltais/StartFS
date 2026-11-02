@@ -44,6 +44,10 @@ same code with a different membership scope.
    Each member may also declare a site (`join --site`, `config --site`; ADR 0005): placement then
    spreads a chunk's copies over `min(copies, eligible sites)` sites, and a member with no label is
    its own site. Sites are declared, never detected, and a missing site never refuses a write.
+   A member may also be declared storage-only (`join --storage-only`, `config --storage-only`;
+   ADR 0009): it holds a replica and takes part in repair, stand-ins, GC and scrub like any member,
+   but never mounts and refuses every filesystem operation. Not done: skipping the read and chunk
+   caches on such a member, and placement that prefers it for a mounter's new writes.
    Each member gossips its backlog in `Health` (age of its last tick, inbox messages and bytes);
    `status` shows a member that is up but behind (by the same verdict the replicator acts on, hysteresis included), and the replicator sends it nothing new until it
    catches up, without changing placement or the epoch (ADR 0004).

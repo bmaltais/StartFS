@@ -65,6 +65,9 @@ impl Daemon {
         if storage_only && offer_bytes.unwrap_or(self.config.offer_bytes) == 0 {
             return Err(Error::StorageOnlyWithoutOffer);
         }
+        if storage_only && self.mountpoint.lock().unwrap().is_some() {
+            return Err(Error::MountedCannotBeStorageOnly);
+        }
         let token = Token::parse(token)?;
         if self.membership.lock().unwrap().filesystem().is_some() {
             return Err(Error::AlreadyInFilesystem);

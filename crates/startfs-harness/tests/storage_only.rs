@@ -129,6 +129,17 @@ fn the_role_is_refused_while_the_filesystem_is_mounted_or_the_offer_is_zero() {
     let why = c.control(1).set_storage_only(true).unwrap_err().to_string();
     assert!(why.contains("unmount"), "{why}");
 
+    // Joining as storage-only with the filesystem already mounted is refused as well.
+    let fresh = Cluster::start(2);
+    let t = fresh.control(0).create("home", 1).unwrap();
+    fresh.mount(1);
+    let why = fresh
+        .control(1)
+        .join_storage_only(&t, Some(BIG), "")
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("unmount"), "{why}");
+
     // Offering nothing: there would be nothing for it to do.
     assert!(c.control(2).set_storage_only(true).is_err());
     let again = Cluster::start(2);
@@ -179,6 +190,35 @@ fn repair_restores_the_copies_when_a_storage_only_member_is_lost() {
         (after[0], after[2]),
         (unique, unique),
         "{before:?} -> {after:?}"
+    );
+    assert!(c.control(0).status().unwrap().unreplicated.is_empty());
+}
+
+#[test]
+fn offers_steer_placement_and_a_storage_only_member_can_leave() {
+    let c = Cluster::start(3);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(0).set_offer(BIG).unwrap();
+    c.control(1)
+        .join_storage_only(&token, Some(BIG), "")
+        .unwrap();
+    c.control(2)
+        .join_storage_only(&token, Some(BIG / 8), "")
+        .unwrap();
+    c.sync();
+    write_files(&c, 40);
+    let held = chunks_held(&c);
+    assert!(
+        held[1] > held[2],
+        "the larger offer takes the larger share: {held:?}"
+    );
+
+    c.control(2).leave().unwrap();
+    c.elapse(std::time::Duration::from_secs(3600));
+    let after = chunks_held(&c);
+    assert_eq!(
+        after[0], after[1],
+        "two copies on the two members left: {after:?}"
     );
     assert!(c.control(0).status().unwrap().unreplicated.is_empty());
 }
