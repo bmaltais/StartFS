@@ -175,6 +175,25 @@ fn chunks_held(c: &Cluster) -> Vec<u64> {
 }
 
 #[test]
+fn a_rebuilt_mounting_member_recovers_everything_from_the_storage_only_members() {
+    let c = one_mounter_two_storage_members();
+    write_files(&c, 20);
+
+    c.rebuild(0);
+    let token = c.control(1).new_token().unwrap();
+    c.control(0).join(&token, Some(BIG)).unwrap();
+    c.elapse(std::time::Duration::from_secs(3600));
+
+    for i in 0..20 {
+        let ino = c.fs(0).lookup(ROOT_INO, &format!("f{i}")).unwrap().ino;
+        assert_eq!(
+            c.fs(0).read(ino, 0, u32::MAX).unwrap(),
+            noise(8 * 1024, i + 1)
+        );
+    }
+}
+
+#[test]
 fn repair_restores_the_copies_when_a_storage_only_member_is_lost() {
     let c = one_mounter_two_storage_members();
     write_files(&c, 20);

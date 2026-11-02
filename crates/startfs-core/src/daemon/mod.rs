@@ -915,7 +915,7 @@ impl Daemon {
     fn sync_peers(&self) {
         let (members, peers) = {
             let m = self.membership.lock().unwrap();
-            (m.members(), m.peers())
+            (m.members(), m.peer_members())
         };
         if let Some(t) = self.transport() {
             let now = self.clock.now();
