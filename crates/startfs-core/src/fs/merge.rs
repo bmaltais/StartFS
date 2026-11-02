@@ -842,7 +842,20 @@ impl LocalFs {
     /// cannot place with certainty (a name collision, a directory that moves,
     /// a hard link) leaves the tree to a full [`Self::reconcile`], which
     /// every entry still ends in if any one needed it.
+    ///
+    /// Peers pass on each other's entries, so most batches a member receives hold only
+    /// entries it has; such a batch returns before the durable commit, which would sync
+    /// the disk for nothing.
     pub fn apply_remote(&self, entries: &[Entry]) -> FsResult<usize> {
+        // An entry applies only at its origin's next sequence number, which only an
+        // applied entry moves: if none is at it now, none would apply.
+        let frontier = self.frontier()?;
+        if !entries
+            .iter()
+            .any(|e| e.seq == frontier.get(&e.origin).copied().unwrap_or(0))
+        {
+            return Ok(0);
+        }
         self.run(true, |t| {
             let mut applied = 0;
             let mut full = t.counters.get(STALE).map_err(db)?.is_some();
