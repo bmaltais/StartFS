@@ -288,8 +288,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        18,
-        "071e96630f2d852149c408bab85c26aa7b0e3a82115c5393ca650235ac556ba3",
+        19,
+        "9642357923ffec556b131697fdaca53f3c347fdb5e6fce18e8b3105d6bc93b7d",
     );
 
     #[test]
@@ -328,9 +328,11 @@ mod tests {
                 id: MemberId(2),
                 ids: IdRange { start: 1, end: 9 },
                 members: vec![member.clone()],
-                key_wraps: vec![
-                    crate::crypto::RecoveryKey::generate().wrap(&crate::crypto::FsKey::generate()),
-                ],
+                key_wraps: vec![crate::crypto::KeyWrap {
+                    id: "k".into(),
+                    check: [5; 32],
+                    wrapped: vec![6; 5],
+                }],
             })),
             Message::KeyWraps(vec![]),
             Message::JoinReply(Err("no".into())),
