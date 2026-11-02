@@ -6,12 +6,12 @@ use startfs::node::{self, Ticker};
 use startfs_core::activity::{ActivityReport, Traffic};
 use startfs_core::clock::SystemClock;
 use startfs_core::config::Config;
-use startfs_core::control::{self, Client, NodeState, ScrubState, Status, Tier};
+use startfs_core::control::{self, Client, NodeState};
 use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
-use startfs_core::upgrade::Progress;
+use startfs_core::status_view::{human, ratio, render, state_word};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -26,8 +26,10 @@ commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
   create --name NAME --copies N [--example]
                                       create a filesystem and print its join token
-  status [--json]                     show the state of this node's filesystem (--json: as JSON,
-                                      for scripts and GUIs)
+  status [--verbose] [--json]         show a summary of this node's filesystem: the verdict and its
+                                      cause, the members, what needs attention (--verbose, -v: also
+                                      storage, cache, scrub, log; --json: everything, as JSON, for
+                                      scripts and GUIs)
   activity [--json]                   show this node's recent traffic, tick timings, queues and
                                       memory over the last minute (--json: as JSON)
   purge                               free the data of deleted files on every member now, instead
@@ -289,7 +291,10 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                     serde_json::to_string(&status).map_err(CliError::Json)?
                 );
             } else {
-                print!("{}", render(&status));
+                print!(
+                    "{}",
+                    render(&status, rest.iter().any(|a| a == "--verbose" || a == "-v"))
+                );
             }
             Ok(())
         }
@@ -500,7 +505,8 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
     let (valued, alone, positional): (&[&str], &[&str], usize) = match command {
         "daemon" => (&["--mount"], &[], 0),
         "create" => (&["--name", "--copies"], &["--example"], 0),
-        "status" | "activity" | "stats" => (&[], &["--json"], 0),
+        "status" => (&[], &["--json", "--verbose", "-v"], 0),
+        "activity" | "stats" => (&[], &["--json"], 0),
         "history" => (&[], &["--json"], 1),
         "restore" => (&["--at"], &[], 1),
         "join" => (&["--offer", "--site"], &[], 1),
@@ -773,413 +779,6 @@ fn tailnet_address() -> Result<IpAddr, CliError> {
     }
 }
 
-/// One line per member, in columns sized to the longest entry.
-fn members_table(members: &[control::MemberStatus]) -> String {
-    let mut out = String::new();
-    let rows: Vec<[String; 5]> = members
-        .iter()
-        .map(|m| {
-            let mut state = match m.state {
-                NodeState::Online => "up",
-                NodeState::Down => "down",
-                NodeState::Lost => "lost",
-                NodeState::Leaving => "leaving",
-                NodeState::Upgrading => "upgrading",
-                NodeState::Unknown => "unknown",
-            }
-            .to_string();
-            if let Some(load) = &m.behind {
-                state = format!("{state}, {}", load.behind_text());
-            }
-            if let Some(step) = &m.upgrade {
-                state = format!("{state}, {}", upgrade_step_text(step));
-            }
-            let mut offered = format!("{} offered", human(m.offer_bytes));
-            if m.weight_bytes > 0 {
-                offered = format!("{offered}, weight {}", human(m.weight_bytes));
-            }
-            if !m.site.is_empty() {
-                offered = format!("{offered}, site {}", m.site);
-            }
-            [
-                m.id.to_string(),
-                m.addr.clone(),
-                state,
-                offered,
-                m.rtt_micros.map_or_else(String::new, rtt_text),
-            ]
-        })
-        .collect();
-    let width = |col: usize| rows.iter().map(|r| r[col].len()).max().unwrap_or(0);
-    let (wid, waddr, wstate, woffer, wrtt) = (width(0), width(1), width(2), width(3), width(4));
-    for (m, r) in members.iter().zip(&rows) {
-        out.push_str(&format!(
-            "  {:<wid$}  {:<waddr$}  {:<wstate$}  {:>woffer$}{}{}\n",
-            r[0],
-            r[1],
-            r[2],
-            r[3],
-            if wrtt > 0 {
-                format!("  {:>wrtt$}", r[4])
-            } else {
-                String::new()
-            },
-            if m.is_self { "  (this node)" } else { "" }
-        ));
-        if let Some(why) = &m.problem {
-            out.push_str(&format!("  {:<wid$}  cannot reach: {why}\n", ""));
-        }
-        match &m.upgrade {
-            Some(Progress::Failed(why)) => {
-                out.push_str(&format!("  {:<wid$}  upgrade failed: {why}\n", ""));
-            }
-            Some(Progress::WaitingOnMount) => out.push_str(&format!(
-                "  {:<wid$}  processes are using its mount: free it, or run `startfs update --force`\n",
-                ""
-            )),
-            _ => {}
-        }
-        if let Some(seen) = m.last_seen {
-            out.push_str(&format!(
-                "  {:<wid$}  last seen {}{} ago\n",
-                "",
-                if seen.exact { "" } else { "over " },
-                time_left(seen.secs_ago)
-            ));
-        }
-        if let Some(left) = m.standin_secs_left {
-            out.push_str(&format!(
-                "  {:<wid$}  extra copies kept for {} in case it sleeps again\n",
-                "",
-                time_left(left)
-            ));
-        }
-    }
-    out
-}
-
-/// What a member has got to in the upgrade, for the members table.
-fn upgrade_step_text(step: &Progress) -> &'static str {
-    match step {
-        Progress::Staging => "staging a release",
-        Progress::Staged => "release staged",
-        Progress::WaitingOnMount => "release staged, waiting on its mount",
-        Progress::Restarting => "restarting on a new release",
-        Progress::Failed(_) => "upgrade failed",
-    }
-}
-
-/// "2d 4h", "5h 10m" or "12m": the two largest units of `secs`.
-/// A round-trip time for the members table: `340µs`, `12ms`, `1.2s`.
-fn rtt_text(micros: u64) -> String {
-    match micros {
-        0..1_000 => format!("{micros}µs"),
-        1_000..100_000 => format!("{:.1}ms", micros as f64 / 1_000.0),
-        100_000..1_000_000 => format!("{}ms", micros / 1_000),
-        _ => format!("{:.1}s", micros as f64 / 1_000_000.0),
-    }
-}
-
-fn time_left(secs: u64) -> String {
-    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
-    match (d, h) {
-        (0, 0) => format!("{m}m"),
-        (0, _) => format!("{h}h {m}m"),
-        _ => format!("{d}d {h}h"),
-    }
-}
-
-/// "not fully replicated: N chunks (a at risk, b degraded)", or nothing.
-fn unreplicated_line(unreplicated: &[control::Shortfall]) -> Option<String> {
-    if unreplicated.is_empty() {
-        return None;
-    }
-    let count = |risk: Tier| -> u32 {
-        unreplicated
-            .iter()
-            .filter(|f| f.tier() == risk)
-            .map(|f| f.chunks)
-            .sum()
-    };
-    let n: u32 = unreplicated.iter().map(|f| f.chunks).sum();
-    let tiers: Vec<String> = [(Tier::AtRisk, "at risk"), (Tier::Degraded, "degraded")]
-        .into_iter()
-        .filter(|(t, _)| count(*t) > 0)
-        .map(|(t, name)| format!("{} {name}", count(t)))
-        .collect();
-    Some(format!(
-        "not fully replicated: {n} chunk{} ({})\n",
-        if n == 1 { "" } else { "s" },
-        tiers.join(", ")
-    ))
-}
-
-/// `a / b` as "1.4x", or nothing when there is no `b` to compare with.
-fn ratio(a: u64, b: u64) -> Option<String> {
-    (b > 0).then(|| format!("{:.1}x", a as f64 / b as f64))
-}
-
-/// Where the space went: the files' size, what dedup and compression leave
-/// of it, and this node's share of the replicas.
-fn efficiency_lines(s: &Status, copies: u32) -> String {
-    let e = &s.efficiency;
-    let versions = match (&s.filesystem, e.version_bytes) {
-        (Some(f), bytes) if bytes > 0 => format!(
-            "  plus {} that only earlier versions use, kept {} after they were replaced (`startfs history PATH`)\n",
-            human(bytes),
-            time_left(f.keep_versions_secs)
-        ),
-        _ => String::new(),
-    };
-    if e.logical_bytes == 0 {
-        return format!("storage: no files yet\n{versions}");
-    }
-    let mut out = format!(
-        "storage: {} in files, {} after dedup",
-        human(e.logical_bytes),
-        human(e.referenced_bytes + e.inline_bytes)
-    );
-    if let Some(r) = ratio(e.logical_bytes, e.referenced_bytes + e.inline_bytes) {
-        out.push_str(&format!(" ({r})"));
-    }
-    out.push('\n');
-    out.push_str(&format!(
-        "  this node: {} on disk for {} of chunks",
-        human(e.local_disk_bytes),
-        human(e.local_plain_bytes)
-    ));
-    if let Some(r) = ratio(e.local_plain_bytes, e.local_disk_bytes) {
-        out.push_str(&format!(" (compression {r})"));
-    }
-    out.push_str(&format!(
-        ", {} compressed and {} stored as is\n",
-        e.zstd_chunks, e.raw_chunks
-    ));
-    if e.zstd_chunks > 0 && e.local_plain_bytes > 0 {
-        out.push_str(&format!(
-            "  compression saved {} ({:.0}% of this node's chunk bytes were compressed)\n",
-            human(e.local_plain_bytes.saturating_sub(e.local_disk_bytes)),
-            100.0 * e.zstd_plain_bytes as f64 / e.local_plain_bytes as f64
-        ));
-    }
-    let expected = e.referenced_bytes.saturating_mul(u64::from(copies));
-    if expected > 0 {
-        out.push_str(&format!(
-            "  this node holds {:.1}% of the {} expected across the cluster ({} cop{})\n",
-            100.0 * e.local_plain_bytes as f64 / expected as f64,
-            human(expected),
-            copies,
-            if copies == 1 { "y" } else { "ies" }
-        ));
-    }
-    if s.gc.pending_bytes > 0 {
-        out.push_str(&format!(
-            "  plus {} on this node that no file uses, waiting for garbage collection\n",
-            human(s.gc.pending_bytes)
-        ));
-    }
-    out.push_str(&versions);
-    out
-}
-
-/// The upgrade under way, or the release the cluster last moved to, and a split cluster.
-fn upgrade_lines(u: &control::UpgradeStatus, members: &[control::MemberStatus]) -> String {
-    let mut out = if u.complete {
-        format!(
-            "release: {}, which every member that is up runs\n",
-            u.release
-        )
-    } else {
-        let how = match (u.lockstep, u.go) {
-            (Some(true), false) => {
-                " (the protocol changes: every member swaps together once all have staged it)"
-            }
-            (Some(true), true) => " (the protocol changes: every member swaps together, now)",
-            (Some(false), _) => " (one member at a time)",
-            (None, _) => "",
-        };
-        format!("upgrade: moving to {}{how}\n", u.release)
-    };
-    if !u.split.is_empty() {
-        let names: Vec<&str> = members
-            .iter()
-            .filter(|m| u.split.contains(&m.id))
-            .map(|m| m.addr.as_str())
-            .collect();
-        out.push_str(&format!(
-            "split: {} speak another protocol than this node and cannot sync with it until they run the same release\n",
-            names.join(", ")
-        ));
-    }
-    out
-}
-
-fn render(s: &Status) -> String {
-    let stopping = if s.stopping {
-        "stopping: the daemon is shutting down\n"
-    } else {
-        ""
-    };
-    let Some(fs) = &s.filesystem else {
-        return format!(
-            "{stopping}no filesystem on this node; run `startfs create --name NAME --copies N`\n"
-        );
-    };
-    let state = match s.node_state {
-        NodeState::Online => "online",
-        NodeState::Down => "down",
-        NodeState::Lost => "lost",
-        NodeState::Leaving => "leaving",
-        NodeState::Upgrading => "upgrading",
-        NodeState::Unknown => "unknown",
-    };
-    let mut out = String::from(stopping);
-    if let Some(v) = s.verdict {
-        out.push_str(&format!("data: {}\n", v.describe().to_uppercase()));
-    }
-    out.push_str(&format!(
-        "filesystem: {} ({} copies)\nnode: {state}\nusage: {} stored in {} chunks, {} offered\n",
-        fs.name,
-        fs.copies,
-        human(s.usage.stored_bytes),
-        s.usage.chunks,
-        human(s.usage.offer_bytes),
-    ));
-    out.push_str(&format!(
-        "redundancy: {} of {} copies possible ({} node{})\n",
-        s.copies_possible,
-        fs.copies,
-        s.nodes,
-        if s.nodes == 1 { "" } else { "s" }
-    ));
-    out.push_str(&format!("usable: about {}\n", human(s.usable_bytes)));
-    out.push_str(&efficiency_lines(s, fs.copies));
-    if s.staging.chunks > 0 {
-        out.push_str(&format!(
-            "staging: {} in {} chunks waiting for replication",
-            human(s.staging.bytes),
-            s.staging.chunks
-        ));
-        if let Some((id, chunks)) = s.staging.waiting_on {
-            let name = s
-                .members
-                .iter()
-                .find(|m| m.id == id)
-                .map_or_else(|| id.0.to_string(), |m| m.addr.clone());
-            out.push_str(&format!(", most on {name} ({chunks} chunks)"));
-        }
-        out.push('\n');
-    }
-    out.push_str(&format!(
-        "cache: {} used of {}\n",
-        human(s.cache.used_bytes),
-        human(s.cache.capacity_bytes)
-    ));
-    out.push_str("members:\n");
-    out.push_str(&members_table(&s.members));
-    if let Some(u) = &s.upgrade {
-        out.push_str(&upgrade_lines(u, &s.members));
-    }
-    if let Some(r) = &s.repair {
-        out.push_str(&format!(
-            "repair: {} at risk, {} degraded chunks left to re-replicate\n",
-            r.at_risk, r.degraded
-        ));
-    }
-    let scrub = match s.scrub.state {
-        ScrubState::Idle => "idle".to_string(),
-        ScrubState::Running => format!("running, {} replicas to check", s.scrub.remaining),
-        ScrubState::PausedOnBattery => "paused while on battery power".to_string(),
-    };
-    out.push_str(&format!("scrub: {scrub}"));
-    if s.scrub.healing > 0 {
-        out.push_str(&format!(
-            ", {} corrupt replicas being re-fetched",
-            s.scrub.healing
-        ));
-    }
-    out.push('\n');
-    out.push_str(&format!(
-        "metadata log: {} entries, {} objects\n",
-        s.log.entries, s.log.objects
-    ));
-    if s.gc.pending_chunks > 0 || s.gc.reclaimed_chunks > 0 {
-        out.push_str(&format!(
-            "garbage collection: {} chunks ({} bytes) pending, {} chunks ({} bytes) reclaimed\n",
-            s.gc.pending_chunks, s.gc.pending_bytes, s.gc.reclaimed_chunks, s.gc.reclaimed_bytes
-        ));
-    }
-    if s.gc.purging {
-        out.push_str("garbage collection: purge in progress (deleted data is freed as soon as the gate allows)\n");
-    }
-    if !s.gc.waiting_on.is_empty() {
-        let names: Vec<&str> = s
-            .members
-            .iter()
-            .filter(|m| s.gc.waiting_on.contains(&m.id))
-            .map(|m| m.addr.as_str())
-            .collect();
-        out.push_str(&format!(
-            "garbage collection is waiting to catch up with {} before reclaiming\n",
-            names.join(", ")
-        ));
-    }
-    if let Some(t) = &s.tick_busy {
-        out.push_str(&format!(
-            "busy: the background tick worked {}% of the last minute (average {} ms); see `startfs activity`\n",
-            t.percent, t.avg_ms
-        ));
-    }
-    for w in &s.warnings {
-        out.push_str(&format!("warning: {w}\n"));
-    }
-    if !s.unheard.is_empty() {
-        let names: Vec<&str> = s
-            .members
-            .iter()
-            .filter(|m| s.unheard.contains(&m.id))
-            .map(|m| m.addr.as_str())
-            .collect();
-        out.push_str(&format!(
-            "partial view: no replication report from {}\n",
-            names.join(", ")
-        ));
-    }
-    if let Some(line) = unreplicated_line(&s.unreplicated) {
-        out.push_str(&line);
-    }
-    if s.rechecking > 0 {
-        out.push_str(&format!(
-            "re-checking: {} chunk{} held here, waiting to hear who else holds them\n",
-            s.rechecking,
-            if s.rechecking == 1 { "" } else { "s" }
-        ));
-    }
-    for st in &s.stranded {
-        let addr = s
-            .members
-            .iter()
-            .find(|m| m.id == st.member)
-            .map_or("a member", |m| m.addr.as_str());
-        out.push_str(&format!(
-            "at risk: {} chunk{} may exist only on {addr} (single copy in its report {} ago)\n",
-            st.chunks,
-            if st.chunks == 1 { "" } else { "s" },
-            time_left(st.secs_ago)
-        ));
-    }
-    if !s.conflicts.is_empty() {
-        out.push_str(&format!(
-            "conflicts: {} (delete a copy to resolve it)\n",
-            s.conflicts.len()
-        ));
-        for c in &s.conflicts {
-            out.push_str(&format!("  {}\n", c.path));
-        }
-    }
-    out
-}
-
 fn render_activity(a: &ActivityReport) -> String {
     let mut out = String::new();
     if a.enabled {
@@ -1208,11 +807,7 @@ fn render_activity(a: &ActivityReport) -> String {
     for p in &a.peers {
         let state = match p.state {
             NodeState::Online => "online",
-            NodeState::Down => "down",
-            NodeState::Lost => "lost",
-            NodeState::Leaving => "leaving",
-            NodeState::Upgrading => "upgrading",
-            NodeState::Unknown => "unknown",
+            other => state_word(other),
         };
         out.push_str(&format!(
             "  {} ({state}), {} in flight\n",
@@ -1326,19 +921,4 @@ fn render_activity(a: &ActivityReport) -> String {
         ),
     });
     out
-}
-
-fn human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
 }

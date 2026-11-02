@@ -15,7 +15,7 @@ T1=$(now)
 start_node B "$WORK/B/mnt"
 # 4. join
 sf B join "$TOKEN" --offer 1G
-until sf B status | grep -q '(2 nodes)' && sf A status | grep -q '(2 nodes)'; do sleep 0.1; done
+until sf B status | grep -q '2 nodes,' && sf A status | grep -q '2 nodes,'; do sleep 0.1; done
 
 echo "A daemon + create: $(python3 -c "print(f'{$T1 - $T0:.2f}')")s"
 echo "whole flow (A daemon+create, B daemon+join, both list 2 nodes): $(elapsed "$T0")s"

@@ -40,7 +40,7 @@ sf A config --offer 10G >/dev/null
 for n in ${names#A }; do
   start_node "$n" "$WORK/$n/mnt"; sf "$n" join "$TOKEN" --offer 10G >/dev/null
 done
-until sf A status | grep -q "($NODES nodes)"; do sleep 0.2; done
+until sf A status | grep -q "$NODES nodes,"; do sleep 0.2; done
 say "making the tree"
 python3 "$SF_ROOT/scripts/make-tree.py" "$WORK/src" --files "$FILES" --big "$BIG" --seed "$SEED" >/dev/null
 want=$((FILES + BIG))
@@ -49,7 +49,7 @@ cp -r "$WORK/src" "$WORK/A/mnt/copy"
 say "copied; waiting for replication to $NODES nodes"
 for n in $names; do
   until [ "$(find "$WORK/$n/mnt/copy" -type f 2>/dev/null | wc -l)" -ge "$want" ]; do sleep 0.5; done
-  until sf "$n" status | grep -q 'data: *SAFE'; do sleep 1; done
+  until sf "$n" status | grep -q '^SAFE'; do sleep 1; done
   say "$n has the tree and is SAFE"
 done
 say "tree stored; joiner starts (WATCH=$WATCH s max)"
@@ -61,10 +61,10 @@ start_node J "$WORK/J/mnt"
 sf J join "$(sf A token)" --offer 100G >/dev/null
 settled=0
 while [ "$(python3 -c "print(int($(now) - $t0))")" -lt "$WATCH" ]; do
-  say "joining: $(sf J status 2>/dev/null | grep -E "data:" | tr -s " ")"
+  say "joining: $(sf J status 2>/dev/null | grep -E "^(SAFE|DEGRADED|AT RISK|BEST-EFFORT)" | tr -s " ")"
   line "$(python3 -c "print(int($(now) - $t0))")"
   # settled: J holds data and every node says SAFE, three samples running
-  if sf J status 2>/dev/null | grep -q 'data: *SAFE' && [ "$(sf J stats 2>/dev/null | grep -c .)" -gt 0 ]; then
+  if sf J status 2>/dev/null | grep -q '^SAFE' && [ "$(sf J stats 2>/dev/null | grep -c .)" -gt 0 ]; then
     settled=$((settled + 1)); [ "$settled" -ge 3 ] && break
   else settled=0; fi
   sleep 2
@@ -72,6 +72,6 @@ done
 echo "seconds_to_safe=$(elapsed "$t0") peak_mib=$(( $(hwm_kb "$PID_J") / 1024 )) cpu_s=$(( $(cpu_ticks "$PID_J") / 100 ))"
 for n in $names J; do eval "echo peak \$n \$(( \$(hwm_kb \$PID_$n) / 1024 )) MiB"; done
 grep -E '^(Rss|Anonymous|Private_Dirty|Shared_Clean|Private_Clean):' "/proc/$PID_J/smaps_rollup" | tr -s ' ' | tr '\n' ' '; echo
-sf J status | grep -E 'data:|repair|log' || true
+sf J status -v | grep -E '^(SAFE|DEGRADED|AT RISK|BEST-EFFORT)|repair|log' || true
 sf J activity 2>&1 | head -40
 if [ -n "${HOLD:-}" ]; then echo "holding $HOLD s; joiner pid $PID_J, log $WORK/J/log"; sleep "$HOLD"; fi

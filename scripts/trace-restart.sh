@@ -19,7 +19,7 @@ start_node A "$WORK/A/mnt"
 TOKEN=$(sf A create --name restart --copies 3)
 start_node B "$WORK/B/mnt"; sf B join "$TOKEN" --offer 5G >/dev/null
 start_node C "$WORK/C/mnt"; sf C join "$TOKEN" --offer 5G >/dev/null
-until sf A status | grep -q '(3 nodes)'; do sleep 0.2; done
+until sf A status | grep -q '3 nodes,'; do sleep 0.2; done
 # Long enough for A and C to hold a link to B.
 sleep 15
 kill "$PID_B"; wait "$PID_B" 2>/dev/null || true

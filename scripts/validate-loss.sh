@@ -30,12 +30,12 @@ replicated() { ! sf A status | grep -q 'not fully replicated'; }
 healed() { sf A status | grep -qE '^  2 .* lost' && replicated && ! sf A status | grep -q '^repair:'; }
 
 wait_for "initial replication complete" 120 replicated
-echo "--- before loss ---"; sf A status | grep -E "redundancy"; echo "stored before: A: $(sf A status | grep ^usage) / B: $(sf B status | grep ^usage)"
+echo "--- before loss ---"; sf A status -v | grep -E "redundancy"; echo "stored before: A: $(sf A status | grep ^usage) / B: $(sf B status | grep ^usage)"
 
 echo "kill -9 node C (permanent)"
 kill -9 "$PID_C"
 wait_for "C marked lost and data back to 2 copies on A+B (grace=${GRACE}s)" 180 healed
-echo "--- after repair ---"; echo "stored after:  A: $(sf A status | grep ^usage) / B: $(sf B status | grep ^usage)"; sf A status | grep -E "redundancy|^  [0-9]"
+echo "--- after repair ---"; echo "stored after:  A: $(sf A status | grep ^usage) / B: $(sf B status | grep ^usage)"; sf A status -v | grep -E "redundancy|^  [0-9]"
 
 echo "kill -9 node A too (N-1 = 1 node fails of the remaining 2); read from B"
 kill -9 "$PID_A"
