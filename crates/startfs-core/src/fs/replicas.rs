@@ -192,3 +192,35 @@ impl LocalFs {
         self.staging.stats()
     }
 }
+
+/// Chunks a write commit stores before the transaction that refers to them: until it
+/// is dropped, garbage collection takes them as referenced.
+pub(super) struct Pinned<'a> {
+    fs: &'a LocalFs,
+    ids: Vec<ChunkId>,
+}
+
+impl LocalFs {
+    pub(super) fn pin(&self, ids: impl IntoIterator<Item = ChunkId>) -> Pinned<'_> {
+        let ids: Vec<ChunkId> = ids.into_iter().collect();
+        let mut pinned = self.pinned.lock().unwrap();
+        for id in &ids {
+            *pinned.entry(*id).or_default() += 1;
+        }
+        Pinned { fs: self, ids }
+    }
+}
+
+impl Drop for Pinned<'_> {
+    fn drop(&mut self) {
+        let mut pinned = self.fs.pinned.lock().unwrap();
+        for id in &self.ids {
+            if let Some(n) = pinned.get_mut(id) {
+                *n -= 1;
+                if *n == 0 {
+                    pinned.remove(id);
+                }
+            }
+        }
+    }
+}

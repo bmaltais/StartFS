@@ -54,6 +54,7 @@ impl LocalFs {
                     referenced.extend(refs.into_iter().map(|r| r.id));
                 }
             }
+            referenced.extend(self.pinned.lock().unwrap().keys().copied());
             let versioned = t.version_chunks(now, self.window(), true)?;
             let only_versions = versioned
                 .iter()
@@ -159,9 +160,9 @@ impl LocalFs {
     }
 
     /// Remove from staging those of `ids` that no file in the visible tree or kept version
-    /// refers to, and return them. A chunk is staged in the same transaction that makes a file refer to it,
-    /// and this reads the tree under the same lock, so a chunk that is about to be referenced
-    /// is never taken for an orphan.
+    /// refers to, and return them. A write commit pins the chunks it stores until the
+    /// transaction that makes a file refer to them has committed, and this reads the pins and the
+    /// tree under the same lock, so a chunk that is about to be referenced is never taken for an orphan.
     pub fn drop_unreferenced(&self, ids: &[ChunkId]) -> FsResult<Vec<ChunkId>> {
         let orphans = self.run(true, |t| {
             let mut referenced: HashSet<ChunkId> = HashSet::new();
@@ -170,6 +171,7 @@ impl LocalFs {
                     referenced.extend(refs.into_iter().map(|r| r.id));
                 }
             }
+            referenced.extend(self.pinned.lock().unwrap().keys().copied());
             let mut orphans: Vec<ChunkId> = ids
                 .iter()
                 .filter(|id| !referenced.contains(*id) && self.has_staged(id))
