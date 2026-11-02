@@ -353,6 +353,8 @@ fn is_acl(name: &str) -> bool {
 
 /// Counter set while applied entries have not yet been reconciled into the tree.
 const STALE: &str = "tree_stale";
+/// Set once the tree was checked for files larger than their chunks (fixed in 1.13.7).
+const SIZES_CHECKED: &str = "sizes_checked";
 /// How many placed objects the last rebuild could not reach from the root.
 const UNREACHED: &str = "tree_unreached";
 
@@ -451,6 +453,28 @@ impl LocalFs {
             // A crash between a batch of applied entries and its reconcile.
             if t.counters.get(STALE).map_err(db)?.is_some() {
                 fs.reconcile(t)?;
+            }
+            // Before 1.13.7 a file written past inline content could show a size larger than
+            // its chunks, the extra read as zeros; its versions in the log were right. Once,
+            // look for such a file and rebuild the tree from the log if there is one.
+            if t.counters.get(SIZES_CHECKED).map_err(db)?.is_none() {
+                let mut wrong = 0u64;
+                for row in t.inodes.iter().map_err(db)? {
+                    let i: Inode = decode(row.map_err(db)?.1.value())?;
+                    if let Content::Chunks(refs) = &i.content
+                        && refs.iter().map(|r| u64::from(r.len)).sum::<u64>() != i.size
+                    {
+                        wrong += 1;
+                    }
+                }
+                if wrong > 0 {
+                    eprintln!(
+                        "startfs: {wrong} files showed a size their content does not have; \
+                         rebuilding the tree from the log"
+                    );
+                    fs.reconcile(t)?;
+                }
+                t.counters.insert(SIZES_CHECKED, 1).map_err(db)?;
             }
             Ok(())
         })?;
