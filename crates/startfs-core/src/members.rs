@@ -255,6 +255,15 @@ impl Membership {
         self.offer.unwrap_or(default)
     }
 
+    /// The other members, each by the endpoint it is reached on.
+    pub fn peer_members(&self) -> Vec<(NodeId, MemberId)> {
+        self.members
+            .values()
+            .filter(|m| m.id != self.me && !m.removed)
+            .map(|m| (m.endpoint, m.id))
+            .collect()
+    }
+
     /// Endpoints of the other members.
     pub fn peers(&self) -> Vec<NodeId> {
         self.members

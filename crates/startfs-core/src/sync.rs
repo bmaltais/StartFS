@@ -7,6 +7,7 @@
 
 use crate::clock::Clock;
 use crate::fs::{CatchUp, LocalFs};
+use crate::members::MemberId;
 use crate::net::{NodeId, Transport};
 use crate::oplog::{Entry, Frontier, StatePin};
 use crate::ops::{Ino, Nanos};
@@ -36,6 +37,8 @@ struct Transfer {
 
 #[derive(Default)]
 struct Peer {
+    /// The member behind the endpoint when the peer was set.
+    member: Option<MemberId>,
     /// What the peer is believed to hold, once it has said so.
     known: Option<Frontier>,
     /// What the peer itself last said it holds (never a guess).
@@ -86,10 +89,19 @@ impl Syncer {
     }
 
     /// Exchange logs with exactly these peers.
-    pub fn set_peers(&mut self, peers: &[NodeId]) {
-        self.peers.retain(|id, _| peers.contains(id));
-        for p in peers {
-            self.peers.entry(*p).or_default();
+    ///
+    /// Each peer is an endpoint and the member now behind it. A new member behind an endpoint
+    /// (a machine rebuilt and joined again) starts from nothing: what the old one was believed
+    /// to hold, its own entries above all, says nothing about the blank one.
+    pub fn set_peers(&mut self, peers: &[(NodeId, MemberId)]) {
+        self.peers
+            .retain(|id, _| peers.iter().any(|(p, _)| p == id));
+        for (endpoint, member) in peers {
+            let peer = self.peers.entry(*endpoint).or_default();
+            if peer.member.is_some_and(|old| old != *member) {
+                *peer = Peer::default();
+            }
+            peer.member = Some(*member);
         }
     }
 
