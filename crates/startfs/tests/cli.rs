@@ -255,7 +255,10 @@ fn two_daemon_processes_create_join_and_see_each_other_over_quic() {
     let _a = start_daemon_with(da.path(), true, "allowed_tags = [\"tag:startfs\"]");
     let _b = start_daemon(db.path());
 
-    let created = startfs(da.path(), &["create", "--name", "home", "--copies", "2"]);
+    let created = startfs(
+        da.path(),
+        &["create", "--name", "home", "--copies", "2", "--encrypt"],
+    );
     let token = stdout(&created);
     // The recovery key is shown once, on stderr, so the token alone is still capturable.
     let shown = String::from_utf8_lossy(&created.stderr).into_owned();

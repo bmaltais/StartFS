@@ -25,8 +25,8 @@ pub enum Request {
     Create {
         name: String,
         copies: u32,
-        /// Encrypt chunks and metadata at rest (the default); `false` for a plain filesystem.
-        #[serde(default = "yes")]
+        /// Encrypt chunks and metadata at rest; a plain filesystem unless asked.
+        #[serde(default)]
         encrypt: bool,
     },
     /// Make a new recovery key for an encrypted filesystem. A last resort: the original is
@@ -105,10 +105,6 @@ pub enum Request {
         #[serde(default)]
         recovery_key: Option<String>,
     },
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,7 +703,7 @@ impl Client {
     }
 
     /// Create a plain (unencrypted) filesystem; returns the join token. `startfs create`
-    /// goes through [`Self::create_filesystem`] and encrypts by default.
+    /// goes through [`Self::create_filesystem`], where encryption is opt-in.
     pub fn create(&self, name: &str, copies: u32) -> Result<String, Error> {
         Ok(self.create_filesystem(name, copies, false)?.0)
     }

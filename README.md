@@ -224,8 +224,8 @@ it by mistake. `startfs config --storage-only` and `--no-storage-only` change th
 (unmount first; a storage-only member must offer space). `status` marks it. Like any new
 field on a member, this bumps the protocol version, so upgrade every member together.
 
-**Encryption.** A new filesystem is encrypted at rest (chunks and metadata; `create --no-encrypt`
-for a plain one). `create` shows a **recovery key** once, on stderr (`sfrk1-...`): keep it. A
+**Encryption** (opt-in; writes of large files are slower, see `docs/validation.md`). `create --encrypt`
+encrypts the new filesystem at rest (chunks and metadata). It then shows a **recovery key** once, on stderr (`sfrk1-...`): keep it. A
 machine joining an encrypted filesystem, or a rebuilt one coming back, needs it:
 
 ```sh

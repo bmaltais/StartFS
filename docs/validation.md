@@ -551,3 +551,17 @@ raw and zstd chunk counts are identical, so dedup and compression ratios are unc
 follows both). Stored bytes differ by exactly `SEAL_OVERHEAD` (40 bytes: nonce and tag) a chunk.
 Not measured on a real cluster; sector encryption of the metadata file costs CPU on every database
 read and write, which the harness does not time.
+
+Write speed, encrypted against plain (2026-11-02, `scripts/profile-write.sh`, one run each, shared machine; plain
+encrypted with `CREATE_FLAGS=--encrypt`; a real FUSE mount, one node, 1 copy; reads not measured):
+
+| Write | Plain | Encrypted |
+|---|---|---|
+| 128 MiB, one file | 0.39 s, daemon CPU 0.23 s | 0.53 s, 0.36 s |
+| 200 x 1 MiB | 0.55 s | 0.81 s |
+| 1000 x 16 KiB | 0.69 s | 0.65 s |
+| 1000 x 8 B (inline) | 0.39 s | 0.49 s |
+
+Large writes are about 35-45% slower (about 1 ms per MiB); small files show no clear difference.
+Cipher throughput alone on the same machine (AES-NI): chunk seal 1.5 GiB/s, open 1.6 GiB/s, metadata
+sector encryption 1.2 GiB/s.
