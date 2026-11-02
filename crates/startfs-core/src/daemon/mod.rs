@@ -497,9 +497,7 @@ impl Daemon {
             }
         }
         self.ack_pushes(&*transport, &mut pushes);
-        for (from, held) in entries {
-            self.handle_peer_message(&*transport, from, Message::Entries(held));
-        }
+        self.handle_peer_entries(entries.into_iter().collect());
         if let Err(e) = self.fs.end_batch() {
             eprintln!("startfs: cannot rebuild the tree: {e}");
         }

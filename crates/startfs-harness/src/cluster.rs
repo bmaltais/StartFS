@@ -300,6 +300,13 @@ impl Cluster {
         busy
     }
 
+    /// One round of background work on node `i` alone: what reached it since its last
+    /// tick is handled together.
+    pub fn tick_one(&self, i: usize) -> bool {
+        let daemon = self.nodes[i].daemon.lock().unwrap().clone();
+        daemon.is_some_and(|d| d.tick())
+    }
+
     /// Run only the liveness work of node `i`, as its own thread does while
     /// the tick is stuck.
     pub fn keepalive(&self, i: usize) {

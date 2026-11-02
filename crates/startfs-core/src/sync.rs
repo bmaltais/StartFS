@@ -8,7 +8,7 @@
 use crate::clock::Clock;
 use crate::fs::{CatchUp, LocalFs};
 use crate::net::{NodeId, Transport};
-use crate::oplog::{Frontier, StatePin};
+use crate::oplog::{Entry, Frontier, StatePin};
 use crate::ops::{Ino, Nanos};
 use crate::protocol::Message;
 use std::collections::BTreeMap;
@@ -164,22 +164,44 @@ impl Syncer {
                     self.reply_frontier(from);
                 }
             }
-            Message::Entries(entries) => {
-                // The peer holds what it sends. Its hellos lag a busy writer, so
-                // without this it would be sent its own entries back.
-                if let Some(known) = self.peers.get_mut(&from).and_then(|p| p.known.as_mut()) {
-                    for e in &entries {
-                        let k = known.entry(e.origin).or_default();
-                        *k = (*k).max(e.seq + 1);
-                    }
-                }
-                if let Err(e) = self.fs.apply_remote(&entries) {
-                    eprintln!("startfs: cannot apply entries from node {}: {e}", from.0);
-                }
-                self.note_synced(from);
-                self.reply_frontier(from);
-            }
+            Message::Entries(entries) => self.handle_entries(vec![(from, entries)]),
             _ => {}
+        }
+    }
+
+    /// Apply the entries several peers sent, in one durable commit: each peer passes on
+    /// what it receives, so a tick often holds batches from all of them.
+    pub fn handle_entries(&mut self, batches: Vec<(NodeId, Vec<Entry>)>) {
+        let mut all = Vec::new();
+        let mut senders = Vec::new();
+        for (from, entries) in batches {
+            let Some(peer) = self.peers.get_mut(&from) else {
+                continue;
+            };
+            // The peer holds what it sends. Its hellos lag a busy writer, so
+            // without this it would be sent its own entries back.
+            if let Some(known) = peer.known.as_mut() {
+                for e in &entries {
+                    let k = known.entry(e.origin).or_default();
+                    *k = (*k).max(e.seq + 1);
+                }
+            }
+            all.extend(entries);
+            senders.push(from);
+        }
+        if senders.is_empty() {
+            return;
+        }
+        // An entry applies only after its origin's previous one: in per-origin order, a
+        // later batch can fill what an earlier one started past.
+        all.sort_by_key(|e| (e.origin, e.seq));
+        if let Err(e) = self.fs.apply_remote(&all) {
+            let from: Vec<u32> = senders.iter().map(|n| n.0).collect();
+            eprintln!("startfs: cannot apply entries from nodes {from:?}: {e}");
+        }
+        for from in senders {
+            self.note_synced(from);
+            self.reply_frontier(from);
         }
     }
 
