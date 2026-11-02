@@ -156,6 +156,12 @@ impl ChunkCipher {
 /// not detect tampering (the database's own checksums notice damage).
 pub struct SectorCipher(Xts128<Aes256>);
 
+impl std::fmt::Debug for SectorCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SectorCipher(..)")
+    }
+}
+
 impl SectorCipher {
     /// Encrypt `data`, which starts at the beginning of sector `first`.
     pub fn encrypt(&self, data: &mut [u8], first: u64) {

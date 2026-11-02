@@ -526,7 +526,11 @@ impl Cluster {
             .into_iter()
             .filter(|store| marker(store).exists())
             .collect();
-        let meta = dir.join("meta.redb");
+        let meta = [startfs_core::fs::SEALED_DB, startfs_core::fs::PLAIN_DB]
+            .map(|name| dir.join(name))
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| dir.join(startfs_core::fs::PLAIN_DB));
         let at_cut = std::fs::read(&meta).ok();
         self.crash(i);
         for store in torn {

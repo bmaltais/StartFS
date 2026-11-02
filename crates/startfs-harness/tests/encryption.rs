@@ -24,7 +24,12 @@ fn files_under(dir: &Path, out: &mut Vec<Vec<u8>>) {
 fn found_in(c: &Cluster, node: usize, needle: &[u8], stores: &[&str]) -> bool {
     let mut all = Vec::new();
     for store in stores {
-        files_under(&c.data_dir(node).join(store), &mut all);
+        let at = c.data_dir(node).join(store);
+        if at.is_dir() {
+            files_under(&at, &mut all);
+        } else if at.is_file() {
+            all.push(std::fs::read(&at).unwrap());
+        }
     }
     all.iter()
         .any(|f| f.windows(needle.len()).any(|w| w == needle))
@@ -45,6 +50,7 @@ fn the_check_can_see_plaintext_in_a_plain_filesystem() {
     put(&c.fs(0), "plans.txt", &readable());
     c.sync();
     assert!(found_in(&c, 0, SECRET, &["chunks", "staging"]));
+    assert!(found_in(&c, 0, b"plans.txt", &["meta.redb"]));
 }
 
 #[test]
@@ -57,6 +63,9 @@ fn a_replica_host_holds_no_plaintext_chunks() {
     assert_eq!(c.fs(2).read(ino, 0, body.len() as u32).unwrap(), body);
 
     for node in 0..3 {
+        let name_gone = !found_in(&c, node, b"plans.txt", &["meta.enc"]);
+        assert!(name_gone, "node {node} holds a file name in the clear");
+        assert!(!c.data_dir(node).join("meta.redb").exists());
         assert!(
             !found_in(&c, node, SECRET, &["chunks", "staging", "cache"]),
             "node {node} holds readable content"
@@ -135,4 +144,20 @@ fn a_plain_filesystem_has_no_key_to_make() {
     let c = Cluster::with_filesystem(1, 2, "");
     let err = c.control(0).recovery_key().unwrap_err().to_string();
     assert!(err.contains("not encrypted"), "{err}");
+}
+
+#[test]
+fn a_restarted_member_finds_its_key_and_reads_everything() {
+    let (c, _key) = Cluster::with_encrypted_filesystem(2, 3);
+    let body = noise(60_000, 11);
+    put(&c.fs(0), "stay.bin", &body);
+    c.sync();
+
+    c.crash(1);
+    c.restart(1);
+    c.sync();
+
+    let ino = c.fs(1).lookup(ROOT_INO, "stay.bin").unwrap().ino;
+    assert_eq!(c.fs(1).read(ino, 0, body.len() as u32).unwrap(), body);
+    assert!(c.data_dir(1).join("fs.key").exists());
 }

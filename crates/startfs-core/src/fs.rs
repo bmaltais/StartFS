@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 
 /// Files up to this size live inside their metadata record, with no chunk.
 pub const INLINE_MAX: usize = 2048;
@@ -288,7 +288,8 @@ fn readahead(refs: &[ChunkRef]) -> Vec<ChunkId> {
 }
 
 pub struct LocalFs {
-    db: Database,
+    /// The metadata database; replaced once, when the node starts encrypting.
+    db: RwLock<Arc<Database>>,
     /// The node's data directory: where the filesystem key is kept.
     dir: std::path::PathBuf,
     /// The key chunks and metadata are encrypted under, once the node belongs to an
@@ -386,6 +387,38 @@ const UNREACHED: &str = "tree_unreached";
 /// hundreds of thousands of files (a 43 MB file in the live cluster) and a miss is a page read.
 const METADATA_CACHE_BYTES: usize = 64 << 20;
 
+/// The metadata file in `dir`: encrypted under `key` when the node has one.
+fn open_database(dir: &Path, key: Option<&crate::crypto::FsKey>) -> FsResult<Database> {
+    let builder_with = || {
+        let mut b = Database::builder();
+        b.set_cache_size(METADATA_CACHE_BYTES);
+        b
+    };
+    match key {
+        None => builder_with().create(dir.join(PLAIN_DB)).map_err(db),
+        Some(key) => {
+            // A plain file left by a start that was cut short while the node began
+            // encrypting is superseded: the encrypted one was finished first.
+            remove_if_present(&dir.join(PLAIN_DB))?;
+            let file =
+                crate::metacrypt::EncryptedFile::open(&dir.join(SEALED_DB), key.sector_cipher())
+                    .map_err(db)?;
+            builder_with().create_with_backend(file).map_err(db)
+        }
+    }
+}
+
+fn remove_if_present(path: &Path) -> FsResult<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(db(e)),
+        _ => Ok(()),
+    }
+}
+
+/// The metadata file of a plain filesystem, and of an encrypted one.
+pub const PLAIN_DB: &str = "meta.redb";
+pub const SEALED_DB: &str = "meta.enc";
+
 impl LocalFs {
     pub fn open(
         dir: &Path,
@@ -394,11 +427,8 @@ impl LocalFs {
         clock: Arc<dyn Clock>,
     ) -> FsResult<Self> {
         std::fs::create_dir_all(dir).map_err(db)?;
-        let database = Database::builder()
-            .set_cache_size(METADATA_CACHE_BYTES)
-            .create(dir.join("meta.redb"))
-            .map_err(db)?;
         let key = crate::crypto::FsKey::load(dir).map_err(db)?;
+        let database = open_database(dir, key.as_ref())?;
         let chunks = ChunkStore::open(&dir.join("chunks"))?;
         let staging = ChunkStore::open(&dir.join("staging"))?.recording_additions();
         let cache = ChunkCache::open(&dir.join("cache"), cache_bytes)?;
@@ -407,7 +437,7 @@ impl LocalFs {
         }
         cache.set_key(key.as_ref());
         let fs = Self {
-            db: database,
+            db: RwLock::new(Arc::new(database)),
             dir: dir.to_path_buf(),
             key: Mutex::new(key),
             chunks,
@@ -446,7 +476,13 @@ impl LocalFs {
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
-        fs.run(true, |t| {
+        fs.init()?;
+        Ok(fs)
+    }
+
+    /// Set up what a new database needs and finish what a crashed run left half done.
+    fn init(&self) -> FsResult<()> {
+        self.run(true, |t| {
             let wall = t
                 .counters
                 .get("hlc_wall")
@@ -457,10 +493,10 @@ impl LocalFs {
                 .get("hlc_counter")
                 .map_err(db)?
                 .map_or(0, |g| g.value());
-            *fs.hlc.lock().unwrap() = Hlc {
+            *self.hlc.lock().unwrap() = Hlc {
                 wall,
                 counter: counter as u32,
-                node: fs.node(),
+                node: self.node(),
             };
             let fresh = t.inodes.get(ROOT_INO).map_err(db)?.is_none();
             if t.counters
@@ -473,7 +509,7 @@ impl LocalFs {
                     .map_err(db)?;
             }
             if fresh {
-                let now = fs.clock.now();
+                let now = self.clock.now();
                 let root = Inode {
                     kind: FileKind::Dir,
                     mode: 0o755,
@@ -489,7 +525,7 @@ impl LocalFs {
             }
             // A crash between a batch of applied entries and its reconcile.
             if t.counters.get(STALE).map_err(db)?.is_some() {
-                fs.reconcile(t)?;
+                self.reconcile(t)?;
             }
             // Before 1.13.7 a file written past inline content could show a size larger than
             // its chunks, the extra read as zeros; its versions in the log were right. Once,
@@ -509,13 +545,12 @@ impl LocalFs {
                         "startfs: {wrong} files showed a size their content does not have; \
                          rebuilding the tree from the log"
                     );
-                    fs.reconcile(t)?;
+                    self.reconcile(t)?;
                 }
                 t.counters.insert(SIZES_CHECKED, 1).map_err(db)?;
             }
             Ok(())
-        })?;
-        Ok(fs)
+        })
     }
 
     pub fn node(&self) -> MemberId {
@@ -540,7 +575,28 @@ impl LocalFs {
     /// Start encrypting under `key`: keep it for the next start, then seal what is stored
     /// from now on. Chunks stored before keep reading as they were.
     pub fn set_encryption(&self, key: crate::crypto::FsKey) -> FsResult<()> {
+        if self.key.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        // Metadata first. The node must be fresh: what the plain database holds is not
+        // carried over. The encrypted file is finished before the key is kept, and a start
+        // that finds the key takes the encrypted file, so a cut in between loses nothing.
+        if !self.frontier()?.is_empty() {
+            return Err(FsError::Invalid);
+        }
+        let guard = self.lock.lock().unwrap();
+        remove_if_present(&self.dir.join(SEALED_DB))?;
+        let file =
+            crate::metacrypt::EncryptedFile::open(&self.dir.join(SEALED_DB), key.sector_cipher())
+                .map_err(db)?;
+        let mut builder = Database::builder();
+        builder.set_cache_size(METADATA_CACHE_BYTES);
+        let sealed = builder.create_with_backend(file).map_err(db)?;
+        *self.db.write().unwrap() = Arc::new(sealed);
+        drop(guard);
+        self.init()?;
         key.save(&self.dir).map_err(db)?;
+        remove_if_present(&self.dir.join(PLAIN_DB))?;
         for store in [&self.chunks, &self.staging] {
             store.set_key(Some(&key));
         }
@@ -558,7 +614,7 @@ impl LocalFs {
 
     /// Run `f` on a snapshot of the tree, without the node lock.
     fn view<T>(&self, f: impl FnOnce(&View) -> FsResult<T>) -> FsResult<T> {
-        let txn = self.db.begin_read().map_err(db)?;
+        let txn = self.db.read().unwrap().begin_read().map_err(db)?;
         let view = View {
             inodes: txn.open_table(INODES).map_err(db)?,
             dirents: txn.open_table(DIRENTS).map_err(db)?,
@@ -631,7 +687,7 @@ impl LocalFs {
         f: impl FnOnce(&mut Tables<'_>) -> FsResult<T>,
     ) -> FsResult<T> {
         let _guard = self.lock.lock().unwrap();
-        let mut txn = self.db.begin_write().map_err(db)?;
+        let mut txn = self.db.read().unwrap().begin_write().map_err(db)?;
         txn.set_durability(durability).map_err(db)?;
         let out = {
             let mut t = Tables {

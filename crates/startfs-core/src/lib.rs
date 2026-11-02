@@ -12,6 +12,7 @@ pub mod error;
 pub mod fs;
 pub mod load;
 pub mod members;
+pub mod metacrypt;
 pub mod net;
 pub mod oplog;
 pub mod ops;

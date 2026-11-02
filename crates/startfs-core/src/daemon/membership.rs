@@ -186,6 +186,9 @@ impl Daemon {
         if name.is_empty() || copies == 0 {
             return Err(Error::BadFilesystemSpec);
         }
+        if encrypt && !self.fs.frontier()?.is_empty() {
+            return Err(Error::EncryptNeedsFresh);
+        }
         let mut raw = [0u8; 16];
         getrandom::fill(&mut raw).expect("os randomness");
         let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();

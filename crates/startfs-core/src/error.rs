@@ -32,6 +32,10 @@ pub enum Error {
     BadRelease(String),
     #[error("cannot find the latest release: {0}")]
     NoRelease(String),
+    #[error(
+        "this node already holds files, which cannot be encrypted in place; create the filesystem on a fresh node, or with --no-encrypt"
+    )]
+    EncryptNeedsFresh,
     #[error("this filesystem is encrypted: joining needs its recovery key (--key)")]
     RecoveryKeyNeeded,
     #[error("the recovery key does not open this filesystem")]
