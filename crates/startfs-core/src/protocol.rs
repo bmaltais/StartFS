@@ -2,6 +2,7 @@
 
 use crate::chunkstore::ChunkId;
 use crate::control::{NodeStats, Repair, Shortfall, Stranded};
+use crate::crypto::KeyWrap;
 use crate::load::Load;
 use crate::members::{Admission, JoinRequest, Member, MemberId, TokenRec};
 use crate::oplog::{Entry, Frontier, StateChunk};
@@ -59,6 +60,9 @@ pub enum Message {
     /// How long the filesystem keeps versions, in seconds, and the revision of
     /// that setting; the higher revision wins, a tie goes to the longer window.
     KeepVersions { secs: u64, rev: u64 },
+    /// Every recovery key's wrap of the filesystem key. A wrap opens nothing without its
+    /// recovery key, so members hand them to anyone who is a member.
+    KeyWraps(Vec<KeyWrap>),
 }
 
 /// Which release the cluster is on, sent to a member that cannot otherwise hear
@@ -133,7 +137,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 18;
+pub const PROTOCOL_VERSION: u8 = 19;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -198,7 +202,8 @@ impl Message {
     pub fn is_background(raw: &[u8]) -> bool {
         // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`,
         // `Upgrade` and `KeepVersions`.
-        raw.first() != Some(&NOTICE_BYTE) && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16 | 18))
+        raw.first() != Some(&NOTICE_BYTE)
+            && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16 | 18 | 19))
     }
 
     /// What an encoded message is for, as the activity view groups traffic.
@@ -210,7 +215,7 @@ impl Message {
         match raw.get(1) {
             Some(6..=9) => Category::Chunk,
             Some(1 | 2) => Category::Metadata,
-            Some(0 | 3 | 10..=12 | 13 | 18) => Category::Gossip,
+            Some(0 | 3 | 10..=12 | 13 | 18 | 19) => Category::Gossip,
             _ => Category::Other,
         }
     }
@@ -283,8 +288,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        18,
-        "071e96630f2d852149c408bab85c26aa7b0e3a82115c5393ca650235ac556ba3",
+        19,
+        "9642357923ffec556b131697fdaca53f3c347fdb5e6fce18e8b3105d6bc93b7d",
     );
 
     #[test]
@@ -315,6 +320,7 @@ mod tests {
             standin_days: 3,
             keep_versions_secs: 86400,
             keep_versions_rev: 2,
+            encrypted: true,
         };
         let samples = [
             Message::JoinReply(Ok(Admission {
@@ -322,7 +328,13 @@ mod tests {
                 id: MemberId(2),
                 ids: IdRange { start: 1, end: 9 },
                 members: vec![member.clone()],
+                key_wraps: vec![crate::crypto::KeyWrap {
+                    id: "k".into(),
+                    check: [5; 32],
+                    wrapped: vec![6; 5],
+                }],
             })),
+            Message::KeyWraps(vec![]),
             Message::JoinReply(Err("no".into())),
             Message::Members(vec![member]),
             Message::Tokens(vec![TokenRec {

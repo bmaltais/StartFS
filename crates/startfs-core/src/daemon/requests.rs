@@ -35,11 +35,23 @@ impl Daemon {
 
     fn control_reply(&self, req: Request) -> Result<Response, Error> {
         Ok(match req {
-            Request::Create { name, copies } => Response::Created {
-                token: self.create_filesystem(name, copies)?,
-            },
+            Request::Create {
+                name,
+                copies,
+                encrypt,
+            } => {
+                let (token, recovery_key) = self.create_filesystem(name, copies, encrypt)?;
+                Response::Created {
+                    token,
+                    recovery_key,
+                }
+            }
             Request::NewToken => Response::Created {
                 token: self.new_token()?,
+                recovery_key: None,
+            },
+            Request::RecoveryKey => Response::RecoveryKey {
+                key: self.new_recovery_key()?,
             },
             Request::Config {
                 offer_bytes,
@@ -80,8 +92,9 @@ impl Daemon {
                 offer_bytes,
                 site,
                 storage_only,
+                recovery_key,
             } => {
-                self.join(&token, offer_bytes, site, storage_only)?;
+                self.join(&token, offer_bytes, site, storage_only, recovery_key)?;
                 Response::Joined
             }
             Request::Update { release, force } => Response::Updating(self.update(release, force)?),

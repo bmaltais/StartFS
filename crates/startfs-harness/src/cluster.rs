@@ -191,6 +191,25 @@ impl Cluster {
         c
     }
 
+    /// Like [`Cluster::with_filesystem`] with the filesystem encrypted; returns the cluster
+    /// and its recovery key. Every other node joins with that key.
+    pub fn with_encrypted_filesystem(copies: u32, nodes: usize) -> (Self, String) {
+        const OFFER: u64 = 10 << 30;
+        let c = Self::start(nodes);
+        let (token, key) = c
+            .control(0)
+            .create_filesystem("home", copies, true)
+            .unwrap();
+        let key = key.expect("an encrypted filesystem shows its recovery key");
+        for i in 1..nodes {
+            c.control(i)
+                .join_with_key(&token, Some(OFFER), "", &key)
+                .unwrap();
+        }
+        c.sync();
+        (c, key)
+    }
+
     /// One node per entry of `offers`, in one filesystem of `copies` copies, each
     /// node offering that many bytes (0 makes a pure client), synced.
     pub fn with_offers(copies: u32, offers: &[u64]) -> Self {
@@ -320,6 +339,11 @@ impl Cluster {
     pub fn idle_wait(&self, i: usize) -> Duration {
         let daemon = self.nodes[i].daemon.lock().unwrap().clone();
         daemon.expect("node is up").idle_wait()
+    }
+
+    /// Where node `i` keeps its data.
+    pub fn data_dir(&self, i: usize) -> std::path::PathBuf {
+        self.nodes[i].dir.path().to_path_buf()
     }
 
     pub fn node_count(&self) -> usize {
@@ -502,7 +526,11 @@ impl Cluster {
             .into_iter()
             .filter(|store| marker(store).exists())
             .collect();
-        let meta = dir.join("meta.redb");
+        let meta = [startfs_core::fs::SEALED_DB, startfs_core::fs::PLAIN_DB]
+            .map(|name| dir.join(name))
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| dir.join(startfs_core::fs::PLAIN_DB));
         let at_cut = std::fs::read(&meta).ok();
         self.crash(i);
         for store in torn {

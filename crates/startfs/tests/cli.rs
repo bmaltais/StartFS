@@ -255,13 +255,20 @@ fn two_daemon_processes_create_join_and_see_each_other_over_quic() {
     let _a = start_daemon_with(da.path(), true, "allowed_tags = [\"tag:startfs\"]");
     let _b = start_daemon(db.path());
 
-    let token = stdout(&startfs(
-        da.path(),
-        &["create", "--name", "home", "--copies", "2"],
-    ));
+    let created = startfs(da.path(), &["create", "--name", "home", "--copies", "2"]);
+    let token = stdout(&created);
+    // The recovery key is shown once, on stderr, so the token alone is still capturable.
+    let shown = String::from_utf8_lossy(&created.stderr).into_owned();
+    let key = shown
+        .split_whitespace()
+        .find(|w| w.starts_with("sfrk1-"))
+        .expect(&shown);
+    let without = startfs(db.path(), &["join", token.trim(), "--offer", "100M"]);
+    assert!(!without.status.success());
+    assert!(String::from_utf8_lossy(&without.stderr).contains("recovery key"));
     stdout(&startfs(
         db.path(),
-        &["join", token.trim(), "--offer", "100M"],
+        &["join", token.trim(), "--key", key, "--offer", "100M"],
     ));
 
     // Both ends list both members, and each sees the other as up.

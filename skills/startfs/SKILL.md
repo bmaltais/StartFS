@@ -60,7 +60,11 @@ startfs create --name NAME --copies N --example
 ```
 
 `--copies` is how many machines hold each piece of data; 2 or 3 is typical. The output is
-a ready-to-run line, `startfs join startfs1-...`.
+a ready-to-run line, `startfs join startfs1-...`. A new filesystem is encrypted at rest
+(`--no-encrypt` for a plain one): `create` shows a **recovery key** (`sfrk1-...`) once, on stderr.
+Tell the user to keep it; joining machines add `--key sfrk1-...`. A rebuilt machine uses
+`startfs recover KEY TOKEN`. If every copy of the key is lost but a member still runs,
+`startfs recovery-key` on it makes a new one (a last resort; the old keys keep working).
 
 ## Add a machine
 

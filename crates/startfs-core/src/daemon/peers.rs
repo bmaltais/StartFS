@@ -101,6 +101,12 @@ impl Daemon {
                     m.merge_tokens(list);
                 }
             }
+            Message::KeyWraps(list) => {
+                let mut m = self.membership.lock().unwrap();
+                if m.is_member_endpoint(from) {
+                    m.merge_key_wraps(list);
+                }
+            }
             Message::Health(health) => {
                 if self.membership.lock().unwrap().is_member_endpoint(from) {
                     let now = self.clock.now();

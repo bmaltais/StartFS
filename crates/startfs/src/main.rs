@@ -24,8 +24,10 @@ const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
 
 commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
-  create --name NAME --copies N [--example]
-                                      create a filesystem and print its join token
+  create --name NAME --copies N [--no-encrypt] [--example]
+                                      create a filesystem and print its join token. Chunks and
+                                      metadata are encrypted at rest; the recovery key is shown
+                                      once (on stderr). --no-encrypt: a plain filesystem
   status [--verbose] [--json] [--watch [--interval SECONDS]]
                                       show a summary of this node's filesystem: the verdict and its
                                       cause, the members, what needs attention (--verbose, -v: also
@@ -44,11 +46,17 @@ commands:
                                       PATH (deleted or not), back to what it held at POINT
                                       (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it); what
                                       it replaces is kept as a version, so a restore is undoable
-  join TOKEN [--offer SIZE] [--site NAME] [--storage-only]
+  join TOKEN [--key RECOVERY_KEY] [--offer SIZE] [--site NAME] [--storage-only]
                                       join the filesystem a token names, declaring where this
                                       node lives (home, cloud) so copies are spread across sites;
                                       --storage-only: hold replicas but never mount or serve the
-                                      filesystem
+                                      filesystem. An encrypted filesystem needs --key
+  recover RECOVERY_KEY TOKEN [--offer SIZE] [--site NAME]
+                                      bring a rebuilt machine back into an encrypted filesystem:
+                                      the key is checked by a member before it says anything
+  recovery-key                        LAST RESORT: make another recovery key from a running
+                                      member, when none is left to add a node with. Existing keys
+                                      keep working; anyone who gets the new one can read the data
   token [--example]                   print a new join token (--example: the full join
                                       command to paste on the other machine)
   update [vX.Y.Z] [--force]           move every member to a release (the latest stable one when
@@ -207,19 +215,51 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             let copies = flag_value(rest, "--copies")?
                 .parse::<u32>()
                 .map_err(|_| CliError::CopiesNotANumber)?;
-            print_token(&Client::new(socket).create(&name, copies)?, rest);
+            let encrypt = !rest.iter().any(|a| a == "--no-encrypt");
+            let (token, key) = Client::new(socket).create_filesystem(&name, copies, encrypt)?;
+            print_token(&token, rest);
+            if let Some(key) = key {
+                eprintln!(
+                    "\nRECOVERY KEY (shown once, keep it somewhere safe):\n\n    {key}\n\n\
+                     Chunks and metadata are encrypted. A machine joining, or rebuilt, needs this key:\n\
+                     startfs join TOKEN --key KEY. Lost it? A running member can make another:\n\
+                     startfs recovery-key (a last resort)."
+                );
+            }
             Ok(())
         }
         "join" => {
             let token = rest.first().ok_or(CliError::Usage)?;
             let offer = optional_size(rest, "--offer")?;
             let site = flag_value(rest, "--site").unwrap_or_default();
-            if rest.iter().any(|a| a == "--storage-only") {
+            if let Ok(key) = flag_value(rest, "--key") {
+                Client::new(socket).join_with_key(token, offer, &site, &key)?;
+            } else if rest.iter().any(|a| a == "--storage-only") {
                 Client::new(socket).join_storage_only(token, offer, &site)?;
             } else {
                 Client::new(socket).join_at(token, offer, &site)?;
             }
             println!("joined");
+            Ok(())
+        }
+        "recover" => {
+            let (key, token) = (
+                rest.first().ok_or(CliError::Usage)?,
+                rest.get(1).ok_or(CliError::Usage)?,
+            );
+            let offer = optional_size(rest, "--offer")?;
+            let site = flag_value(rest, "--site").unwrap_or_default();
+            Client::new(socket).join_with_key(token, offer, &site, key)?;
+            println!("recovered: this node is back in the filesystem");
+            Ok(())
+        }
+        "recovery-key" => {
+            let key = Client::new(socket).recovery_key()?;
+            println!("{key}");
+            eprintln!(
+                "\nA new recovery key. Anyone holding it can join and read this filesystem: keep it\n\
+                 as safe as the first one. The older keys still work."
+            );
             Ok(())
         }
         "token" => {
@@ -622,7 +662,7 @@ fn print_token(token: &str, rest: &[String]) {
 fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
     let (valued, alone, positional): (&[&str], &[&str], usize) = match command {
         "daemon" => (&["--mount"], &[], 0),
-        "create" => (&["--name", "--copies"], &["--example"], 0),
+        "create" => (&["--name", "--copies"], &["--example", "--no-encrypt"], 0),
         "status" => (
             &["--interval"],
             &["--json", "--verbose", "-v", "--watch"],
@@ -631,7 +671,8 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "activity" | "stats" => (&[], &["--json"], 0),
         "history" => (&[], &["--json"], 1),
         "restore" => (&["--at"], &[], 1),
-        "join" => (&["--offer", "--site"], &["--storage-only"], 1),
+        "join" => (&["--offer", "--site", "--key"], &["--storage-only"], 1),
+        "recover" => (&["--offer", "--site"], &[], 2),
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
         "remove" | "revoke" => (&[], &[], 1),

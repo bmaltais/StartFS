@@ -11,6 +11,16 @@ _Avoid_: Apparent size
 **Referenced bytes**:
 The plaintext bytes of the distinct chunks the tree references; logical size against this is the dedup ratio.
 
+**Filesystem key**:
+The random key chunks and the metadata file are encrypted under at rest. It is never shown; each keyed member keeps it in `fs.key`.
+
+**Recovery key**:
+A secret shown once at `create` (`sfrk1-...`) that opens the filesystem key. A joining or rebuilt machine presents it; a running member can make another (a last resort), since the original is never stored.
+_Avoid_: Password, passphrase
+
+**Key wrap**:
+The filesystem key sealed under one recovery key. It is public state every member holds and hands out.
+
 **Usable size**:
 What the cluster can hold: the space members offer, divided by the number of copies. `df` reports it as the size.
 

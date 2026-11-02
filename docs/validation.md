@@ -542,3 +542,12 @@ scripts/validate-bench.sh "16 32 64 128"
 
 Needs `/dev/fuse` and `fusermount3`, `python3`, and a Rust toolchain. State is kept under
 `~/.cache/sfv.*` (short paths: the control socket path has a length limit) and removed on exit.
+
+## Encryption at rest (#184)
+
+`tests/encryption.rs` runs one workload (a compressible file, its copy, and an incompressible
+file) on a plain and an encrypted single-node filesystem. Chunk count, referenced bytes, and
+raw and zstd chunk counts are identical, so dedup and compression ratios are unchanged (sealing
+follows both). Stored bytes differ by exactly `SEAL_OVERHEAD` (40 bytes: nonce and tag) a chunk.
+Not measured on a real cluster; sector encryption of the metadata file costs CPU on every database
+read and write, which the harness does not time.

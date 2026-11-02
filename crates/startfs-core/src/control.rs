@@ -25,7 +25,13 @@ pub enum Request {
     Create {
         name: String,
         copies: u32,
+        /// Encrypt chunks and metadata at rest (the default); `false` for a plain filesystem.
+        #[serde(default = "yes")]
+        encrypt: bool,
     },
+    /// Make a new recovery key for an encrypted filesystem. A last resort: the original is
+    /// never kept, so a person who lost it asks a running member for another.
+    RecoveryKey,
     Status,
     /// This node's recent traffic, tick timings, queues and resource use.
     Activity,
@@ -95,7 +101,14 @@ pub enum Request {
         /// Join as a storage-only member: hold a replica, never serve the filesystem.
         #[serde(default)]
         storage_only: bool,
+        /// The recovery key of an encrypted filesystem, to join it or to come back to it.
+        #[serde(default)]
+        recovery_key: Option<String>,
     },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +137,9 @@ pub struct FilesystemInfo {
     /// Bumped each time `keep_versions_secs` is changed; the highest wins.
     #[serde(default)]
     pub keep_versions_rev: u64,
+    /// Chunks and metadata are encrypted at rest; joining takes a recovery key.
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 fn default_keep_versions() -> u64 {
@@ -525,7 +541,16 @@ pub struct TickBusy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    Created { token: String },
+    Created {
+        token: String,
+        /// The recovery key, shown this once, when the filesystem is encrypted.
+        #[serde(default)]
+        recovery_key: Option<String>,
+    },
+    /// A new recovery key.
+    RecoveryKey {
+        key: String,
+    },
     Joined,
     Done,
     Status(Box<Status>),
@@ -681,13 +706,36 @@ impl Client {
         serde_json::from_str(&line).map_err(Error::BadResponse)
     }
 
-    /// Create a filesystem; returns the join token.
+    /// Create a plain (unencrypted) filesystem; returns the join token. `startfs create`
+    /// goes through [`Self::create_filesystem`] and encrypts by default.
     pub fn create(&self, name: &str, copies: u32) -> Result<String, Error> {
+        Ok(self.create_filesystem(name, copies, false)?.0)
+    }
+
+    /// Create a filesystem; returns the join token and, if encrypted, the recovery key.
+    pub fn create_filesystem(
+        &self,
+        name: &str,
+        copies: u32,
+        encrypt: bool,
+    ) -> Result<(String, Option<String>), Error> {
         match self.call(&Request::Create {
             name: name.into(),
             copies,
+            encrypt,
         })? {
-            Response::Created { token } => Ok(token),
+            Response::Created {
+                token,
+                recovery_key,
+            } => Ok((token, recovery_key)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// A new recovery key for the encrypted filesystem this node belongs to.
+    pub fn recovery_key(&self) -> Result<String, Error> {
+        match self.call(&Request::RecoveryKey)? {
+            Response::RecoveryKey { key } => Ok(key),
             other => Err(unexpected(other)),
         }
     }
@@ -712,6 +760,17 @@ impl Client {
         self.join_as(token, offer_bytes, site, true)
     }
 
+    /// Join an encrypted filesystem (or come back to it on a rebuilt machine) with a recovery key.
+    pub fn join_with_key(
+        &self,
+        token: &str,
+        offer_bytes: Option<u64>,
+        site: &str,
+        recovery_key: &str,
+    ) -> Result<(), Error> {
+        self.join_keyed(token, offer_bytes, site, false, Some(recovery_key))
+    }
+
     fn join_as(
         &self,
         token: &str,
@@ -719,11 +778,23 @@ impl Client {
         site: &str,
         storage_only: bool,
     ) -> Result<(), Error> {
+        self.join_keyed(token, offer_bytes, site, storage_only, None)
+    }
+
+    fn join_keyed(
+        &self,
+        token: &str,
+        offer_bytes: Option<u64>,
+        site: &str,
+        storage_only: bool,
+        recovery_key: Option<&str>,
+    ) -> Result<(), Error> {
         match self.call(&Request::Join {
             token: token.into(),
             offer_bytes,
             site: site.into(),
             storage_only,
+            recovery_key: recovery_key.map(str::to_string),
         })? {
             Response::Joined => Ok(()),
             other => Err(unexpected(other)),
@@ -733,7 +804,7 @@ impl Client {
     /// Mint another join token.
     pub fn new_token(&self) -> Result<String, Error> {
         match self.call(&Request::NewToken)? {
-            Response::Created { token } => Ok(token),
+            Response::Created { token, .. } => Ok(token),
             other => Err(unexpected(other)),
         }
     }
