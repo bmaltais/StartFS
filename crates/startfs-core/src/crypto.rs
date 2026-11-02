@@ -137,6 +137,40 @@ impl ChunkCipher {
         out
     }
 
+    /// [`Self::seal`] appended to `out`, with the one copy of `plain` that encrypting in
+    /// place needs and no other.
+    pub fn seal_append(&self, aad: &[u8], plain: &[u8], out: &mut Vec<u8>) {
+        use chacha20poly1305::aead::AeadInOut;
+        let nonce: [u8; NONCE_LEN] = random();
+        out.reserve(plain.len() + SEAL_OVERHEAD);
+        out.extend_from_slice(&nonce);
+        let start = out.len();
+        out.extend_from_slice(plain);
+        let tag = self
+            .0
+            .encrypt_inout_detached(&XNonce::from(nonce), aad, (&mut out[start..]).into())
+            .expect("encryption of a buffer does not fail");
+        out.extend_from_slice(&tag);
+    }
+
+    /// [`Self::open`] in the buffer that holds the sealed bytes: no second copy of the
+    /// body is made, only a shift down over the nonce.
+    pub fn open_in_place(&self, aad: &[u8], mut sealed: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+        use chacha20poly1305::aead::AeadInOut;
+        if sealed.len() < SEAL_OVERHEAD {
+            return Err(CryptoError::Open);
+        }
+        let end = sealed.len() - TAG_LEN;
+        let nonce = XNonce::try_from(&sealed[..NONCE_LEN]).expect("nonce length");
+        let tag = chacha20poly1305::Tag::try_from(&sealed[end..]).expect("tag length");
+        self.0
+            .decrypt_inout_detached(&nonce, aad, (&mut sealed[NONCE_LEN..end]).into(), &tag)
+            .map_err(|_| CryptoError::Open)?;
+        sealed.truncate(end);
+        sealed.drain(..NONCE_LEN);
+        Ok(sealed)
+    }
+
     pub fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if sealed.len() < SEAL_OVERHEAD {
             return Err(CryptoError::Open);
@@ -320,6 +354,17 @@ mod tests {
                 .is_err()
         );
         assert!(!sealed.windows(6).any(|w| w == b"secret"));
+
+        let mut appended = b"head".to_vec();
+        cipher.seal_append(b"head", b"secret", &mut appended);
+        assert_eq!(cipher.open(b"head", &appended[4..]).unwrap(), b"secret");
+        assert_eq!(
+            cipher
+                .open_in_place(b"head", appended[4..].to_vec())
+                .unwrap(),
+            b"secret"
+        );
+        assert!(cipher.open_in_place(b"other", sealed).is_err());
     }
 
     #[test]

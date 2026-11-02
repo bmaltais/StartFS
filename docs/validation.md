@@ -565,3 +565,12 @@ encrypted with `CREATE_FLAGS=--encrypt`; a real FUSE mount, one node, 1 copy; re
 Large writes are about 35-45% slower (about 1 ms per MiB); small files show no clear difference.
 Cipher throughput alone on the same machine (AES-NI): chunk seal 1.5 GiB/s, open 1.6 GiB/s, metadata
 sector encryption 1.2 GiB/s.
+
+After copying less and sealing a write's chunks on up to four threads, and keeping the metadata
+file's length in memory instead of asking for it on every write: store level, 64 chunks of 2 MiB,
+put 0.083 s plain against 0.166 s encrypted (0.256 s before), get 0.041 s against 0.130 s (0.211 s
+before). Through FUSE, `profile-write.sh` wall times varied by up to 30% between runs of the same
+mode, so wall time cannot resolve a difference of a few percent; daemon CPU is steadier: 128 MiB in
+one file about 0.22 s plain against 0.35 s encrypted, 200 x 1 MiB about 0.15 s against 0.30 s, and
+inline small files no different. The cost is the cipher (1.5 GiB/s here, AES-256-GCM measured at
+3 GiB/s), so encryption stays opt-in (`create --encrypt`).

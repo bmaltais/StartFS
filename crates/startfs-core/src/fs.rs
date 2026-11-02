@@ -1129,14 +1129,17 @@ impl LocalFs {
         } else {
             let pieces: Vec<Piece<'_>> = chunker::split(data).into_iter().map(Piece::new).collect();
             self.make_room(&pieces)?;
-            let mut refs = Vec::new();
-            for c in &pieces {
-                refs.push(ChunkRef {
-                    id: self.keep(c)?,
-                    len: c.data.len() as u32,
-                });
-            }
-            Content::Chunks(refs)
+            let ids = self.keep_all(&pieces)?;
+            Content::Chunks(
+                pieces
+                    .iter()
+                    .zip(ids)
+                    .map(|(c, id)| ChunkRef {
+                        id,
+                        len: c.data.len() as u32,
+                    })
+                    .collect(),
+            )
         };
         i.size = data.len() as u64;
         Ok(())

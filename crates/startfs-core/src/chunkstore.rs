@@ -126,8 +126,8 @@ fn encode(id: &ChunkId, data: &[u8], mode: Compression, cipher: Option<&ChunkCip
     envelope.extend_from_slice(&(data.len() as u32).to_le_bytes());
     match cipher {
         Some(c) => {
-            let sealed = c.seal(&seal_aad(id, &envelope), body);
-            envelope.extend_from_slice(&sealed);
+            let aad = seal_aad(id, &envelope);
+            c.seal_append(&aad, body, &mut envelope);
         }
         None => envelope.extend_from_slice(body),
     }
@@ -460,7 +460,7 @@ impl ChunkStore {
         if header[1] == CIPHER_XCHACHA {
             let cipher = self.cipher.read().unwrap().clone().ok_or_else(corrupt)?;
             body = cipher
-                .open(&seal_aad(id, &header), &body)
+                .open_in_place(&seal_aad(id, &header), body)
                 .map_err(|_| corrupt())?;
         }
         let data = match header[2] {

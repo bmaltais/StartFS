@@ -499,9 +499,10 @@ impl LocalFs {
             let pinned = self.pin(committed.iter().map(|p| p.id));
             let mut out: Vec<ChunkRef> = refs[..a].to_vec();
             let mut size = sa;
-            for p in committed {
+            let ids = self.keep_all(committed)?;
+            for (p, id) in committed.iter().zip(ids) {
                 out.push(ChunkRef {
-                    id: self.keep(p)?,
+                    id,
                     len: p.data.len() as u32,
                 });
                 size += p.data.len() as u64;
