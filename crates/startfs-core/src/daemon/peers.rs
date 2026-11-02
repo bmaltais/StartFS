@@ -13,8 +13,8 @@ impl Daemon {
         if batches.is_empty() {
             return;
         }
-        // The replies expose log entries: make them durable first.
-        self.fs.sync_logged();
+        // Replies say what this node holds durably; its own lazy commits go first.
+        self.fs.sync_local_logged();
         if let Some(s) = self.syncer.lock().unwrap().as_mut() {
             s.handle_entries(batches);
         }
@@ -27,8 +27,9 @@ impl Daemon {
         from: NodeId,
         msg: Message,
     ) {
-        // Replies expose log entries and acknowledge chunks: make them durable first.
-        self.fs.sync_logged();
+        // Replies acknowledge chunks and expose this node's own entries: make them durable
+        // first. Peers' entries applied lazily are not exposed until a durable commit holds them.
+        self.fs.sync_local_logged();
         // Chunk traffic is for members only.
         if matches!(
             msg,

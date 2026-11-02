@@ -22,6 +22,8 @@ fn ship(from: &LocalFs, to: &LocalFs) {
 }
 
 fn ship_by(from: &LocalFs, to: &LocalFs, limit: usize) {
+    // Peers are sent only what is durable.
+    from.sync().unwrap();
     loop {
         let CatchUp::Entries(entries) = from.catch_up(&to.frontier().unwrap(), limit).unwrap()
         else {

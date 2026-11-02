@@ -11,7 +11,7 @@ use crate::net::{NodeId, Transport};
 use crate::oplog::{Entry, Frontier, StatePin};
 use crate::ops::{Ino, Nanos};
 use crate::protocol::Message;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +64,8 @@ pub struct Syncer {
     clock: Arc<dyn Clock>,
     peers: BTreeMap<NodeId, Peer>,
     chunk_bytes: usize,
+    /// Peers whose entries were applied lazily and are owed a hello once they are durable.
+    owed: BTreeSet<NodeId>,
 }
 
 impl Syncer {
@@ -74,6 +76,7 @@ impl Syncer {
             clock,
             peers: BTreeMap::new(),
             chunk_bytes: STATE_CHUNK_BYTES,
+            owed: BTreeSet::new(),
         }
     }
 
@@ -94,10 +97,17 @@ impl Syncer {
         self.transport.send(to, msg.encode());
     }
 
-    /// Tell `to` what we hold now, so it sends what we lack.
+    /// Tell `to` what we hold durably, so it sends what we lack.
     fn reply_frontier(&self, to: NodeId) {
-        if let Ok(f) = self.fs.frontier() {
-            self.send(to, &Message::Hello(f));
+        self.send(to, &Message::Hello(self.fs.durable_frontier()));
+    }
+
+    /// Answer the peers whose entries waited for the durable commit that just happened.
+    pub fn answer_applied(&mut self) {
+        for to in std::mem::take(&mut self.owed) {
+            if self.peers.contains_key(&to) {
+                self.reply_frontier(to);
+            }
         }
     }
 
@@ -148,9 +158,9 @@ impl Syncer {
                 peer.confirmed = Some(f);
                 peer.confirmed_at = Some(now);
                 self.note_synced(from);
-                if first && let Ok(f) = self.fs.frontier() {
+                if first {
                     // The peer may not have heard from us yet: say what we hold.
-                    self.send(from, &Message::Hello(f));
+                    self.reply_frontier(from);
                 }
             }
             Message::StateChunk(chunk) => {
@@ -199,9 +209,15 @@ impl Syncer {
             let from: Vec<u32> = senders.iter().map(|n| n.0).collect();
             eprintln!("startfs: cannot apply entries from nodes {from:?}: {e}");
         }
+        // Entries applied lazily are answered once durable (`answer_applied`).
+        let waiting = self.fs.has_unsynced_applied();
         for from in senders {
             self.note_synced(from);
-            self.reply_frontier(from);
+            if waiting {
+                self.owed.insert(from);
+            } else {
+                self.reply_frontier(from);
+            }
         }
     }
 
@@ -332,8 +348,8 @@ impl Syncer {
             let due = self.peers[&id]
                 .last_hello
                 .is_none_or(|t| now.saturating_sub(t) >= HELLO_INTERVAL.as_nanos() as u64);
-            if due && let Ok(f) = self.fs.frontier() {
-                self.send(id, &Message::Hello(f));
+            if due {
+                self.send(id, &Message::Hello(self.fs.durable_frontier()));
                 let p = self.peers.get_mut(&id).expect("known peer");
                 p.last_hello = Some(now);
                 busy = true;

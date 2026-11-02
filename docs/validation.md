@@ -483,6 +483,43 @@ it, and the live one holds more than 26,000 objects. That is the next thing to f
 stop saturating the weak members; the chunk sync of this section does not touch it. #166 stays open
 until that is measured on the live cluster.
 
+The tree rebuild was made incremental (1.13.4, #210) and the writer's own saturation fixed (1.13.6),
+after which the receivers were the limit again. A throwaway lab (writer and four peers on loopback,
+20,000 small files written through the writer's mount, each node's log kept apart) showed why: every
+member passes the writer's entries on to every other, so a receiver got each entry about four times,
+and every batch, even one of entries it already held, cost it a durable commit. 63% of its batches
+applied nothing, at 1.7 ms each. 1.13.8 (#221) skips the commit for such a batch and applies a tick's
+batches from all peers in one commit:
+
+| Receiver during the burst | 1.13.7 | 1.13.8 |
+|---|---|---|
+| tick busy | 0.86 to 0.88 | 0.56 to 0.58 |
+| receive phase | 7.5 to 8.5 ms | 1.9 to 2.0 ms |
+
+Live, the same three-minute uncached gliff build on the mount (`scripts/sample-activity.sh`):
+
+| Release | mini1 busy, receive, inbox | vps2 busy, receive, inbox | Sends timed out |
+|---|---|---|---|
+| 1.13.7 | 99%, 165 ms, 515 | 100%, 339 ms, 4027 | 2414 |
+| 1.13.8 | 97%, 105 ms, 132 | 100%, 331 ms, 376 | 106 |
+
+A synced 8 KiB write takes 6.2 ms on vps2's disk and 5.4 ms on mini1's (`dd oflag=dsync`), and with
+5 ms added to every fsync in the lab all the receiver's remaining syncs were metadata commits, one per
+tick with new entries. The next release applies peers' entries lazily and makes them durable in
+groups (a tick that receives nothing, or every 100 ms); hellos and the entries a member passes on
+stop at its durable frontier. Lab, receiver with +5 ms per fsync and a 25% CPU cap, two runs each:
+
+| | 1.13.8 | lazy apply |
+|---|---|---|
+| tick busy | 0.86, 0.87 | 0.70, 0.70 |
+| receive phase | 14.3, 13.2 ms | 3.4, 3.2 ms |
+| fsyncs over the burst | 1752, 1818 | 1227, 1150 |
+| every member converged | 20.8, 20.5 s | 18.0, 17.2 s |
+
+`what_a_member_claimed_survives_a_power_cut_there` guards that a power cut never takes back what a
+member's hellos or passed-on entries claimed (the harness's `power_cut` now loses lazy metadata
+commits, as redb does after an unclean stop).
+
 ## Defects found, not fixed
 
 None open. The quadratic write path found here is fixed (section 5), and so is the idle CPU

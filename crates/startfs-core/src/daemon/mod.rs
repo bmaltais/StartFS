@@ -94,6 +94,11 @@ const DRAIN_MAX: usize = 2048;
 /// the answer to no more than this many chunks.
 const PUSH_GROUP: usize = 64;
 
+/// The longest peers' entries applied lazily wait for a durable commit while peers keep sending;
+/// a tick that receives nothing at all makes them durable at once. A durable commit takes ~6 ms on a small
+/// VPS disk, so one per tick kept such a member busy through a build (#166).
+const APPLIED_SYNC_EVERY: Duration = Duration::from_millis(100);
+
 /// How long a chunk reply that nobody fetched stays before it is dropped. A fetch
 /// gives up long before this, so a reply still here was late or a duplicate.
 const UNCLAIMED_REPLY_TTL: Duration = Duration::from_secs(60);
@@ -430,10 +435,10 @@ impl Daemon {
             self.fs
                 .flush_all_logged(false, self.config.write_commit_delay_ms * 1_000_000);
         }
-        // Lazy commits reach disk once quiet, and always before peers or
-        // replication can build on them.
+        // This node's lazy commits reach disk before peers or replication can
+        // build on them; peers' entries applied lazily wait for the receive phase.
         if !self.membership.lock().unwrap().peers().is_empty() {
-            self.fs.sync_logged();
+            self.fs.sync_local_logged();
         }
         timer.phase(Phase::Flush);
         self.sync_peers();
@@ -454,6 +459,7 @@ impl Daemon {
         let mut entries: BTreeMap<NodeId, Vec<Entry>> = BTreeMap::new();
         // Pushed chunks are synced once for the group, then answered.
         let mut pushes: Vec<(NodeId, ChunkId, Replica)> = Vec::new();
+        let mut received = false;
         let drain_started = Instant::now();
         for handled in 0..DRAIN_MAX {
             if handled >= DRAIN_MIN && drain_started.elapsed() >= DRAIN_BUDGET {
@@ -463,6 +469,7 @@ impl Daemon {
                 break;
             };
             busy = true;
+            received = true;
             let decoded = Message::decode(&raw);
             // A peer in another protocol version cannot talk to this node, however much
             // it sends: it is not heard from, and a notice only tells where to catch up.
@@ -500,6 +507,13 @@ impl Daemon {
         self.handle_peer_entries(entries.into_iter().collect());
         if let Err(e) = self.fs.end_batch() {
             eprintln!("startfs: cannot rebuild the tree: {e}");
+        }
+        if self
+            .fs
+            .sync_applied_logged(!received, APPLIED_SYNC_EVERY.as_nanos() as u64)
+            && let Some(s) = self.syncer.lock().unwrap().as_mut()
+        {
+            s.answer_applied();
         }
         timer.phase(Phase::Receive);
         busy |= self.keepalive();

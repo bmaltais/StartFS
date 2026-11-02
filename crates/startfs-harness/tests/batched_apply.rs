@@ -46,6 +46,8 @@ fn source(dir: &Path) -> LocalFs {
     for i in 0..40 {
         a.create(ROOT_INO, &format!("file-{i:02}"), 0o644).unwrap();
     }
+    // Peers are sent only what is durable.
+    a.sync().unwrap();
     a
 }
 

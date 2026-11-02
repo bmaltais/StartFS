@@ -21,6 +21,10 @@ _Avoid_: Snapshot, full sync
 **State chunk**:
 One bounded piece of a state transfer.
 
+**Durable frontier**:
+How far each member's log a node holds as of its last durable commit. Its hellos report this, and it passes on no entry beyond it, so a power cut there cannot take back what peers were told. Peers' entries it applied lazily lie beyond it until the next durable commit.
+_Avoid_: Synced frontier
+
 **Rename cycle**:
 Two or more directories that, through concurrent renames on different members, would each end up inside the other.
 _Avoid_: Rename loop, circular move

@@ -51,8 +51,11 @@ fn cost_of_one_more(files: usize) -> u64 {
     for i in 0..files {
         a.create(dir, &format!("f{i}"), 0o644).unwrap();
     }
+    // Peers are sent only what is durable.
+    a.sync().unwrap();
     ship(&a, &b);
     a.create(ROOT_INO, "one-more", 0o644).unwrap();
+    a.sync().unwrap();
     let before = write_syscalls();
     ship(&a, &b);
     write_syscalls() - before
