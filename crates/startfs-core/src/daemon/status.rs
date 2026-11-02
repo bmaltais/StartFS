@@ -376,6 +376,7 @@ impl Daemon {
                     offer_bytes: m.offer_bytes,
                     weight_bytes: m.weight_bytes,
                     site: m.site,
+                    storage_only: m.storage_only,
                     is_self,
                     behind: if !up {
                         None

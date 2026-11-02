@@ -50,12 +50,24 @@ impl Daemon {
         true
     }
 
+    /// Whether this node is a storage-only member: it never mounts the filesystem.
+    pub fn is_storage_only(&self) -> bool {
+        self.membership.lock().unwrap().is_storage_only()
+    }
+
     pub(super) fn join(
         &self,
         token: &str,
         offer_bytes: Option<u64>,
         site: String,
+        storage_only: bool,
     ) -> Result<(), Error> {
+        if storage_only && offer_bytes.unwrap_or(self.config.offer_bytes) == 0 {
+            return Err(Error::StorageOnlyWithoutOffer);
+        }
+        if storage_only && self.mountpoint.lock().unwrap().is_some() {
+            return Err(Error::MountedCannotBeStorageOnly);
+        }
         let token = Token::parse(token)?;
         if self.membership.lock().unwrap().filesystem().is_some() {
             return Err(Error::AlreadyInFilesystem);
@@ -77,6 +89,7 @@ impl Daemon {
                 addr: self.addr(),
                 offer_bytes: offer,
                 site: site.trim().to_string(),
+                storage_only,
             })
             .encode(),
         );
@@ -92,7 +105,11 @@ impl Daemon {
                 },
             })??;
         self.fs.set_node(reply.id);
-        self.membership.lock().unwrap().install(reply, offer)?;
+        {
+            let mut membership = self.membership.lock().unwrap();
+            membership.install(reply, offer)?;
+            self.fs.set_storage_only(membership.is_storage_only());
+        }
         self.fs.set_replicating();
         Ok(())
     }
@@ -207,7 +224,7 @@ impl Daemon {
         Ok(())
     }
 
-    /// Change this node's space offer, weight, site or the copies; `None` leaves each as it is.
+    /// Change this node's space offer, weight, site, role or the copies; `None` leaves each as it is.
     pub(super) fn configure(
         &self,
         offer_bytes: Option<u64>,
@@ -215,9 +232,26 @@ impl Daemon {
         copies: Option<u32>,
         activity: Option<bool>,
         site: Option<String>,
+        storage_only: Option<bool>,
     ) -> Result<(), Error> {
         if copies == Some(0) {
             return Err(Error::BadFilesystemSpec);
+        }
+        {
+            // A storage-only member has to offer space, and cannot have the filesystem
+            // mounted. Judged before anything is changed.
+            let membership = self.membership.lock().unwrap();
+            let storage = storage_only.unwrap_or_else(|| membership.is_storage_only());
+            let offer = offer_bytes.unwrap_or_else(|| membership.my_offer(self.config.offer_bytes));
+            if storage && offer == 0 {
+                return Err(Error::StorageOnlyWithoutOffer);
+            }
+            if storage_only == Some(true)
+                && !membership.is_storage_only()
+                && self.mountpoint.lock().unwrap().is_some()
+            {
+                return Err(Error::MountedCannotBeStorageOnly);
+            }
         }
         if let Some(on) = activity {
             self.set_activity(on);
@@ -251,6 +285,10 @@ impl Daemon {
         }
         if let Some(site) = site {
             membership.set_site(site.trim())?;
+        }
+        if let Some(on) = storage_only {
+            membership.set_storage_only(on)?;
+            self.fs.set_storage_only(on);
         }
         self.refresh_staging_limit();
         Ok(())

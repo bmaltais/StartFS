@@ -85,6 +85,10 @@ pub struct Member {
     /// its own site. Placement spreads a chunk's copies across sites.
     #[serde(default)]
     pub site: String,
+    /// The member holds a replica and takes part in repair, but never serves the
+    /// filesystem: it does not mount and refuses every operation. Declared, not inferred.
+    #[serde(default)]
+    pub storage_only: bool,
     /// Bumped by the member each time it changes its own record; the highest wins.
     pub rev: u64,
     /// The member is handing its data to the others and about to go.
@@ -134,6 +138,9 @@ pub struct JoinRequest {
     /// The joiner's declared site; empty means none.
     #[serde(default)]
     pub site: String,
+    /// Whether the joiner is to be a storage-only member.
+    #[serde(default)]
+    pub storage_only: bool,
 }
 
 /// A join token as every member knows it. `expires` never changes and `revoked`
@@ -289,6 +296,7 @@ impl Membership {
                 offer_bytes,
                 weight_bytes: 0,
                 site: String::new(),
+                storage_only: false,
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -393,6 +401,7 @@ impl Membership {
                 offer_bytes: request.offer_bytes,
                 weight_bytes: 0,
                 site: request.site,
+                storage_only: request.storage_only,
                 rev: 1,
                 leaving: false,
                 removed: false,
@@ -581,6 +590,25 @@ impl Membership {
         let me = self.me;
         if let Some(m) = self.members.get_mut(&me) {
             m.weight_bytes = bytes;
+            m.rev += 1;
+        }
+        self.save()
+    }
+
+    /// Whether this node is a storage-only member.
+    pub fn is_storage_only(&self) -> bool {
+        self.members
+            .get(&self.me)
+            .is_some_and(|m| m.storage_only && !m.removed)
+    }
+
+    /// Make this node a storage-only member, or an ordinary one again.
+    pub fn set_storage_only(&mut self, on: bool) -> Result<(), Error> {
+        let me = self.me;
+        if let Some(m) = self.members.get_mut(&me)
+            && m.storage_only != on
+        {
+            m.storage_only = on;
             m.rev += 1;
         }
         self.save()

@@ -32,6 +32,9 @@ fn members_table(members: &[MemberStatus]) -> String {
         vec![["ID", "NAME", "STATE", "RELEASE", "SITE", "OFFERED", "RTT"].map(String::from)];
     for m in members {
         let mut state = state_word(m.state).to_string();
+        if m.storage_only {
+            state = format!("{state}, storage-only");
+        }
         if let Some(load) = &m.behind {
             state = format!("{state}, {}", load.behind_text());
         }

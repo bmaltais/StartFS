@@ -295,6 +295,8 @@ pub struct LocalFs {
     staging: ChunkStore,
     /// Whether new chunks go to staging (the node belongs to a filesystem).
     replicating: AtomicBool,
+    /// This member is storage-only: every filesystem operation is refused.
+    storage_only: AtomicBool,
     staging_limit: AtomicU64,
     /// What the cluster can hold, as the daemon last worked it out.
     usable_bytes: AtomicU64,
@@ -396,6 +398,7 @@ impl LocalFs {
             chunks: ChunkStore::open(&dir.join("chunks"))?,
             staging: ChunkStore::open(&dir.join("staging"))?.recording_additions(),
             replicating: AtomicBool::new(false),
+            storage_only: AtomicBool::new(false),
             staging_limit: AtomicU64::new(u64::MAX),
             usable_bytes: AtomicU64::new(0),
             version_bytes: AtomicU64::new(0),
@@ -544,6 +547,21 @@ impl LocalFs {
                 }
                 other => return other,
             }
+        }
+    }
+
+    /// Declare this member storage-only (or not): it then refuses every filesystem operation,
+    /// so nothing can read or write through it. `stats` stays open: it describes the chunk
+    /// store the daemon reports on, not the files.
+    pub fn set_storage_only(&self, on: bool) {
+        self.storage_only.store(on, Ordering::SeqCst);
+    }
+
+    fn serving(&self) -> FsResult<()> {
+        if self.storage_only.load(Ordering::SeqCst) {
+            Err(FsError::StorageOnly)
+        } else {
+            Ok(())
         }
     }
 
@@ -1083,6 +1101,7 @@ impl LocalFs {
 
 impl FsOps for LocalFs {
     fn lookup(&self, parent: Ino, name: &str) -> FsResult<Attr> {
+        self.serving()?;
         let attr = self.view(|t| {
             let p = t.dir(parent)?;
             let ino = match name {
@@ -1096,11 +1115,13 @@ impl FsOps for LocalFs {
     }
 
     fn getattr(&self, ino: Ino) -> FsResult<Attr> {
+        self.serving()?;
         let attr = self.view(|t| Ok(self.attr(ino, &t.inode(ino)?)))?;
         Ok(self.with_buffered(attr))
     }
 
     fn setattr(&self, ino: Ino, set: SetAttr) -> FsResult<Attr> {
+        self.serving()?;
         self.flush_ino(ino)?;
         // Lazy like create and unlink: a build truncates every file it rewrites (`>` opens with
         // O_TRUNC) and sets times on the rest, so an fsync per call dominates what it writes.
@@ -1150,6 +1171,7 @@ impl FsOps for LocalFs {
     }
 
     fn mkdir(&self, parent: Ino, name: &str, mode: u32) -> FsResult<Attr> {
+        self.serving()?;
         self.run(true, |t| {
             let i = self.new_inode(FileKind::Dir, mode, parent, Content::Inline(Vec::new()), 0);
             self.add(t, parent, name, i)
@@ -1157,6 +1179,7 @@ impl FsOps for LocalFs {
     }
 
     fn create(&self, parent: Ino, name: &str, mode: u32) -> FsResult<Attr> {
+        self.serving()?;
         // Not durable until fsync or the next background sync: close is not a durability point.
         self.run_as(true, Durability::None, |t| {
             let i = self.new_inode(FileKind::File, mode, parent, Content::Inline(Vec::new()), 0);
@@ -1165,6 +1188,7 @@ impl FsOps for LocalFs {
     }
 
     fn symlink(&self, parent: Ino, name: &str, target: &str) -> FsResult<Attr> {
+        self.serving()?;
         self.run(true, |t| {
             let content = Content::Inline(target.as_bytes().to_vec());
             let i = self.new_inode(
@@ -1179,6 +1203,7 @@ impl FsOps for LocalFs {
     }
 
     fn readlink(&self, ino: Ino) -> FsResult<String> {
+        self.serving()?;
         self.view(|t| {
             let i = t.inode(ino)?;
             match (i.kind, i.content) {
@@ -1190,6 +1215,7 @@ impl FsOps for LocalFs {
     }
 
     fn link(&self, ino: Ino, new_parent: Ino, new_name: &str) -> FsResult<Attr> {
+        self.serving()?;
         // Lazy like create: a link drops no chunk references.
         let attr = self.run_as(true, Durability::None, |t| {
             check_name(new_name)?;
@@ -1221,6 +1247,7 @@ impl FsOps for LocalFs {
     }
 
     fn read(&self, ino: Ino, offset: u64, len: u32) -> FsResult<Vec<u8>> {
+        self.serving()?;
         let to = offset.saturating_add(len as u64);
         // Taken first: a commit in between only makes the committed read newer.
         let buffered = self.buffered_part(ino, offset, to);
@@ -1245,19 +1272,23 @@ impl FsOps for LocalFs {
     }
 
     fn write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
+        self.serving()?;
         self.buffered_write(ino, offset, data)
     }
 
     fn flush(&self, ino: Ino) -> FsResult<()> {
+        self.serving()?;
         self.close_ino(ino)
     }
 
     fn fsync(&self, ino: Ino) -> FsResult<()> {
+        self.serving()?;
         self.flush_ino(ino)?;
         self.sync()
     }
 
     fn unlink(&self, parent: Ino, name: &str) -> FsResult<()> {
+        self.serving()?;
         // Lazy like create, so `rm -rf` pays no fsync per entry. The chunks it drops are removed
         // only after a durable commit (see `collect_garbage` and `drop_unreferenced`), so a
         // crash that brings the file back brings its chunks back too.
@@ -1275,6 +1306,7 @@ impl FsOps for LocalFs {
     }
 
     fn rmdir(&self, parent: Ino, name: &str) -> FsResult<()> {
+        self.serving()?;
         self.run_as(true, Durability::None, |t| {
             t.dir(parent)?;
             let ino = t.entry(parent, name)?.ok_or(FsError::NotFound)?;
@@ -1289,6 +1321,7 @@ impl FsOps for LocalFs {
     }
 
     fn rename(&self, parent: Ino, name: &str, new_parent: Ino, new_name: &str) -> FsResult<()> {
+        self.serving()?;
         self.run(true, |t| {
             check_name(new_name)?;
             t.dir(parent)?;
@@ -1353,6 +1386,7 @@ impl FsOps for LocalFs {
     }
 
     fn readdir(&self, ino: Ino) -> FsResult<Vec<DirEntry>> {
+        self.serving()?;
         self.view(|t| {
             t.dir(ino)?;
             let mut out = Vec::new();
@@ -1370,6 +1404,7 @@ impl FsOps for LocalFs {
     }
 
     fn setxattr(&self, ino: Ino, name: &str, value: &[u8]) -> FsResult<()> {
+        self.serving()?;
         if is_acl(name) {
             return Err(FsError::NotSupported);
         }
@@ -1386,6 +1421,7 @@ impl FsOps for LocalFs {
     }
 
     fn getxattr(&self, ino: Ino, name: &str) -> FsResult<Vec<u8>> {
+        self.serving()?;
         if is_acl(name) {
             return Err(FsError::NotSupported);
         }
@@ -1399,10 +1435,12 @@ impl FsOps for LocalFs {
     }
 
     fn listxattr(&self, ino: Ino) -> FsResult<Vec<String>> {
+        self.serving()?;
         self.view(|t| Ok(t.inode(ino)?.xattrs.into_keys().collect()))
     }
 
     fn removexattr(&self, ino: Ino, name: &str) -> FsResult<()> {
+        self.serving()?;
         if is_acl(name) {
             return Err(FsError::NotSupported);
         }
@@ -1422,6 +1460,7 @@ impl FsOps for LocalFs {
     }
 
     fn space(&self) -> FsResult<Space> {
+        self.serving()?;
         let used_bytes = self.used_bytes()?;
         Ok(Space {
             used_bytes,

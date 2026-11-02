@@ -47,9 +47,17 @@ impl Daemon {
                 copies,
                 activity,
                 site,
+                storage_only,
                 keep_versions_secs,
             } => {
-                self.configure(offer_bytes, weight_bytes, copies, activity, site)?;
+                self.configure(
+                    offer_bytes,
+                    weight_bytes,
+                    copies,
+                    activity,
+                    site,
+                    storage_only,
+                )?;
                 if let Some(secs) = keep_versions_secs {
                     self.membership.lock().unwrap().set_keep_versions(secs)?;
                 }
@@ -71,8 +79,9 @@ impl Daemon {
                 token,
                 offer_bytes,
                 site,
+                storage_only,
             } => {
-                self.join(&token, offer_bytes, site)?;
+                self.join(&token, offer_bytes, site, storage_only)?;
                 Response::Joined
             }
             Request::Update { release, force } => Response::Updating(self.update(release, force)?),

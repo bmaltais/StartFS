@@ -51,6 +51,9 @@ pub enum Request {
         /// Declare where this node lives; empty clears it (it is then its own site).
         #[serde(default)]
         site: Option<String>,
+        /// Make this node a storage-only member, or an ordinary one again.
+        #[serde(default)]
+        storage_only: Option<bool>,
         /// Change how long the filesystem keeps versions, in seconds (for every member).
         #[serde(default)]
         keep_versions_secs: Option<u64>,
@@ -89,6 +92,9 @@ pub enum Request {
         /// The site to declare on joining; empty for none.
         #[serde(default)]
         site: String,
+        /// Join as a storage-only member: hold a replica, never serve the filesystem.
+        #[serde(default)]
+        storage_only: bool,
     },
 }
 
@@ -166,6 +172,9 @@ pub struct MemberStatus {
     /// The site the member declared; empty when it has none.
     #[serde(default)]
     pub site: String,
+    /// Whether the member is storage-only: it holds replicas and never serves the filesystem.
+    #[serde(default)]
+    pub storage_only: bool,
     /// Whether this is the node answering.
     pub is_self: bool,
     /// Why this node cannot reach the member, when it is not up (for example a protocol
@@ -690,10 +699,31 @@ impl Client {
 
     /// Join the filesystem a token names, declaring this node's site.
     pub fn join_at(&self, token: &str, offer_bytes: Option<u64>, site: &str) -> Result<(), Error> {
+        self.join_as(token, offer_bytes, site, false)
+    }
+
+    /// Join the filesystem a token names as a storage-only member.
+    pub fn join_storage_only(
+        &self,
+        token: &str,
+        offer_bytes: Option<u64>,
+        site: &str,
+    ) -> Result<(), Error> {
+        self.join_as(token, offer_bytes, site, true)
+    }
+
+    fn join_as(
+        &self,
+        token: &str,
+        offer_bytes: Option<u64>,
+        site: &str,
+        storage_only: bool,
+    ) -> Result<(), Error> {
         match self.call(&Request::Join {
             token: token.into(),
             offer_bytes,
             site: site.into(),
+            storage_only,
         })? {
             Response::Joined => Ok(()),
             other => Err(unexpected(other)),
@@ -726,6 +756,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            storage_only: None,
             keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
@@ -742,6 +773,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            storage_only: None,
             keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
@@ -757,6 +789,7 @@ impl Client {
             copies: Some(copies),
             activity: None,
             site: None,
+            storage_only: None,
             keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
@@ -772,6 +805,7 @@ impl Client {
             copies: None,
             activity: None,
             site: None,
+            storage_only: None,
             keep_versions_secs: Some(secs),
         })? {
             Response::Done => Ok(()),
@@ -787,6 +821,24 @@ impl Client {
             copies: None,
             activity: None,
             site: Some(site.into()),
+            storage_only: None,
+            keep_versions_secs: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Make this node a storage-only member (it holds replicas and never serves the
+    /// filesystem), or an ordinary member again.
+    pub fn set_storage_only(&self, on: bool) -> Result<(), Error> {
+        match self.call(&Request::Config {
+            offer_bytes: None,
+            weight_bytes: None,
+            copies: None,
+            activity: None,
+            site: None,
+            storage_only: Some(on),
             keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
@@ -802,6 +854,7 @@ impl Client {
             copies: None,
             activity: Some(on),
             site: None,
+            storage_only: None,
             keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
