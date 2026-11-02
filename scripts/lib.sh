@@ -83,6 +83,8 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# A signal (`timeout`, Ctrl-C) would end the script without the EXIT trap: daemons and mounts outlive it.
+trap 'exit 130' INT TERM
 
 # /proc helpers. rss_kb PID; cpu_ticks PID (utime+stime, 100 ticks/s).
 rss_kb() { awk '/^VmRSS/{print $2}' "/proc/$1/status"; }
