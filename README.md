@@ -20,7 +20,6 @@ through `tailscaled`) and a FUSE library. Prebuilt binaries are attached to each
 |---|---|
 | Linux, 64-bit Intel/AMD | `x86_64-linux` |
 | Linux, ARM64 (Raspberry Pi 4/5, ARM servers) | `aarch64-linux` |
-| macOS, Apple Silicon (experimental) | `aarch64-macos` |
 
 ### Linux
 
@@ -57,28 +56,10 @@ The binaries are built on Ubuntu 22.04 and need glibc 2.35 or newer, which every
 currently supported Ubuntu, Fedora and Arch release has. On an older distro, build
 from source.
 
-### macOS (experimental)
+### macOS
 
-The macOS mount adapter is written but has **never been run**, and the macOS build is
-best-effort, so a release may not include a Mac tarball. Treat it as unsupported until
-someone verifies it.
-
-1. Install [Tailscale](https://tailscale.com/download/mac) and FUSE-T:
-   `brew install --cask fuse-t` (macFUSE also works; see `dist/README.md`).
-2. Run the same installer (it installs to `~/.local/bin`; add `INSTALL_DIR=/usr/local/bin`
-   with `sudo` if you prefer):
-
-   ```sh
-   curl -fsSL https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh | sh
-   ```
-
-   If you downloaded the tarball in a browser, macOS may refuse to run the binary:
-   clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/startfs`.
-3. Set `whois_socket` in `config.toml` to the Tailscale socket (see the config table
-   below), then start it by hand with `startfs daemon --mount ~/StartFS`, or at login
-   with the launchd agent: edit `USERNAME` in `com.startfs.daemon.plist`, copy it to
-   `~/Library/LaunchAgents/` and run
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.startfs.daemon.plist`.
+No macOS build is released. The mount adapter is written but has **never been run**;
+see `dist/README.md` to build it from source (FUSE-T or macFUSE, a launchd agent).
 
 ### Building from source
 

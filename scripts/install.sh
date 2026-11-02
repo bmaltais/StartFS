@@ -96,8 +96,8 @@ fi
 
 case "$(uname -s)" in
   Linux) os=linux ;;
-  Darwin) os=macos ;;
-  *) die "unsupported OS: $(uname -s) (Linux and macOS only)" ;;
+  Darwin) die "no macOS build is released; build from source (see dist/README.md)" ;;
+  *) die "unsupported OS: $(uname -s) (Linux only)" ;;
 esac
 case "$(uname -m)" in
   x86_64 | amd64) arch=x86_64 ;;
@@ -105,7 +105,6 @@ case "$(uname -m)" in
   *) die "unsupported CPU: $(uname -m)" ;;
 esac
 target=$arch-$os
-[ "$target" != x86_64-macos ] || die "no Intel Mac build; build from source"
 
 command -v curl >/dev/null || die "curl is required"
 command -v tar >/dev/null || die "tar is required"

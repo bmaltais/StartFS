@@ -16,22 +16,12 @@ jobs:
             runner: ubuntu-22.04
           - target: aarch64-linux
             runner: ubuntu-22.04-arm
-          # The macOS adapter has never been run (see README); a failed build here
-          # must not block the Linux release.
-          - target: aarch64-macos
-            runner: macos-15
-            experimental: true
     # Oldest LTS runner, so the binary runs on any newer glibc.
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install FUSE-T
-        if: runner.os == 'macOS'
-        run: scripts/macos-fuse-t.sh
       - name: Install FUSE headers
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: Check the tag matches the crate version
@@ -46,12 +36,7 @@ jobs:
           name="startfs-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$name"
           cp target/release/startfs README.md "$name/"
-          if [ "$RUNNER_OS" = macOS ]; then
-            cp dist/com.startfs.daemon.plist "$name/"
-            cp dist/README.md "$name/MACOS.md"
-          else
-            cp dist/startfs.service "$name/"
-          fi
+          cp dist/startfs.service "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
