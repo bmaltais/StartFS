@@ -6,6 +6,7 @@ pub mod chunkstore;
 pub mod clock;
 pub mod config;
 pub mod control;
+pub mod crypto;
 pub mod daemon;
 pub mod error;
 pub mod fs;
