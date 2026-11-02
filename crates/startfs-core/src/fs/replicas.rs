@@ -79,6 +79,38 @@ impl LocalFs {
         Ok(piece.id)
     }
 
+    /// [`Self::keep`] for each piece, in order. Sealing a chunk takes real CPU, so with a key
+    /// the pieces are spread over a few threads (chunks are independent files); without one
+    /// each piece is a hash and a write, and they stay on this thread.
+    pub(super) fn keep_all(&self, pieces: &[Piece<'_>]) -> FsResult<Vec<ChunkId>> {
+        const MAX_THREADS: usize = 4;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(MAX_THREADS)
+            .min(pieces.len());
+        if threads < 2 || self.encryption_key().is_none() {
+            return pieces.iter().map(|p| self.keep(p)).collect();
+        }
+        let per = pieces.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = pieces
+                .chunks(per)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|p| self.keep(p))
+                            .collect::<FsResult<Vec<_>>>()
+                    })
+                })
+                .collect();
+            let mut ids = Vec::with_capacity(pieces.len());
+            for w in workers {
+                ids.extend(w.join().expect("keep worker does not panic")?);
+            }
+            Ok(ids)
+        })
+    }
+
     /// Chunks this node holds as replicas.
     pub fn held(&self) -> FsResult<Vec<ChunkId>> {
         Ok(self.chunks.list()?.into_iter().map(|c| c.0).collect())

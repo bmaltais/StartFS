@@ -24,10 +24,10 @@ const USAGE: &str = "usage: startfs [--data-dir DIR] [--config FILE] <command>
 
 commands:
   daemon [--mount DIR]                run the daemon, mounting the filesystem at DIR
-  create --name NAME --copies N [--no-encrypt] [--example]
-                                      create a filesystem and print its join token. Chunks and
-                                      metadata are encrypted at rest; the recovery key is shown
-                                      once (on stderr). --no-encrypt: a plain filesystem
+  create --name NAME --copies N [--encrypt] [--example]
+                                      create a filesystem and print its join token. --encrypt:
+                                      chunks and metadata are encrypted at rest; the recovery key is shown
+                                      once (on stderr). A plain filesystem unless --encrypt
   status [--verbose] [--json] [--watch [--interval SECONDS]]
                                       show a summary of this node's filesystem: the verdict and its
                                       cause, the members, what needs attention (--verbose, -v: also
@@ -215,7 +215,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             let copies = flag_value(rest, "--copies")?
                 .parse::<u32>()
                 .map_err(|_| CliError::CopiesNotANumber)?;
-            let encrypt = !rest.iter().any(|a| a == "--no-encrypt");
+            let encrypt = rest.iter().any(|a| a == "--encrypt");
             let (token, key) = Client::new(socket).create_filesystem(&name, copies, encrypt)?;
             print_token(&token, rest);
             if let Some(key) = key {
@@ -662,7 +662,7 @@ fn print_token(token: &str, rest: &[String]) {
 fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
     let (valued, alone, positional): (&[&str], &[&str], usize) = match command {
         "daemon" => (&["--mount"], &[], 0),
-        "create" => (&["--name", "--copies"], &["--example", "--no-encrypt"], 0),
+        "create" => (&["--name", "--copies"], &["--example", "--encrypt"], 0),
         "status" => (
             &["--interval"],
             &["--json", "--verbose", "-v", "--watch"],

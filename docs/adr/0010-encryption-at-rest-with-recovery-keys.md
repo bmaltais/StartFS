@@ -36,7 +36,7 @@ who controls a running member's whole data directory. Keeping the key in a keyri
 
 **Existing filesystems stay as they are.** A chunk with cipher 0 still reads; only filesystems created
 after this are encrypted, and only on a fresh node (the metadata database is not migrated in place).
-`create --no-encrypt` makes a plain one. The wire carries chunk bytes as before (inside the tailnet's
+Encryption is opt-in: `create --encrypt` (large writes measured 35-45% slower, `docs/validation.md`). The wire carries chunk bytes as before (inside the tailnet's
 WireGuard). Protocol 19 (ADR 0002): wraps, a key proof in the join request, `encrypted` on the filesystem.
 
 ## Considered options

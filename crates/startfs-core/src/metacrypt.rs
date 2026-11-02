@@ -11,6 +11,7 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const S: u64 = SECTOR as u64;
 
@@ -18,6 +19,8 @@ const S: u64 = SECTOR as u64;
 pub struct EncryptedFile {
     file: File,
     cipher: SectorCipher,
+    /// The file's length, kept here so a write does not ask the filesystem for it.
+    len: AtomicU64,
     /// Writes patch whole sectors, so they must not interleave with each other or with reads.
     gate: RwLock<()>,
 }
@@ -33,6 +36,7 @@ impl EncryptedFile {
             .mode(0o600)
             .open(path)?;
         Ok(Self {
+            len: AtomicU64::new(file.metadata()?.len()),
             file,
             cipher,
             gate: RwLock::new(()),
@@ -54,7 +58,7 @@ impl EncryptedFile {
 
 impl redb::StorageBackend for EncryptedFile {
     fn len(&self) -> io::Result<u64> {
-        self.file.metadata().map(|m| m.len())
+        Ok(self.len.load(Ordering::SeqCst))
     }
 
     fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
@@ -72,7 +76,10 @@ impl redb::StorageBackend for EncryptedFile {
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         let _exclusive = self.gate.write().unwrap();
-        self.file.set_len(len.div_ceil(S) * S)
+        let physical = len.div_ceil(S) * S;
+        self.file.set_len(physical)?;
+        self.len.store(physical, Ordering::SeqCst);
+        Ok(())
     }
 
     fn sync_data(&self) -> io::Result<()> {
@@ -87,9 +94,9 @@ impl redb::StorageBackend for EncryptedFile {
         let first = offset / S;
         let last = (offset + data.len() as u64 - 1) / S;
         let count = (last - first + 1) as usize;
-        let physical = self.file.metadata()?.len();
-        if (last + 1) * S > physical {
+        if (last + 1) * S > self.len.load(Ordering::SeqCst) {
             self.file.set_len((last + 1) * S)?;
+            self.len.store((last + 1) * S, Ordering::SeqCst);
         }
         // Sectors only partly covered keep the rest of what they hold.
         let skip = (offset - first * S) as usize;
