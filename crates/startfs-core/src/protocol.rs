@@ -287,7 +287,10 @@ mod tests {
 
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
-    const PINNED: (u8, &str) = (19, "0000");
+    const PINNED: (u8, &str) = (
+        19,
+        "983b5d9af3588c09da05bb38bf65559ad244f55dac1cf965eb84ecd9eb665cbe",
+    );
 
     /// One of every message, with fixed contents: what the wire-shape pin and the traffic
     /// classes are checked against.
