@@ -328,10 +328,12 @@ fn headline(s: &Status, verdict: Verdict, fs: &FilesystemInfo) -> String {
     let single = short_chunks(s, Tier::AtRisk);
     if verdict == Verdict::AtRisk {
         let n = single.max(s.stranded.iter().map(|x| x.chunks).sum());
-        causes.push(format!(
-            "{n} chunk{} may have a single copy",
-            plural(u64::from(n), "", "s")
-        ));
+        if n > 0 {
+            causes.push(format!(
+                "{n} chunk{} may have a single copy",
+                plural(u64::from(n), "", "s")
+            ));
+        }
     } else if verdict == Verdict::Degraded {
         let n = short_chunks(s, Tier::Degraded);
         if n > 0 && away.is_empty() {
@@ -527,9 +529,6 @@ pub fn render(s: &Status, verbose: bool) -> String {
         for c in &s.conflicts {
             out.push_str(&format!("  {}\n", c.path));
         }
-    }
-    if !verbose {
-        out.push_str("more detail: `startfs status --verbose`\n");
     }
     out
 }

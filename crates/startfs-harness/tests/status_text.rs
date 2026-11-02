@@ -124,3 +124,23 @@ fn the_summary_leads_with_the_verdict_and_aligns_members_that_are_down_asleep_or
         assert!(verbose.contains(needle), "{needle} missing:\n{verbose}");
     }
 }
+
+#[test]
+fn nine_members_with_one_away_fit_in_fifteen_lines() {
+    let c = Cluster::start(9);
+    let token = c.control(0).create("home", 3).unwrap();
+    c.control(0).set_offer(BIG).unwrap();
+    for i in 1..9 {
+        c.control(i).join(&token, Some(0)).unwrap();
+        c.control(i).set_offer(BIG).unwrap();
+    }
+    c.sync();
+    c.crash(5);
+    for _ in 0..4 {
+        c.advance(HELLO_INTERVAL);
+        c.sync();
+    }
+    let text = render(&c.control(0).status().unwrap(), false);
+    assert!(text.lines().count() <= 15, "{text}");
+    assert!(text.starts_with("DEGRADED: "), "{text}");
+}

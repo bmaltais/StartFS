@@ -11,7 +11,7 @@ use startfs_core::daemon::Daemon;
 use startfs_core::fs::NodeConfig;
 use startfs_core::members::MemberId;
 use startfs_core::power::SystemPower;
-use startfs_core::status_view::{human, ratio, render};
+use startfs_core::status_view::{human, ratio, render, state_word};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -807,11 +807,7 @@ fn render_activity(a: &ActivityReport) -> String {
     for p in &a.peers {
         let state = match p.state {
             NodeState::Online => "online",
-            NodeState::Down => "down",
-            NodeState::Lost => "lost",
-            NodeState::Leaving => "leaving",
-            NodeState::Upgrading => "upgrading",
-            NodeState::Unknown => "unknown",
+            other => state_word(other),
         };
         out.push_str(&format!(
             "  {} ({state}), {} in flight\n",

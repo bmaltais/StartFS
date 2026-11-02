@@ -381,7 +381,6 @@ filesystem: home (3 copies), 3 nodes, this node up
   2   surface  down   v1.13.9  home    512.0 MiB    -
   surface (2): last seen 2h 10m ago
 usage: 3.2 GiB stored in 812 chunks, 101.5 GiB offered, about 33.8 GiB usable
-more detail: `startfs status --verbose`
 ```
 
 `startfs status --verbose` (or `-v`) adds the diagnostic detail: storage and dedup,
