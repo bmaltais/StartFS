@@ -26,7 +26,7 @@ for p in "${peers[@]:0:$PEERS}"; do
   start_node "$p" "" "replication_hold_secs = 0"
   sf "$p" join "$TOKEN" --offer 20G >/dev/null
 done
-until sf A status | grep -q "($((PEERS + 1)) nodes)"; do sleep 0.2; done
+until sf A status | grep -q "$((PEERS + 1)) nodes,"; do sleep 0.2; done
 if [ "$PRE" -gt 0 ]; then
   for d in $(seq $((PRE / 1000))); do
     mkdir -p "$WORK/A/mnt/pre/d$d"

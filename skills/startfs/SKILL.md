@@ -44,7 +44,7 @@ hop is the manual one below.
 
 The manual way, one machine at a time, waiting until the cluster is calm before the next:
 `scripts/rolling-upgrade.sh vX.Y.Z local HOST...` (ssh hosts, the machine that matters most last)
-installs, then waits for `data: SAFE`, every member up, an empty inbox (`startfs activity`) and a
+installs, then waits for `SAFE`, every member up, an empty inbox (`startfs activity`) and a
 quiet tick, and stops on a node that does not get there. Never restart a node that is still
 catching up: a restarted node re-checks all the chunks it holds (`status` shows `re-checking: N chunks`
 while it waits for answers; that is not a shortfall), the others only those whose placement changed.
@@ -69,7 +69,7 @@ for the space it contributes. Tokens expire after 24h: `startfs token --example`
 fresh line, `startfs revoke TOKEN` cancels one. Ssh into the new machine to run it when the
 user cannot.
 
-Done when `startfs status` on either machine lists both under `members:` as `up`.
+Done when `startfs status` on either machine lists both in its members table as `up`.
 
 ## Check safety
 
@@ -77,17 +77,17 @@ Done when `startfs status` on either machine lists both under `members:` as `up`
 startfs status
 ```
 
-Read the `data:` line first:
+Read the first line first (verdict, then its cause):
 
-| `data:` | Means |
+| Verdict | Means |
 |---|---|
 | `SAFE` | every file has as many copies as the machines allow, and the wanted number is possible |
 | `BEST-EFFORT` | fewer machines than wanted copies, so the full count is impossible; normal until more machines join |
 | `DEGRADED` | a file is short of copies, a repair is running, or a member is `down` (an `unknown` member, one a just-restarted daemon has not heard from yet, does not count for its first 30 s; a `lost` member no longer counts once its data is re-replicated) |
 | `AT RISK` | some data has a single copy left; act now |
 
-For anything but `SAFE`, quote the `redundancy:` line, the `members:` states, any
-`cannot reach:` reason under a member and any `repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
+For anything but `SAFE`, quote the first line, the members' states (`startfs status -v` has the `redundancy:` line), any
+`cannot reach:` note below the table and any `repair:` line with the verdict. `AT RISK` and a `down` member the user cannot bring back
 call for a new machine to join, or `remove` once the machine is gone for good.
 
 ## Explain a slow transfer or high memory

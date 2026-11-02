@@ -4,7 +4,7 @@
 # daemons cannot be told about (use --lockstep: it changes the protocol), and goes a release or two later.
 #
 # Upgrade every member one at a time, and wait for each to be ready before the next. Ready means:
-# the new version, `data: SAFE`, every member up, an empty inbox, the tick under BUSY_MAX percent,
+# the new version, `SAFE`, every member up, an empty inbox, the tick under BUSY_MAX percent,
 # for GOOD samples in a row 10 s apart, and at least QUIET_SECS since the restart. A node that is
 # not ready after TIMEOUT seconds stops the run (exit 1); nothing after it is touched.
 # `busy` is the 60 s rolling average of `startfs activity`, so it lags a restart by about a minute.
@@ -50,7 +50,7 @@ sample() {
   local n=$1 want=$2 out ver data up inbox busy rss queue
   out=$(on "$n" "$BIN --version; echo ==; $BIN status; echo ==; $BIN activity" 2>&1) || { echo unreachable; return 1; }
   ver=$(echo "$out" | awk 'NR==1{print $2}')
-  data=$(echo "$out" | awk '/^data:/{print $2; exit}')
+  data=$(echo "$out" | sed -n 's/^\(SAFE\|DEGRADED\|AT RISK\|BEST-EFFORT\):.*/\1/p' | head -1)
   up=$(echo "$out" | awk '/^ +[0-9]+ +[a-z0-9.-]+:[0-9]+ +up /{u++} /^ +[0-9]+ +[a-z0-9.-]+:[0-9]+ /{t++} END{print u+0 "/" t+0}')
   inbox=$(echo "$out" | awk '/inbox:/{print $2; exit}')
   busy=$(echo "$out" | sed -n 's/.*busy \([0-9]*\)% of the time.*/\1/p' | head -1)

@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod replication;
 pub mod resources;
 pub mod scrub;
+pub mod status_view;
 pub mod sync;
 pub mod upgrade;
 pub mod wake;

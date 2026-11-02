@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # What a restart costs a node that holds a tree (#82, #85): three loopback nodes (3 copies) take a
 # copied tree, then node B is stopped and started again. Prints B's write syscalls, CPU and
-# seconds until `data: SAFE` again, and with TRACE=1 B's pwrite64/fdatasync calls by file (needs
+# seconds until `SAFE` again, and with TRACE=1 B's pwrite64/fdatasync calls by file (needs
 # sudo for strace).
 # LAG=1 takes B down for the second half of the copy instead, so it catches up after.
 # Environment: FILES=1500 BIG=50 SEED=85, TRACE=1, BIN=path/to/startfs, WATCH=90 (max seconds).
@@ -23,7 +23,7 @@ start_node A "$WORK/A/mnt"
 TOKEN=$(sf A create --name restart --copies 3)
 start_node B "$WORK/B/mnt"; sf B join "$TOKEN" --offer 5G >/dev/null
 start_node C "$WORK/C/mnt"; sf C join "$TOKEN" --offer 5G >/dev/null
-until sf A status | grep -q '(3 nodes)'; do sleep 0.2; done
+until sf A status | grep -q '3 nodes,'; do sleep 0.2; done
 python3 "$SF_ROOT/scripts/make-tree.py" "$WORK/src" --files "$FILES" --big "$BIG" --seed "$SEED" >/dev/null
 want=$((FILES + BIG))
 stop_b() {
@@ -45,7 +45,7 @@ for n in A C; do
 done
 if [ -z "${LAG:-}" ]; then
   until [ "$(find "$WORK/B/mnt/copy" -type f 2>/dev/null | wc -l)" -ge "$want" ]; do sleep 0.5; done
-  until sf B status | grep -q 'data: *SAFE'; do sleep 1; done
+  until sf B status | grep -q '^SAFE'; do sleep 1; done
   stop_b
 fi
 t0=$(now)
@@ -72,7 +72,7 @@ sys.exit(0 if ok else 1)' &&
 }
 until { [ "$(find "$WORK/B/mnt/copy" -type f 2>/dev/null | wc -l)" -ge "$want" ] && settled; } || [ "$(python3 -c "print(int($(now) - $t0))")" -ge "$WATCH" ]; do sleep 1; done
 echo "seconds_to_caught_up_and_safe=$(elapsed "$t0") write_syscalls=$(syscw "$PID_B") cpu_s=$(( $(cpu_ticks "$PID_B") / 100 ))"
-sf B status | grep -E 'data:|repair|log' || true
+sf B status -v | grep -E '^(SAFE|DEGRADED|AT RISK|BEST-EFFORT)|repair|log' || true
 echo "files on B: $(find "$WORK/B/mnt/copy" -type f 2>/dev/null | wc -l) of $want"
 for t in /proc/"$PID_B"/task/*; do
   echo "$(awk '/^syscw/{print $2}' "$t/io") $(cat "$t/comm")"

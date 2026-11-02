@@ -137,8 +137,9 @@ cannot sync until all of them match. Until then `startfs status` lists the other
 down with the reason, for example:
 
 ```
-  2   100.64.0.7:7600   down  100G offered
-      cannot reach: protocol version mismatch: the peer speaks version 5, this node speaks version 4; upgrade this node
+  ID  NAME             STATE  RELEASE  SITE    OFFERED  RTT
+  2   100.64.0.7:7600  down   v1.13.8  -     100.0 GiB    -
+  100.64.0.7:7600 (2): cannot reach: protocol version mismatch: the peer speaks version 5, this node speaks version 4; upgrade this node
 ```
 
 For several machines:
@@ -257,7 +258,7 @@ on your data: copies, backups and text shrink a lot, already-compressed media ba
 
 `df` on the mount shows the logical size of your files as used, against the usable size of
 the cluster (the space the machines offer, divided by the number of copies). It does not show
-the saving. `startfs status` does, in its `storage:` lines: the size of the files, what is
+the saving. `startfs status --verbose` does, in its `storage:` lines: the size of the files, what is
 left after deduplication, how well this node's chunks compress, and what share of the
 cluster's replicas this node holds. That share is why this node's disk use can be a small
 fraction of your data: each machine stores only its part of every copy. `startfs status --json`
@@ -332,10 +333,10 @@ Examples, with `--copies 2` on a desktop, a laptop and a server:
 
 Costs and limits:
 
-- `startfs status` shows, under each member whose stand-ins are being kept, how long they
+- `startfs status` shows, after the members table, for each member whose stand-ins are being kept, how long they
   stay ("extra copies kept for 2d 4h in case it sleeps again"); `status --json` has it as
   `standin_secs_left` on the member.
-- `startfs status` also shows, under each member that is down or lost, when it was last
+- `startfs status` also shows, after the members table, for each member that is down or lost, when it was last
   seen ("last seen 2h 14m ago"). The members pool what they each remember, so the
   freshest sighting anywhere counts, and a restarted daemon still shows the right gap;
   only if no member remembers one does it say "over", counting from its own start.
@@ -364,10 +365,29 @@ Costs and limits:
 
 ## Status
 
-`startfs status` answers "is my data safe right now?": copies possible versus
-wanted, usable size, members and their state, files not yet fully replicated,
-repair progress, scrub state, cache usage, warnings, and conflicts.
-`startfs status --json` prints the same as JSON, for scripts and GUIs.
+`startfs status` answers "is my data safe right now?" in a short summary. The first line
+is the verdict and its cause; then come the members, one aligned row each (number, name,
+state, release, site, offered space, round-trip time), a note under the table for any
+member that is away (why it cannot be reached, when it was last seen), the usage, and
+only what needs attention: an upgrade or protocol split, a partial view, files not yet
+fully replicated, repair or scrub under way, warnings, and conflicts:
+
+```
+DEGRADED: surface is down, 3 of 3 copies still possible
+filesystem: home (3 copies), 3 nodes, this node up
+  ID  NAME     STATE  RELEASE  SITE      OFFERED  RTT
+  0   alpha    up     v1.13.9  home    100.0 GiB  340µs (this node)
+  1   beta     up     v1.13.9  cloud     1.0 GiB   12ms
+  2   surface  down   v1.13.9  home    512.0 MiB    -
+  surface (2): last seen 2h 10m ago
+usage: 3.2 GiB stored in 812 chunks, 101.5 GiB offered, about 33.8 GiB usable
+more detail: `startfs status --verbose`
+```
+
+`startfs status --verbose` (or `-v`) adds the diagnostic detail: storage and dedup,
+compression, cache, scrub, metadata log, garbage collection, each member's protocol and
+weight. `startfs status --json` prints everything, including each member's release, as
+JSON, for scripts and GUIs.
 
 `startfs stats` asks every member that is up for its storage figures, right then, and
 prints one line each: space used on its disk, chunks, compression, its share of the

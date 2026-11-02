@@ -25,14 +25,14 @@ TOKEN=$(sf A create --name ingest --copies 3)
 sf A config --offer 10G >/dev/null
 for n in B C; do start_node "$n" "$WORK/$n/mnt"; sf "$n" join "$TOKEN" --offer 10G >/dev/null; done
 for n in D E; do start_node "$n" "$WORK/$n/mnt"; sf "$n" join "$TOKEN" --offer 100G >/dev/null; done
-until sf A status | grep -q "(5 nodes)"; do sleep 0.2; done
+until sf A status | grep -q "5 nodes,"; do sleep 0.2; done
 python3 "$SF_ROOT/scripts/make-tree.py" "$WORK/src" --files "$FILES" --big "$BIG" --seed "$SEED" >/dev/null
 CSV=${CSV:-$WORK/ingest.csv}
 echo "t,node,inbox,busy,longest_ms,replicate_ms,queue,data" > "$CSV"
 sample() { # NODE T
   local n=$1 act st
   act=$(timeout 10 "$BIN" --data-dir "$WORK/$n/data" activity 2>&1) || act=""
-  st=$(timeout 10 "$BIN" --data-dir "$WORK/$n/data" status 2>&1 | sed -n 's/^data: *//p' | head -1) || st=""
+  st=$(timeout 10 "$BIN" --data-dir "$WORK/$n/data" status 2>&1 | sed -n 's/^\(SAFE\|DEGRADED\|AT RISK\|BEST-EFFORT\):.*/\1/p' | head -1) || st=""
   local longest
   longest=$(echo "$act" | sed -n 's/.*longest \([0-9.]*\) ms.*/\1/p' | head -1)
   [ -n "$longest" ] || longest=$(echo "$act" | sed -n 's/.*longest \([0-9.]*\) s,.*/\1/p' | head -1 | awk '{print $1*1000}')

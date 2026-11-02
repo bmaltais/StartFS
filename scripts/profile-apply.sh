@@ -18,7 +18,7 @@ start_node A "$WORK/A/mnt"
 TOKEN=$(sf A create --name apply --copies 3)
 start_node B "$WORK/B/mnt"; sf B join "$TOKEN" --offer 5G >/dev/null
 start_node C "$WORK/C/mnt"; sf C join "$TOKEN" --offer 5G >/dev/null
-until sf A status | grep -q '(3 nodes)'; do sleep 0.2; done
+until sf A status | grep -q '3 nodes,'; do sleep 0.2; done
 python3 "$SF_ROOT/scripts/make-tree.py" "$WORK/src" --files "$FILES" --big "$BIG" --seed "$SEED" >/dev/null
 want=$((FILES + BIG))
 syscw() { awk '/^syscw/{print $2}' "/proc/$1/io"; }

@@ -24,7 +24,7 @@ copies=2; offer=20G
 TOKEN=$(sf A create --name transfer --copies "$copies")
 sf A config --offer 20G >/dev/null
 start_node B "$WORK/B/mnt"; sf B join "$TOKEN" --offer "$offer" >/dev/null
-until sf A status | grep -q "(2 nodes)"; do sleep 0.2; done
+until sf A status | grep -q "2 nodes,"; do sleep 0.2; done
 if [ "$RTT_MS" -gt 0 ]; then
   sudo tc qdisc add dev lo root netem delay "$((RTT_MS / 2))ms" limit 200000; shaped=1
 fi

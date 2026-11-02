@@ -21,7 +21,7 @@ start_node A "$WORK/A/mnt" "replication_hold_secs = 0"
 TOKEN=$(sf A create --name burst --copies 2)
 sf A config --offer 20G >/dev/null
 start_node B "$WORK/B/mnt" "replication_hold_secs = 0"; sf B join "$TOKEN" --offer 20G >/dev/null
-until sf A status | grep -q "(2 nodes)"; do sleep 0.2; done
+until sf A status | grep -q "2 nodes,"; do sleep 0.2; done
 for i in $(seq "$FILES"); do
   if [ $((i % 2)) = 0 ]; then head -c $((KB * 1024)) /dev/urandom > "$WORK/src/f$i"
   else python3 -c "import sys; n = $KB * 1024; sys.stdout.write((('line $i of some object file text\\n') * n)[:n])" > "$WORK/src/f$i"; fi

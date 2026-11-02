@@ -20,7 +20,7 @@ start_node A "$WORK/A/mnt"
 TOKEN=$(sf A create --name deadpeer --copies 3)
 sf A config --offer 10G >/dev/null
 for n in B C; do start_node "$n" "$WORK/$n/mnt"; sf "$n" join "$TOKEN" --offer 10G >/dev/null; done
-until sf A status | grep -q "(3 nodes)"; do sleep 0.2; done
+until sf A status | grep -q "3 nodes,"; do sleep 0.2; done
 python3 "$SF_ROOT/scripts/make-tree.py" "$WORK/src" --files "$FILES" --big "$BIG" --seed "$SEED" >/dev/null
 say "tree: $(du -sh "$WORK/src" | cut -f1); freezing C (pid $PID_C)"
 kill -STOP "$PID_C"

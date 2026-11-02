@@ -149,7 +149,7 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     let token = stdout(&out);
     assert!(token.trim().starts_with("startfs1-"), "{token}");
 
-    let text = stdout(&startfs(data, &["status"]));
+    let text = stdout(&startfs(data, &["status", "--verbose"]));
     for needle in [
         "home",
         "3 copies",
@@ -170,6 +170,7 @@ fn cli_creates_a_filesystem_and_reports_status_through_the_daemon() {
     assert_eq!(json["copies_possible"], 1);
     assert_eq!(json["efficiency"]["logical_bytes"], 0);
     assert_eq!(json["members"].as_array().unwrap().len(), 1);
+    assert!(json["members"][0]["release"].is_string(), "{json}");
 
     // Every member's storage figures, asked for on demand.
     let text = stdout(&startfs(data, &["stats"]));
@@ -206,7 +207,7 @@ fn cli_issues_and_revokes_tokens_sets_the_offer_and_lists_members() {
 
     stdout(&startfs(data, &["config", "--offer", "50G"]));
     let text = stdout(&startfs(data, &["status"]));
-    assert!(text.contains("members:"), "{text}");
+    assert!(text.contains("RELEASE"), "{text}");
     assert!(
         text.contains("this node") && text.contains("50.0 GiB"),
         "{text}"
@@ -271,16 +272,23 @@ fn two_daemon_processes_create_join_and_see_each_other_over_quic() {
             stdout(&startfs(db.path(), &["status"])),
         );
         let both_up = |t: &str| t.matches(" up ").count() + t.matches("(this node)").count() >= 2;
-        if a.contains("(2 nodes)") && b.contains("(2 nodes)") && both_up(&a) && both_up(&b) {
+        if a.contains("2 nodes,") && b.contains("2 nodes,") && both_up(&a) && both_up(&b) {
             assert!(b.contains("100.0 MiB"), "{b}");
             // The member rows line up in columns.
             for text in [&a, &b] {
-                let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("  ")).collect();
+                let header = text.lines().find(|l| l.contains("RELEASE")).expect(text);
+                let rows: Vec<&str> = text
+                    .lines()
+                    .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+                    .filter(|l| l.starts_with("  ") && l.contains("  up  "))
+                    .collect();
                 assert_eq!(rows.len(), 2, "{text}");
-                for needle in ["offered", " up "] {
-                    let at = |l: &str| l.find(needle);
-                    assert!(at(rows[0]).is_some(), "{text}");
-                    assert_eq!(at(rows[0]), at(rows[1]), "{text}");
+                for row in &rows {
+                    assert_eq!(
+                        row.find("  up  ").map(|i| i + 2),
+                        header.find("STATE"),
+                        "{text}"
+                    );
                 }
             }
             break;

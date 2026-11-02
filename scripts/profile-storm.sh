@@ -47,7 +47,7 @@ TOKEN=$(sf A create --name storm --copies 3)
 sf A config --offer 10G >/dev/null
 for n in B C; do start_node "$n" "$WORK/$n/mnt"; sf "$n" join "$TOKEN" --offer 10G >/dev/null; done
 for n in D E; do start_node "$n" "$WORK/$n/mnt"; sf "$n" join "$TOKEN" --offer 100G >/dev/null; done
-until sf A status | grep -q "(5 nodes)"; do sleep 0.2; done
+until sf A status | grep -q "5 nodes,"; do sleep 0.2; done
 say "making the tree"
 python3 "$SF_ROOT/scripts/make-tree.py" "$WORK/src" --files "$FILES" --big "$BIG" --seed "$SEED" >/dev/null
 want=$((FILES + BIG))
@@ -55,10 +55,10 @@ say "copying $want files into A"
 cp -r "$WORK/src" "$WORK/A/mnt/copy"
 for n in $names; do
   until [ "$(find "$WORK/$n/mnt/copy" -type f 2>/dev/null | wc -l)" -ge "$want" ]; do sleep 1; done
-  until sf "$n" status | grep -q 'data: *SAFE'; do sleep 1; done
+  until sf "$n" status | grep -q '^SAFE'; do sleep 1; done
   say "$n has the tree and is SAFE"
 done
-for n in $names; do sf "$n" status | grep -E 'metadata log' | sed "s/^/$n /"; done
+for n in $names; do sf "$n" status -v | grep -E 'metadata log' | sed "s/^/$n /"; done
 # let the inboxes drain and the busy average fall before the join
 until [ "$(for n in $names; do sf "$n" activity | sed -n 's/.*busy \([0-9]*\)% of the time.*/\1/p'; done | sort -n | tail -1)" -lt 10 ]; do sleep 2; done
 say "quiet; joiner starts with --offer $JOFFER"
@@ -69,7 +69,7 @@ echo "t,node,inbox,busy,longest_ms,replicate_ms,queue,data" > "$CSV"
 sample() {
   local n=$1 act st
   act=$(timeout 10 "$BIN" --data-dir "$WORK/$n/data" activity 2>&1) || act=""
-  st=$(timeout 10 "$BIN" --data-dir "$WORK/$n/data" status 2>&1 | sed -n 's/^data: *//p' | head -1) || st=""
+  st=$(timeout 10 "$BIN" --data-dir "$WORK/$n/data" status 2>&1 | sed -n 's/^\(SAFE\|DEGRADED\|AT RISK\|BEST-EFFORT\):.*/\1/p' | head -1) || st=""
   local inbox busy longest repl queue
   inbox=$(echo "$act" | awk '/inbox:/{print $2; exit}')
   busy=$(echo "$act" | sed -n 's/.*busy \([0-9]*\)% of the time.*/\1/p' | head -1)

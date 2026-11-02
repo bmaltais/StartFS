@@ -17,7 +17,7 @@ start_node A "$WORK/A/mnt" "${NODE_CONFIG:-}"
 TOKEN=$(sf A create --name churn --copies 3)
 start_node B "" "${NODE_CONFIG:-}"; sf B join "$TOKEN" --offer 5G >/dev/null
 start_node C "" "${NODE_CONFIG:-}"; sf C join "$TOKEN" --offer 5G >/dev/null
-until sf A status | grep -q '(3 nodes)'; do sleep 0.2; done
+until sf A status | grep -q '3 nodes,'; do sleep 0.2; done
 M="$WORK/A/mnt"
 # Fresh bytes for every round: the peers keep deleted chunks for the retention, so reused
 # content would be deduplicated and cost nothing.
