@@ -483,4 +483,8 @@ impl Transport for CountingTransport {
     fn backlog(&self, to: NodeId) -> u64 {
         self.inner.backlog(to)
     }
+
+    fn set_notice(&self, notice: Option<Vec<u8>>) {
+        self.inner.set_notice(notice);
+    }
 }

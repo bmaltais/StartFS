@@ -27,6 +27,8 @@ struct State {
     addrs: HashMap<String, NodeId>,
     /// Why `(from, to)` cannot connect, as the transport would report it.
     errors: HashMap<(NodeId, NodeId), String>,
+    /// The upgrade notice each node has given its transport to hand to a refused peer.
+    notices: HashMap<NodeId, Vec<u8>>,
     /// Every message that was sent over a working link, oldest first.
     traffic: Vec<(NodeId, NodeId, Vec<u8>)>,
     /// How many times a node told its transport where a member listens.
@@ -73,6 +75,11 @@ impl SimNetwork {
             net: self.clone(),
             wire,
         }
+    }
+
+    /// The upgrade notice `node` has given its transport, if any (ADR 0006).
+    pub fn notice_of(&self, node: NodeId) -> Option<Vec<u8>> {
+        self.state.lock().unwrap().notices.get(&node).cloned()
     }
 
     /// Split the network: each listed group can only talk within itself;
@@ -206,6 +213,14 @@ impl Transport for SimTransport {
 
     fn local(&self) -> NodeId {
         self.node
+    }
+
+    fn set_notice(&self, notice: Option<Vec<u8>>) {
+        let mut s = self.net.state.lock().unwrap();
+        match notice {
+            Some(n) => s.notices.insert(self.node, n),
+            None => s.notices.remove(&self.node),
+        };
     }
 
     fn learn(&self, _node: NodeId, _addr: &str) {

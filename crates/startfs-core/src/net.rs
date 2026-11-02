@@ -54,7 +54,9 @@ pub trait Transport: Send + Sync {
     /// node because its protocol version differs, or `None` when there is none. A
     /// transport that refuses such a peer before any message reaches the daemon sends
     /// it along with the refusal; one that delivers the message anyway ignores this.
-    fn set_notice(&self, _notice: Option<Vec<u8>>) {}
+    /// Required, so a transport that wraps another cannot swallow the notice by inheriting
+    /// a default: the daemon only ever sees the outermost one.
+    fn set_notice(&self, notice: Option<Vec<u8>>);
     /// Chunk bytes sent to `to` that the transport still holds, queued or not yet
     /// taken by the peer. The replicator stops pushing to a peer past a limit, so a
     /// slow link costs time and not memory.

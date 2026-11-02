@@ -212,6 +212,30 @@ fn a_lockstep_upgrade_swaps_every_member_together_once_all_have_staged() {
     assert!(s.upgrade.is_some_and(|u| u.complete));
 }
 
+/// A real QUIC transport refuses a member on another protocol before it can send a message, so
+/// the notice of which release the cluster is on (ADR 0006) rides the refusal: it only gets
+/// there if the daemon hands it to the transport it was built with, whatever wraps that.
+#[test]
+fn once_the_upgrade_has_settled_the_daemon_gives_its_transport_the_notice() {
+    let c = lockstep_cluster(3);
+    assert_eq!(c.network().notice_of(NodeId(0)), None, "nothing to say yet");
+    c.control(1).update(None).unwrap();
+    c.elapse(HOUR);
+
+    let notice = Message::UpgradeNotice(UpgradeNotice {
+        release: NEXT.into(),
+        protocol: PROTOCOL_VERSION,
+    })
+    .encode();
+    for i in 0..3 {
+        assert_eq!(
+            c.network().notice_of(NodeId(i)),
+            Some(notice.clone()),
+            "node {i}"
+        );
+    }
+}
+
 #[test]
 fn staged_releases_expire_when_the_issuer_disappears_before_the_go_signal() {
     let c = lockstep_cluster(3);
