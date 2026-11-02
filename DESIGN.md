@@ -32,9 +32,8 @@ same code with a different membership scope.
    metadata replica. Simple membership; no sharded metadata. Larger scale is out of scope.
 
 6. **Trust:** fully trusted tailnet. Every member can read everything. Tailscale provides transport
-   encryption and machine authentication; membership can be limited with Tailscale ACL tags. No
-   encryption at rest in v1. The on-disk chunk format should stay encryption-ready so a per-filesystem
-   key can be added later without redesign.
+   encryption and machine authentication; membership can be limited with Tailscale ACL tags. Encryption
+   at rest is built (ADR 0010).
 
 7. **Capacity and placement:** weighted by contributed space. Each node declares a space offer
    (e.g. 50GB laptop, 2TB server) and placement (weighted rendezvous hashing) is proportional to it,
@@ -301,7 +300,7 @@ authenticating the update request (the tailnet is trusted).
 ## Future: personal (group-of-1) scope
 
 Not in v1. Needs:
-- Encryption at rest for chunks and metadata, so machines hosting replicas of a personal filesystem
+- (Built, ADR 0010: chunks and metadata encrypted at rest, recovery keys, `startfs recover`.) Still to do: keyless replica hosting. Original wish: encryption at rest for chunks and metadata, so machines hosting replicas of a personal filesystem
   store opaque blobs they cannot read.
 - A recovery key shown once at `create` time, from which the encryption key is derived.
 - `startfs recover <recovery key>` on a rebuilt machine: find replicas on the tailnet, prove key
@@ -315,7 +314,7 @@ encryption-ready.
 
 - Windows support
 - Erasure coding
-- Encryption at rest and per-user access control
+- Per-user access control (encryption at rest is built: ADR 0010)
 - ACLs, cross-node locks, directory hardlinks
 - Pinning and snapshots (versioned history of single files is built: ADR 0008)
 - Web UI or tray app

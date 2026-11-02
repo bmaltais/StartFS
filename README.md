@@ -224,6 +224,23 @@ it by mistake. `startfs config --storage-only` and `--no-storage-only` change th
 (unmount first; a storage-only member must offer space). `status` marks it. Like any new
 field on a member, this bumps the protocol version, so upgrade every member together.
 
+**Encryption.** A new filesystem is encrypted at rest (chunks and metadata; `create --no-encrypt`
+for a plain one). `create` shows a **recovery key** once, on stderr (`sfrk1-...`): keep it. A
+machine joining an encrypted filesystem, or a rebuilt one coming back, needs it:
+
+```sh
+startfs join startfs1-AbC... --key sfrk1-...
+startfs recover sfrk1-... startfs1-AbC...      # the same, for a rebuilt machine
+```
+
+The key is checked by a member before it tells the machine anything. Lost every copy of the key
+but have a machine that still runs? **As a last resort** run `startfs recovery-key` on it: that
+makes a *new* recovery key (the original is never stored, so it cannot be shown again). Older
+keys keep working and nothing is re-encrypted. Each member keeps the filesystem key in
+`fs.key` (mode 0600) in its data directory so it can restart on its own: this protects copies
+of the data made without that file, not a running member's own operator. Storage-only members
+cannot join an encrypted filesystem yet. See `docs/adr/0010-encryption-at-rest-with-recovery-keys.md`.
+
 That is all: `~/StartFS` is now the same filesystem on both. Use it like any directory.
 
 - `startfs token --example` prints a fresh join command later; tokens expire after 24h
@@ -494,7 +511,7 @@ Limits found while validating v1 (details and numbers in `docs/validation.md`):
   same file. Do not rely on them to guard shared files across nodes.
 - Not verified: real multi-machine use, a real tailnet, macOS.
 
-Non-goals for v1: Windows, erasure coding, encryption at rest or per-user access
+Non-goals for v1: Windows, erasure coding, per-user access
 control, ACLs, directory hardlinks, cross-node locks, pinning, snapshots, a web UI, filesystem
 auto-discovery, and more than about 20 nodes. The tailnet is fully trusted: every
 member can read everything.
