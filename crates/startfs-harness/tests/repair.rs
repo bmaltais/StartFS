@@ -415,6 +415,7 @@ fn a_rebuilt_machine_rejoins_with_a_new_token_and_pulls_metadata_and_chunks() {
         assert!(s.unreplicated.is_empty());
     }
 }
+
 #[test]
 fn a_rebuilt_machine_that_wrote_the_files_gets_its_tree_back() {
     let c = cluster(2, 3);
