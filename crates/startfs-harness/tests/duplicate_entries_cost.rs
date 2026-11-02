@@ -39,6 +39,7 @@ fn entries_already_held_cost_no_disk_writes() {
     for i in 0..20 {
         a.create(dir, &format!("f{i}"), 0o644).unwrap();
     }
+    a.sync().unwrap();
     let CatchUp::Entries(entries) = a.catch_up(&Default::default(), 5000).unwrap() else {
         panic!("expected entries");
     };

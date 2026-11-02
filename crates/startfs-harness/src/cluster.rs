@@ -483,8 +483,10 @@ impl Cluster {
 
     /// Fault injection: the power goes. Chunk files that were written without a
     /// sync, which the stores flag with a marker, are cut short as a disk
-    /// might leave them. A crash here syncs on the way down, as a clean
-    /// shutdown does, so the marker is put back afterwards.
+    /// might leave them. The metadata database is put back as it stood on disk
+    /// at the cut, so opening it again recovers its last durable commit and
+    /// loses the lazy ones. A crash here syncs on the way down, as a clean
+    /// shutdown does, so the marker and the database are put back afterwards.
     pub fn power_cut(&self, i: usize) {
         let dir = self.nodes[i].dir.path();
         let marker = |store: &str| dir.join(format!("{store}.dirty"));
@@ -492,10 +494,15 @@ impl Cluster {
             .into_iter()
             .filter(|store| marker(store).exists())
             .collect();
+        let meta = dir.join("meta.redb");
+        let at_cut = std::fs::read(&meta).ok();
         self.crash(i);
         for store in torn {
             truncate_files(&dir.join(store));
             std::fs::write(marker(store), b"").unwrap();
+        }
+        if let Some(bytes) = at_cut {
+            std::fs::write(&meta, bytes).unwrap();
         }
     }
 

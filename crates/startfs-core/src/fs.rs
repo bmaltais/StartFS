@@ -114,6 +114,16 @@ fn decode(raw: &[u8]) -> FsResult<Inode> {
     }
 }
 
+/// Every origin's next sequence number, as this transaction sees the log.
+fn read_frontier(t: &Tables<'_>) -> FsResult<Frontier> {
+    let mut out = Frontier::new();
+    for row in t.frontier.iter().map_err(db)? {
+        let (k, v) = row.map_err(db)?;
+        out.insert(MemberId(k.value()), v.value());
+    }
+    Ok(out)
+}
+
 fn db<E: std::fmt::Display>(e: E) -> FsError {
     FsError::Io(e.to_string())
 }
@@ -318,6 +328,12 @@ pub struct LocalFs {
     flush_error: Mutex<Option<String>>,
     /// Whether lazy commits have happened since the last durable one.
     unsynced: AtomicBool,
+    /// Whether lazy commits other than applying peers' entries wait for a durable one.
+    local_unsynced: AtomicBool,
+    /// Since when peers' entries applied lazily wait for a durable commit; 0 when none wait.
+    applied_unsynced_since: AtomicU64,
+    /// What the log held at the last durable commit: all that peers are told of or sent.
+    durable_frontier: Mutex<Frontier>,
     /// When the last lazy commit happened.
     last_lazy: AtomicU64,
     /// Woken when a write leaves work for the background tick.
@@ -400,6 +416,9 @@ impl LocalFs {
             write_commit_delay: AtomicU64::new(0),
             flush_error: Mutex::new(None),
             unsynced: AtomicBool::new(false),
+            local_unsynced: AtomicBool::new(false),
+            applied_unsynced_since: AtomicU64::new(0),
+            durable_frontier: Mutex::new(Frontier::new()),
             last_lazy: AtomicU64::new(0),
             waker: OnceLock::new(),
             batching: AtomicBool::new(false),
@@ -549,6 +568,18 @@ impl LocalFs {
         durability: Durability,
         f: impl FnOnce(&mut Tables<'_>) -> FsResult<T>,
     ) -> FsResult<T> {
+        self.commit_as(write, durability, false, f)
+    }
+
+    /// [`Self::run_as`]; `applied` marks a lazy commit of peers' entries, which waits for
+    /// [`Self::sync_applied_logged`] rather than the next sync of this node's own writes.
+    fn commit_as<T>(
+        &self,
+        write: bool,
+        durability: Durability,
+        applied: bool,
+        f: impl FnOnce(&mut Tables<'_>) -> FsResult<T>,
+    ) -> FsResult<T> {
         let _guard = self.lock.lock().unwrap();
         let mut txn = self.db.begin_write().map_err(db)?;
         txn.set_durability(durability).map_err(db)?;
@@ -566,10 +597,16 @@ impl LocalFs {
                 logbase: txn.open_table(LOGBASE).map_err(db)?,
                 history: txn.open_table(HISTORY).map_err(db)?,
             };
-            f(&mut t)
+            let out = f(&mut t);
+            // What a durable commit makes safe to tell peers of.
+            let durable = match (&out, durability) {
+                (Ok(_), Durability::Immediate) if write => Some(read_frontier(&t)?),
+                _ => None,
+            };
+            out.map(|v| (v, durable))
         };
         match out {
-            Ok(v) if write => {
+            Ok((v, durable)) if write => {
                 if !matches!(durability, Durability::None) {
                     // Chunks first: nothing durable may refer to a chunk that is not.
                     self.chunks.sync()?;
@@ -579,7 +616,24 @@ impl LocalFs {
                 self.tree_generation.fetch_add(1, Ordering::SeqCst);
                 let lazy = matches!(durability, Durability::None);
                 if lazy {
-                    self.last_lazy.store(self.clock.now(), Ordering::SeqCst);
+                    let now = self.clock.now();
+                    if applied {
+                        let _first = self.applied_unsynced_since.compare_exchange(
+                            0,
+                            now.max(1),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        );
+                    } else {
+                        self.last_lazy.store(now, Ordering::SeqCst);
+                        self.local_unsynced.store(true, Ordering::SeqCst);
+                    }
+                } else {
+                    self.local_unsynced.store(false, Ordering::SeqCst);
+                    self.applied_unsynced_since.store(0, Ordering::SeqCst);
+                }
+                if let Some(f) = durable {
+                    *self.durable_frontier.lock().unwrap() = f;
                 }
                 // A durable commit also persists the lazy ones before it.
                 self.unsynced.store(lazy, Ordering::SeqCst);
@@ -589,7 +643,7 @@ impl LocalFs {
             }
             other => {
                 txn.abort().map_err(db)?;
-                other
+                other.map(|(v, _)| v)
             }
         }
     }
@@ -630,15 +684,51 @@ impl LocalFs {
             || self.staging.has_unsynced()
     }
 
-    /// [`Self::sync_logged`] once no lazy commit has happened for `quiet` nanoseconds.
+    /// [`Self::sync_local_logged`] once no lazy commit of this node's own has happened for
+    /// `quiet` nanoseconds.
     pub fn sync_when_quiet(&self, quiet: Nanos) {
         let idle = self
             .clock
             .now()
             .saturating_sub(self.last_lazy.load(Ordering::SeqCst));
         if idle >= quiet {
-            self.sync_logged();
+            self.sync_local_logged();
         }
+    }
+
+    /// What the log held at the last durable commit. Peers are told of and sent no more, so a
+    /// power cut cannot take back what they were told.
+    pub fn durable_frontier(&self) -> Frontier {
+        self.durable_frontier.lock().unwrap().clone()
+    }
+
+    /// [`Self::sync_logged`] for this node's own lazy commits and chunks only: peers' entries
+    /// applied lazily wait for [`Self::sync_applied_logged`].
+    pub fn sync_local_logged(&self) {
+        let result = (|| {
+            self.chunks.sync()?;
+            self.staging.sync()?;
+            if self.local_unsynced.load(Ordering::SeqCst) {
+                self.run_as(true, Durability::Immediate, |_| Ok(()))?;
+            }
+            Ok(())
+        })();
+        self.log_failure(result, "could not sync");
+    }
+
+    /// Make peers' entries applied lazily durable when `quiet` (no more arrived) or once the
+    /// oldest has waited `every` nanoseconds. Returns whether it synced.
+    pub fn sync_applied_logged(&self, quiet: bool, every: Nanos) -> bool {
+        let since = self.applied_unsynced_since.load(Ordering::SeqCst);
+        if since == 0 || !(quiet || self.clock.now().saturating_sub(since) >= every) {
+            return false;
+        }
+        self.sync_checked()
+    }
+
+    /// Whether peers' entries applied lazily wait for a durable commit.
+    pub fn has_unsynced_applied(&self) -> bool {
+        self.applied_unsynced_since.load(Ordering::SeqCst) != 0
     }
 
     /// [`Self::sync`] for callers with nobody to return the error to: logged

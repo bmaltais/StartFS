@@ -193,6 +193,12 @@ same code with a different membership scope.
 - **Scrub:** one pass per `scrub_period_secs` (default 30 days), a few replicas per daemon tick, only
   when the tick had no other work, paused on battery power. A corrupt replica is deleted and the
   node asks other members for the chunk until one supplies it (the replicator's heal path).
+- **Applying peers' entries:** a member applies the entries peers send it lazily, all of one
+  tick's in one commit, and makes them durable in groups: in a tick that receives nothing, or once
+  the oldest has waited 100 ms while peers keep sending. Its hellos report its durable frontier and
+  it passes on no entry beyond it, so peers are never told of an entry a power cut could take back;
+  the peers whose entries wait are answered after the durable commit. A durable commit takes about
+  6 ms on a small VPS disk, and one per tick kept such a member busy through a build (#166).
 - **Log compaction:** hourly, entries every non-lost peer has itself reported holding are dropped.
   A peer that missed dropped entries is sent the merge registers instead, as a state transfer in
   bounded `StateChunk`s (`state_chunk_bytes`, 1 MiB by default), one per poll on the ordered metadata

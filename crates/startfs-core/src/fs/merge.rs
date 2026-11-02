@@ -692,15 +692,24 @@ impl LocalFs {
     /// What a peer holding `have` needs to catch up: the entries it lacks, or,
     /// when some of those were compacted away, where to start a state transfer.
     pub fn catch_up(&self, have: &Frontier, limit: usize) -> FsResult<CatchUp> {
-        self.run(false, |t| {
+        let upto = self.durable_frontier();
+        let entries = self.run(false, |t| {
             for row in t.logbase.iter().map_err(db)? {
                 let (origin, base) = row.map_err(db)?;
                 if have.get(&MemberId(origin.value())).copied().unwrap_or(0) < base.value() {
-                    return Ok(CatchUp::State(self.state_pin(t)?));
+                    return Ok(None);
                 }
             }
-            Ok(CatchUp::Entries(Self::entries_in(t, have, limit)?))
-        })
+            Ok(Some(Self::entries_in(t, have, &upto, limit)?))
+        })?;
+        match entries {
+            Some(entries) => Ok(CatchUp::Entries(entries)),
+            // The state sent is all we hold: it has to be durable first.
+            None => {
+                self.sync()?;
+                self.run(false, |t| Ok(CatchUp::State(self.state_pin(t)?)))
+            }
+        }
     }
 
     /// Where a state transfer starts: our frontier and clock right now.
@@ -805,27 +814,25 @@ impl LocalFs {
 
     /// What this node holds of every node's log.
     pub fn frontier(&self) -> FsResult<Frontier> {
-        self.run(false, |t| {
-            let mut out = Frontier::new();
-            for row in t.frontier.iter().map_err(db)? {
-                let (k, v) = row.map_err(db)?;
-                out.insert(MemberId(k.value()), v.value());
-            }
-            Ok(out)
-        })
+        self.run(false, |t| read_frontier(t))
     }
 
     /// Entries a peer holding `have` lacks, in per-origin order, at most `limit`.
-    fn entries_in(t: &Tables<'_>, have: &Frontier, limit: usize) -> FsResult<Vec<Entry>> {
+    fn entries_in(
+        t: &Tables<'_>,
+        have: &Frontier,
+        upto: &Frontier,
+        limit: usize,
+    ) -> FsResult<Vec<Entry>> {
         let mut out = Vec::new();
         for row in t.frontier.iter().map_err(db)? {
             let origin = MemberId(row.map_err(db)?.0.value());
             let from = have.get(&origin).copied().unwrap_or(0);
-            for row in t
-                .log
-                .range((origin.0, from)..=(origin.0, u64::MAX))
-                .map_err(db)?
-            {
+            let end = upto.get(&origin).copied().unwrap_or(0);
+            if from >= end {
+                continue;
+            }
+            for row in t.log.range((origin.0, from)..(origin.0, end)).map_err(db)? {
                 if out.len() >= limit {
                     return Ok(out);
                 }
@@ -844,8 +851,9 @@ impl LocalFs {
     /// every entry still ends in if any one needed it.
     ///
     /// Peers pass on each other's entries, so most batches a member receives hold only
-    /// entries it has; such a batch returns before the durable commit, which would sync
-    /// the disk for nothing.
+    /// entries it has; such a batch returns before opening a write transaction. The commit
+    /// is lazy: [`Self::sync_applied_logged`] makes the entries durable in groups, and until
+    /// then they lie beyond [`Self::durable_frontier`], which is all peers are told of.
     pub fn apply_remote(&self, entries: &[Entry]) -> FsResult<usize> {
         // An entry applies only at its origin's next sequence number, which only an
         // applied entry moves: if none is at it now, none would apply.
@@ -856,7 +864,8 @@ impl LocalFs {
         {
             return Ok(0);
         }
-        self.run(true, |t| {
+        // Lazy: peers are told of the entries only once a durable commit holds them.
+        self.commit_as(true, Durability::None, true, |t| {
             let mut applied = 0;
             let mut full = t.counters.get(STALE).map_err(db)?.is_some();
             for e in entries {
