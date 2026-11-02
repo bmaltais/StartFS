@@ -107,6 +107,7 @@ mod tests {
             leaving: false,
             removed: false,
             site: site.into(),
+            storage_only: false,
         }
     }
 

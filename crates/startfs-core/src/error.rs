@@ -48,6 +48,10 @@ pub enum Error {
     MemberOnline(MemberId),
     #[error("this node holds files of its own; join needs a fresh node")]
     NotFresh,
+    #[error("this node has the filesystem mounted; unmount it before making it storage-only")]
+    MountedCannotBeStorageOnly,
+    #[error("a storage-only member must offer space to store (its offer is 0)")]
+    StorageOnlyWithoutOffer,
     #[error("the daemon has no network")]
     NoNetwork,
     #[error("cannot reach {0}")]

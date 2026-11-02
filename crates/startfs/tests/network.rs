@@ -70,6 +70,7 @@ impl Node {
             token: token.into(),
             offer_bytes: None,
             site: String::new(),
+            storage_only: false,
         })
     }
 
@@ -128,6 +129,7 @@ fn a_joined_node_sees_metadata_and_reads_chunks_from_its_peer() {
         token,
         offer_bytes: Some(0),
         site: String::new(),
+        storage_only: false,
     });
     assert!(matches!(joined, Response::Joined), "{joined:?}");
 

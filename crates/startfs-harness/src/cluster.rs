@@ -383,6 +383,14 @@ impl Cluster {
         self.nodes[i].release.staged_tag()
     }
 
+    /// Node `i` has the filesystem mounted (somewhere, as far as the daemon knows).
+    pub fn mount(&self, i: usize) {
+        let daemon = self.nodes[i].daemon.lock().unwrap().clone();
+        if let Some(d) = daemon {
+            d.set_mountpoint(self.nodes[i].dir.path().join("mnt"));
+        }
+    }
+
     /// Say whether processes are using node `i`'s mount, which a restart would take from them.
     pub fn set_mount_in_use(&self, i: usize, in_use: bool) {
         self.nodes[i].release.set_mount_in_use(in_use);

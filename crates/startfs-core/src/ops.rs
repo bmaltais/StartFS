@@ -94,6 +94,8 @@ pub enum FsError {
     TimedOut,
     #[error("no space left on this node")]
     NoSpace,
+    #[error("this member is storage-only: it holds replicas and does not serve the filesystem")]
+    StorageOnly,
     #[error("node is not running")]
     NodeDown,
     #[error("i/o error: {0}")]
@@ -116,6 +118,7 @@ impl FsError {
             FsError::NoData => libc::ENODATA,
             FsError::Unavailable | FsError::TimedOut => libc::EHOSTUNREACH,
             FsError::NoSpace => libc::ENOSPC,
+            FsError::StorageOnly => libc::EACCES,
             FsError::NodeDown => libc::ENOTCONN,
             FsError::Io(_) => libc::EIO,
         }

@@ -217,6 +217,13 @@ startfs join startfs1-AbC... --offer 100G
 Add `--site home` (or `cloud`, any label) to say where the machine lives, so that copies are
 spread across sites; see [Surviving machine loss](#surviving-machine-loss).
 
+For a machine that should only hold copies (an always-on box, a cloud node) and never be
+mounted, join with `--storage-only`. It keeps a replica and takes part in repair like any
+member, but refuses to mount and refuses every file operation, so nothing is written through
+it by mistake. `startfs config --storage-only` and `--no-storage-only` change the role later
+(unmount first; a storage-only member must offer space). `status` marks it. Like any new
+field on a member, this bumps the protocol version, so upgrade every member together.
+
 That is all: `~/StartFS` is now the same filesystem on both. Use it like any directory.
 
 - `startfs token --example` prints a fresh join command later; tokens expire after 24h

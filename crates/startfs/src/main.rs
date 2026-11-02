@@ -44,9 +44,11 @@ commands:
                                       PATH (deleted or not), back to what it held at POINT
                                       (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it); what
                                       it replaces is kept as a version, so a restore is undoable
-  join TOKEN [--offer SIZE] [--site NAME]
+  join TOKEN [--offer SIZE] [--site NAME] [--storage-only]
                                       join the filesystem a token names, declaring where this
-                                      node lives (home, cloud) so copies are spread across sites
+                                      node lives (home, cloud) so copies are spread across sites;
+                                      --storage-only: hold replicas but never mount or serve the
+                                      filesystem
   token [--example]                   print a new join token (--example: the full join
                                       command to paste on the other machine)
   update [vX.Y.Z] [--force]           move every member to a release (the latest stable one when
@@ -58,13 +60,15 @@ commands:
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
   config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off] [--site NAME]
-         [--keep-versions DURATION]
+         [--storage-only | --no-storage-only] [--keep-versions DURATION]
                                       change this node's space offer (sizes like 500M, 2T), its
                                       weight (the share of new copies it takes, in the same
                                       units; 0: follow the offer), the filesystem's number of
                                       copies on every node, or whether this node keeps the
                                       counters behind `activity` (until restart), or the site
                                       this node declares (empty: none, so it is its own site),
+                                      whether this node is storage-only (it needs an offer, and
+                                      must not have the filesystem mounted),
                                       or how long every node keeps a replaced or deleted file's
                                       earlier version (like 7d, 36h; 0: none)";
 
@@ -86,6 +90,12 @@ enum CliError {
     WatchNeedsTerminal,
     #[error("not an interval: {0} (expected seconds, 0.2 or more)")]
     BadInterval(String),
+    #[error("--storage-only and --no-storage-only contradict each other")]
+    StorageOnlyBoth,
+    #[error(
+        "this member is storage-only, so it does not mount the filesystem; drop --mount and the mountpoint setting, or make it an ordinary member first (`startfs config --no-storage-only`)"
+    )]
+    StorageOnlyCannotMount,
     #[error("--copies must be a number")]
     CopiesNotANumber,
     #[error("--activity must be on or off")]
@@ -204,7 +214,11 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             let token = rest.first().ok_or(CliError::Usage)?;
             let offer = optional_size(rest, "--offer")?;
             let site = flag_value(rest, "--site").unwrap_or_default();
-            Client::new(socket).join_at(token, offer, &site)?;
+            if rest.iter().any(|a| a == "--storage-only") {
+                Client::new(socket).join_storage_only(token, offer, &site)?;
+            } else {
+                Client::new(socket).join_at(token, offer, &site)?;
+            }
             println!("joined");
             Ok(())
         }
@@ -266,6 +280,13 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
                     _ => return Err(CliError::ActivityNotOnOff),
                 };
                 Client::new(socket.clone()).set_activity(on)?;
+            }
+            let has = |flag: &str| rest.iter().any(|a| a == flag);
+            if has("--storage-only") && has("--no-storage-only") {
+                return Err(CliError::StorageOnlyBoth);
+            }
+            if has("--storage-only") || has("--no-storage-only") {
+                Client::new(socket.clone()).set_storage_only(has("--storage-only"))?;
             }
             if let Ok(window) = flag_value(rest, "--keep-versions") {
                 let secs =
@@ -610,7 +631,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "activity" | "stats" => (&[], &["--json"], 0),
         "history" => (&[], &["--json"], 1),
         "restore" => (&["--at"], &[], 1),
-        "join" => (&["--offer", "--site"], &[], 1),
+        "join" => (&["--offer", "--site"], &["--storage-only"], 1),
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
         "remove" | "revoke" => (&[], &[], 1),
@@ -623,7 +644,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
                 "--site",
                 "--keep-versions",
             ],
-            &[],
+            &["--storage-only", "--no-storage-only"],
             0,
         ),
         // purge, leave and unknown commands (reported as usage later)
@@ -744,6 +765,9 @@ fn daemon(
         advertised_host(host),
     )?;
     let mountpoint = mountpoint.or_else(|| config_mountpoint.map(PathBuf::from));
+    if mountpoint.is_some() && d.is_storage_only() {
+        return Err(CliError::StorageOnlyCannotMount);
+    }
     if let Some(mp) = &mountpoint {
         d.set_mountpoint(mp.clone());
     }

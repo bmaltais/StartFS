@@ -108,6 +108,13 @@ Recently read chunks kept decoded in memory up to `read_cache_bytes`, so reading
 A label a member declares for where it physically lives (home, cloud). It is never detected. Placement spreads a chunk's copies across sites before it weighs members by share. A member with no label is its own site. Distinct from a member, a peer path and weight.
 _Avoid_: Zone, region, location
 
+**Storage-only member**:
+A member declared to hold a metadata replica and its share of the chunks, and to take part in repair, stand-in copies, GC and scrub, but never to serve the filesystem: it does not mount and refuses every filesystem operation. It is declared at `join --storage-only` or with `config --storage-only`, never inferred, and it must offer space. The opposite of a pure client (offer 0: mounts, stores nothing).
+_Avoid_: Headless, replica node, passive
+
+**Pure client**:
+A member with an offer of 0: it mounts the filesystem but stores no chunks. The opposite of a storage-only member.
+
 **Staged release**:
 A release a member has fetched and checked but not yet swapped in, so it is ready to take over on the word to go. Nothing restarts while a release is only staged.
 _Avoid_: Pending update, downloaded update

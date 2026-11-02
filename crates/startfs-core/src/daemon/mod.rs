@@ -308,6 +308,7 @@ impl Daemon {
         if let Some(me) = membership.me() {
             fs.set_node(me);
             fs.set_replicating();
+            fs.set_storage_only(membership.is_storage_only());
         }
         let started = clock.now();
         let activity = Arc::new(Activity::new(clock.clone(), config.activity));
