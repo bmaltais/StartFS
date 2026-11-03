@@ -1,19 +1,16 @@
 //! The status report: this node's view of the filesystem and its health.
 
 use super::Daemon;
-use super::standing::{is_unknown, is_up, node_state, unseen_since};
 use crate::control::{
-    GcStatus, LastSeen, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair,
-    Shortfall, Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
+    GcStatus, LogStatus, MemberStatus, NodeReport, NodeState, NodeStats, Repair, Shortfall,
+    Staging, Status, Stranded, TickBusy, Tier, Usage, Verdict,
 };
 use crate::error::Error;
 use crate::load::Load;
-use crate::members::{Member, MemberId, Membership};
+use crate::members::{Member, Membership};
 use crate::net::NodeId;
 use crate::ops::FsOps;
-use crate::ops::Nanos;
-use crate::protocol::{Health, Message, Sighting};
-use std::collections::HashMap;
+use crate::protocol::{Health, Message};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -71,67 +68,6 @@ fn merge_health(into: &mut Health, from: &Health) {
     }
 }
 
-/// When a member was last seen by anyone, as the cluster remembers it: the
-/// freshest of this node's own sighting and those its peers gossiped, each
-/// aged by the time since it arrived. When nobody has seen it since this
-/// daemon started, only a lower bound is known.
-fn last_seen<'a>(
-    member: MemberId,
-    own: Option<Nanos>,
-    peers: impl Iterator<Item = &'a (Nanos, Health)>,
-    started: Nanos,
-    now: Nanos,
-) -> LastSeen {
-    let own = own.map(|at| now.saturating_sub(at) / NANOS_PER_SEC);
-    let theirs = peers.filter_map(|(arrived, h)| {
-        let s = h.seen.iter().find(|s| s.member == member)?;
-        Some(s.secs_ago + now.saturating_sub(*arrived) / NANOS_PER_SEC)
-    });
-    match own.into_iter().chain(theirs).min() {
-        Some(secs) => LastSeen {
-            secs_ago: secs,
-            exact: true,
-        },
-        None => LastSeen {
-            secs_ago: now.saturating_sub(started) / NANOS_PER_SEC,
-            exact: false,
-        },
-    }
-}
-
-/// What the cluster last heard from `member`, a member that is not up: its
-/// own last report as this node received it, or one a peer relayed, whichever
-/// is fresher. `None` when no one has a report.
-fn last_report(
-    member: MemberId,
-    endpoint: NodeId,
-    peers: &HashMap<NodeId, (Nanos, Health)>,
-    now: Nanos,
-) -> Option<Stranded> {
-    let age = |arrived: &Nanos| now.saturating_sub(*arrived) / NANOS_PER_SEC;
-    let own = peers.get(&endpoint).map(|(arrived, h)| Stranded {
-        member,
-        chunks: h
-            .unreplicated
-            .iter()
-            .filter(|f| f.tier() == Tier::AtRisk)
-            .map(|f| f.chunks)
-            .sum(),
-        secs_ago: age(arrived),
-    });
-    let relayed = peers
-        .iter()
-        .filter(|(e, _)| **e != endpoint)
-        .filter_map(|(_, (arrived, h))| {
-            let r = h.reports.iter().find(|r| r.member == member)?;
-            Some(Stranded {
-                secs_ago: r.secs_ago + age(arrived),
-                ..*r
-            })
-        });
-    own.into_iter().chain(relayed).min_by_key(|r| r.secs_ago)
-}
-
 /// Roughly how much data fits: the space members offer, divided by N.
 pub(super) fn usable_bytes(membership: &Membership) -> u64 {
     let offered: u64 = membership.members().iter().map(|m| m.offer_bytes).sum();
@@ -144,62 +80,13 @@ impl Daemon {
     /// This node's own replication state: what it gossips and contributes to `status`.
     pub(super) fn local_health(&self) -> Health {
         let now = self.clock.now();
-        // A member not heard since this daemon started is passed on as unseen at least since
-        // what the peers relayed (never later than this start): a lower bound, so the cluster
-        // keeps knowing how long it has been gone through restarts, as long as one member keeps
-        // running. With nothing relayed, this daemon's own start is passed on only once it has
-        // run for the stand-in delay: a member that just restarted gossips before it has heard
-        // anyone, and its fresh start would otherwise win over what the others know (receivers
-        // take the latest sighting) and reset it at every rolling restart.
-        let seen = {
-            let membership = self.membership.lock().unwrap();
-            let heard = self.heard.lock().unwrap();
-            let peer_health = self.peer_health.lock().unwrap();
-            let settled =
-                now.saturating_sub(self.started) >= super::STANDIN_AFTER.as_nanos() as u64;
-            membership
-                .members()
-                .iter()
-                .filter(|m| Some(m.id) != membership.me())
-                .filter_map(|m| {
-                    let own = heard.get(&m.endpoint).copied();
-                    let relayed = peer_health
-                        .values()
-                        .any(|(_, h)| h.seen.iter().any(|s| s.member == m.id));
-                    if own.is_none() && !relayed && !settled {
-                        return None;
-                    }
-                    let at = unseen_since(own, m.id, &peer_health, self.started);
-                    Some(Sighting {
-                        member: m.id,
-                        secs_ago: now.saturating_sub(at) / NANOS_PER_SEC,
-                    })
-                })
-                .collect()
+        let (members, me) = {
+            let m = self.membership.lock().unwrap();
+            (m.members(), m.me())
         };
-        let reports = {
-            let membership = self.membership.lock().unwrap();
-            let heard = self.heard.lock().unwrap();
-            let peers = self.peer_health.lock().unwrap();
-            let up = |endpoint: &NodeId| is_up(heard.get(endpoint).copied(), now);
-            membership
-                .members()
-                .iter()
-                .filter(|m| Some(m.id) != membership.me() && !up(&m.endpoint))
-                .filter_map(|m| last_report(m.id, m.endpoint, &peers, now))
-                .collect()
-        };
-        // Rounded up, so a time handed from node to node never creeps later.
-        let slept = self
-            .slept
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(member, at)| Sighting {
-                member: *member,
-                secs_ago: now.saturating_sub(*at).div_ceil(NANOS_PER_SEC),
-            })
-            .collect();
+        let seen = self.liveness.sightings(&members, me, now);
+        let reports = self.liveness.reports_for_absent(&members, me, now);
+        let slept = self.liveness.slept_sightings(now);
         Health {
             load: self.local_load(),
             seen,
@@ -216,7 +103,11 @@ impl Daemon {
 
     /// How far behind this node's tick and inbox are, as it gossips it.
     pub(super) fn local_load(&self) -> Load {
-        let began = self.last_tick.lock().unwrap().unwrap_or(self.started);
+        let began = self
+            .last_tick
+            .lock()
+            .unwrap()
+            .unwrap_or(self.liveness.started());
         let inbox = self.transport().and_then(|t| t.inbox());
         Load {
             tick_secs_ago: self.clock.now().saturating_sub(began) / NANOS_PER_SEC,
@@ -274,8 +165,7 @@ impl Daemon {
             let m = self.membership.lock().unwrap();
             (m.members(), m.me())
         };
-        let heard = self.heard.lock().unwrap().clone();
-        let up = |m: &Member| is_up(heard.get(&m.endpoint).copied(), now);
+        let up = |m: &Member| self.liveness.is_up(m.endpoint, now);
         let asked: Vec<NodeId> = members
             .iter()
             .filter(|m| Some(m.id) != me && up(m))
@@ -330,8 +220,6 @@ impl Daemon {
         let membership = self.membership.lock().unwrap();
         let filesystem = membership.filesystem().cloned();
         let now = self.clock.now();
-        let heard = self.heard.lock().unwrap();
-        let peer_health = self.peer_health.lock().unwrap();
         let behind_now = self.behind.lock().unwrap().clone();
         let transport = self.transport();
         let standin_days = filesystem.as_ref().map_or(0, |f| f.standin_days);
@@ -342,34 +230,40 @@ impl Daemon {
             .into_iter()
             .map(|m| {
                 let is_self = membership.me() == Some(m.id);
-                let up = is_self || is_up(heard.get(&m.endpoint).copied(), now);
+                let up = is_self || self.liveness.is_up(m.endpoint, now);
                 // A member in its upgrade pause is back soon: what it last reported
                 // still counts and nothing about it is alarming.
                 let expected = up || paused.contains(&m.id);
                 let (release, protocol, upgrade) = self.member_upgrade(m.endpoint, is_self);
                 if !is_self {
                     // Only a member that is up speaks for its own chunks.
-                    match peer_health.get(&m.endpoint) {
-                        Some((_, h)) if expected => merge_health(&mut health, h),
-                        _ => unheard.push(m.id),
+                    let merged = expected
+                        && self
+                            .liveness
+                            .with_health(m.endpoint, |h| merge_health(&mut health, h))
+                            .is_some();
+                    if !merged {
+                        unheard.push(m.id);
                     }
                     if !expected
-                        && let Some(r) = last_report(m.id, m.endpoint, &peer_health, now)
+                        && let Some(r) = self.liveness.last_report(&m, now)
                         && r.chunks > 0
                     {
                         stranded.push(r);
                     }
                 }
+                let state = self.liveness.state(
+                    &m,
+                    is_self,
+                    lost.contains(&m.id),
+                    paused.contains(&m.id),
+                    now,
+                );
+                let last_seen = (!up).then(|| self.liveness.last_seen(&m, now));
                 MemberStatus {
                     id: m.id,
                     addr: m.addr,
-                    state: node_state(
-                        m.leaving,
-                        up,
-                        !is_self && is_unknown(heard.get(&m.endpoint).copied(), self.started, now),
-                        lost.contains(&m.id),
-                        paused.contains(&m.id),
-                    ),
+                    state,
                     release,
                     protocol,
                     upgrade,
@@ -383,7 +277,7 @@ impl Daemon {
                     } else if is_self {
                         Some(self.local_load())
                     } else {
-                        peer_health.get(&m.endpoint).map(|(_, h)| h.load)
+                        self.liveness.load_of(m.endpoint)
                     }
                     .filter(|l| {
                         // A peer is behind by the same verdict the replicator acts on
@@ -394,16 +288,8 @@ impl Daemon {
                             behind_now.contains(&m.id)
                         }
                     }),
-                    standin_secs_left: self.standin_secs_left(m.id, standin_days, now),
-                    last_seen: (!up).then(|| {
-                        last_seen(
-                            m.id,
-                            heard.get(&m.endpoint).copied(),
-                            peer_health.values(),
-                            self.started,
-                            now,
-                        )
-                    }),
+                    standin_secs_left: self.liveness.standin_secs_left(m.id, standin_days, now),
+                    last_seen,
                     rtt_micros: (up && !is_self)
                         .then(|| {
                             transport
@@ -425,7 +311,6 @@ impl Daemon {
                 }
             })
             .collect();
-        drop(peer_health);
         let Health {
             unreplicated,
             repair,

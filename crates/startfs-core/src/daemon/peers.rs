@@ -111,17 +111,8 @@ impl Daemon {
                 if self.membership.lock().unwrap().is_member_endpoint(from) {
                     let now = self.clock.now();
                     let me = self.membership.lock().unwrap().me();
-                    // Keep the latest sleep anyone saw: the extra copies made
-                    // for a member stay as long as the freshest sighting says.
-                    let mut slept = self.slept.lock().unwrap();
-                    for s in health.slept.iter().filter(|s| Some(s.member) != me) {
-                        let at = now.saturating_sub(s.secs_ago * 1_000_000_000);
-                        let known = slept.entry(s.member).or_insert(at);
-                        *known = (*known).max(at);
-                    }
-                    drop(slept);
                     self.note_load(from, health.load);
-                    self.peer_health.lock().unwrap().insert(from, (now, health));
+                    self.liveness.record_health(from, health, me, now);
                 }
             }
             Message::Copies { copies, rev } => {

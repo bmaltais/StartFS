@@ -1,7 +1,6 @@
 //! `startfs purge`: reclaim deleted data now instead of after the retention period.
 
 use super::Daemon;
-use super::standing::is_up;
 use crate::control::PurgeReport;
 use crate::error::Error;
 use crate::net::Transport;
@@ -25,12 +24,11 @@ impl Daemon {
     /// edit it made while away could bring back.
     pub(super) fn purge(&self) -> Result<PurgeReport, Error> {
         let now = self.clock.now();
-        let heard = self.heard.lock().unwrap().clone();
         let (me, members) = {
             let m = self.membership.lock().unwrap();
             (m.me(), m.members())
         };
-        let up = |endpoint| is_up(heard.get(&endpoint).copied(), now);
+        let up = |endpoint| self.liveness.is_up(endpoint, now);
         let (asked, away): (Vec<_>, Vec<_>) = members
             .iter()
             .partition(|m| Some(m.id) == me || up(m.endpoint));
@@ -94,14 +92,13 @@ impl Daemon {
     pub(super) fn begin_purge(&self) {
         // The members away now: the gate does not wait on them for what this purge frees.
         let now = self.clock.now();
-        let heard = self.heard.lock().unwrap().clone();
         *self.purge_excused.lock().unwrap() = self
             .membership
             .lock()
             .unwrap()
             .peers()
             .into_iter()
-            .filter(|p| !is_up(heard.get(p).copied(), now))
+            .filter(|p| !self.liveness.is_up(*p, now))
             .collect();
         // Record the orphans first, so "known by now" includes a delete that
         // no pass has looked at yet.

@@ -8,7 +8,6 @@
 //! swap together. A member that was away learns which release to catch up to from
 //! an upgrade notice (ADR 0006).
 
-use super::standing::is_up;
 use super::{Daemon, STANDIN_AFTER};
 use crate::control::{UpdateReport, UpgradeStatus};
 use crate::error::Error;
@@ -306,19 +305,17 @@ impl Daemon {
             let m = self.membership.lock().unwrap();
             (m.members(), m.me())
         };
-        let heard = self.heard.lock().unwrap().clone();
         let up = self.upgrades.lock().unwrap();
         members
             .into_iter()
             .filter(|m| Some(m.id) != me)
             .map(|m| {
                 let state = up.peers.get(&m.endpoint);
-                let seen = heard.get(&m.endpoint).copied().unwrap_or(self.started);
                 Peer {
                     id: m.id,
-                    up: is_up(heard.get(&m.endpoint).copied(), now),
-                    present: now.saturating_sub(seen) < STANDIN_AFTER.as_nanos() as u64,
-                    heard: heard.get(&m.endpoint).copied(),
+                    up: self.liveness.is_up(m.endpoint, now),
+                    present: self.liveness.is_present(m.endpoint, now),
+                    heard: self.liveness.last_heard(m.endpoint),
                     gossip: state.map(|s| s.gossip.clone()),
                     paused: state.is_some_and(|s| s.pause_until.is_some_and(|t| t > now)),
                 }
@@ -610,7 +607,7 @@ impl Daemon {
             .is_some_and(|issuer| {
                 views.iter().find(|p| p.id == issuer).is_none_or(|p| {
                     !p.up
-                        && now.saturating_sub(p.heard.unwrap_or(self.started))
+                        && now.saturating_sub(p.heard.unwrap_or(self.liveness.started()))
                             >= STAGE_LEASE.as_nanos() as u64
                 })
             });

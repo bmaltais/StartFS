@@ -2,7 +2,6 @@
 //! minting or revoking join tokens.
 
 use super::Daemon;
-use super::standing::is_up;
 use crate::control::{FilesystemInfo, Verdict};
 use crate::crypto::{FsKey, RecoveryKey};
 use crate::error::Error;
@@ -294,10 +293,7 @@ impl Daemon {
                 .members()
                 .into_iter()
                 .find(|x| x.id == member)
-                .is_some_and(|x| {
-                    let heard = self.heard.lock().unwrap().get(&x.endpoint).copied();
-                    is_up(heard, self.clock.now())
-                });
+                .is_some_and(|x| self.liveness.is_up(x.endpoint, self.clock.now()));
             if up {
                 return Err(Error::MemberOnline(member));
             }
