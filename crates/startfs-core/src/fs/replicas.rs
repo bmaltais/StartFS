@@ -84,11 +84,16 @@ impl LocalFs {
     /// each piece is a hash and a write, and they stay on this thread.
     pub(super) fn keep_all(&self, pieces: &[Piece<'_>]) -> FsResult<Vec<ChunkId>> {
         const MAX_THREADS: usize = 4;
+        // `available_parallelism` re-reads the cgroup limits on every call (about 30 syscalls), so
+        // an unencrypted write, which never fans out, must not ask.
+        if self.encryption_key().is_none() {
+            return pieces.iter().map(|p| self.keep(p)).collect();
+        }
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(MAX_THREADS)
             .min(pieces.len());
-        if threads < 2 || self.encryption_key().is_none() {
+        if threads < 2 {
             return pieces.iter().map(|p| self.keep(p)).collect();
         }
         let per = pieces.len().div_ceil(threads);
