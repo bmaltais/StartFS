@@ -1,6 +1,7 @@
 //! Library half of the `startfs` binary: the mount layer, the network transport and the installer the daemon
 //! upgrades itself with.
 
+pub mod add;
 pub mod error;
 pub mod identity;
 pub mod installer;

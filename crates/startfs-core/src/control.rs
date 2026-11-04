@@ -42,6 +42,10 @@ pub enum Request {
     Purge,
     /// Mint another join token (valid for the configured time).
     NewToken,
+    /// Mint a join token that stops working after `ttl_secs` (for `startfs add`, which revokes it too).
+    NewTokenFor {
+        ttl_secs: u64,
+    },
     /// Change settings of this node; unset fields stay as they are.
     Config {
         offer_bytes: Option<u64>,
@@ -800,6 +804,16 @@ impl Client {
     /// Mint another join token.
     pub fn new_token(&self) -> Result<String, Error> {
         match self.call(&Request::NewToken)? {
+            Response::Created { token, .. } => Ok(token),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Mint a join token valid for `ttl` only.
+    pub fn new_token_for(&self, ttl: Duration) -> Result<String, Error> {
+        match self.call(&Request::NewTokenFor {
+            ttl_secs: ttl.as_secs(),
+        })? {
             Response::Created { token, .. } => Ok(token),
             other => Err(unexpected(other)),
         }

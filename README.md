@@ -224,6 +224,16 @@ it by mistake. `startfs config --storage-only` and `--no-storage-only` change th
 (unmount first; a storage-only member must offer space). `status` marks it. Like any new
 field on a member, this bumps the protocol version, so upgrade every member together.
 
+**Add a machine over SSH.** From any member, `startfs add [user@]host [--offer 100G] [--site home]
+[--storage-only]` installs StartFS on a Linux machine (the same release this node runs), installs FUSE
+unless `--storage-only` (pacman, apt or dnf, via `sudo`), joins it, and revokes the 10-minute join token it
+made, whether or not it worked. It runs in your terminal with your own SSH credentials (`tailscale ssh`
+for a tailnet machine, plain `ssh` otherwise; `--via ssh|tailscale` picks), so password and sudo prompts
+work. The daemon never opens SSH sessions. Tailscale must already be installed and logged in there.
+If it stops after the install, run it again: nothing is uninstalled on failure. An encrypted
+filesystem is refused (the recovery key must not travel on a command line); macOS and Windows
+targets are not supported. See `docs/adr/0011-member-provisioning-runs-from-the-cli.md`.
+
 **Encryption** (opt-in; writes of large files are slower, see `docs/validation.md`). `create --encrypt`
 encrypts the new filesystem at rest (chunks and metadata). It then shows a **recovery key** once, on stderr (`sfrk1-...`): keep it. A
 machine joining an encrypted filesystem, or a rebuilt one coming back, needs it:

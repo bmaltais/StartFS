@@ -50,6 +50,10 @@ impl Daemon {
                 token: self.new_token()?,
                 recovery_key: None,
             },
+            Request::NewTokenFor { ttl_secs } => Response::Created {
+                token: self.new_token_for(std::time::Duration::from_secs(ttl_secs))?,
+                recovery_key: None,
+            },
             Request::RecoveryKey => Response::RecoveryKey {
                 key: self.new_recovery_key()?,
             },

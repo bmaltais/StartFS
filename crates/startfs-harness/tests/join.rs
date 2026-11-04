@@ -165,6 +165,19 @@ fn an_expired_token_is_rejected_and_a_fresh_one_works() {
 }
 
 #[test]
+fn a_token_made_for_a_short_time_expires_sooner_than_the_configured_one() {
+    let c = Cluster::start_with_config(3, "token_ttl_secs = 3600");
+    c.control(0).create("home", 2).unwrap();
+    let short = c.control(0).new_token_for(Duration::from_secs(60)).unwrap();
+    let long = c.control(0).new_token().unwrap();
+    c.advance(Duration::from_secs(61));
+
+    let err = c.control(1).join(&short, None).unwrap_err();
+    assert!(err.to_string().contains("expired"), "{err}");
+    c.control(2).join(&long, None).unwrap();
+}
+
+#[test]
 fn a_revoked_token_is_rejected_even_before_it_expires() {
     let c = Cluster::start(3);
     let leaked = c.control(0).create("home", 2).unwrap();
