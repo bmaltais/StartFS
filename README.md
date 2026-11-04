@@ -473,6 +473,16 @@ chunks are freed once both the window and the GC retention have passed; `startfs
 --keep-versions` (like `3d`, `12h`; `0` for none) changes the window on every member. Every member
 must run protocol 17.
 
+### Copies per directory
+
+`startfs copies ~/startfs/scratch 1` gives the directory its own number of copies on every
+member (`startfs copies ~/startfs/photos 3`, or `--clear` to follow the filesystem's again). It
+covers the files below it down to a directory with an entry of its own. A chunk is content, so one
+that files in two places use is kept on the most copies either asks for, and on at least the
+filesystem's if a file outside every entry uses it. Entries are by path: renaming a directory
+leaves its entry behind. Repair and `status` count each chunk against its own target. Lowering a
+directory waits for a healthy cluster, like `config --copies`. Needs protocol 20.
+
 ### Freeing the space of deleted files
 
 Deleting a file keeps its data for `gc_retention_secs` (7 days by default), so a mistake can be

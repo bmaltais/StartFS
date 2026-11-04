@@ -609,6 +609,54 @@ impl Membership {
         true
     }
 
+    /// Give the directory at `path` its own number of copies, or with `None` take its entry
+    /// away, and bump the revision so the others take it.
+    pub fn set_dir_copies(&mut self, path: &str, copies: Option<u32>) -> Result<(), Error> {
+        let fs = self.fs.as_mut().ok_or(Error::NotInFilesystem)?;
+        if copies == Some(0) || path.is_empty() {
+            return Err(Error::BadFilesystemSpec);
+        }
+        let changed = match copies {
+            Some(n) => fs.dir_copies.insert(path.to_string(), n) != Some(n),
+            None => fs.dir_copies.remove(path).is_some(),
+        };
+        if changed {
+            fs.dir_copies_rev += 1;
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// The directory copies as gossiped: the entries by path, and the revision.
+    pub fn dir_copies_setting(&self) -> Option<(Vec<(String, u32)>, u64)> {
+        self.fs.as_ref().map(|fs| {
+            (
+                fs.dir_copies.iter().map(|(p, n)| (p.clone(), *n)).collect(),
+                fs.dir_copies_rev,
+            )
+        })
+    }
+
+    /// Fold in a peer's directory copies; the higher revision wins, and equal revisions
+    /// (concurrent changes) go to the greater list so every member settles on the same one.
+    /// Returns whether anything changed.
+    pub fn merge_dir_copies(&mut self, entries: Vec<(String, u32)>, rev: u64) -> bool {
+        let Some(fs) = self.fs.as_mut() else {
+            return false;
+        };
+        let theirs: std::collections::BTreeMap<String, u32> = entries
+            .into_iter()
+            .filter(|(p, n)| !p.is_empty() && *n > 0)
+            .collect();
+        if (fs.dir_copies_rev, &fs.dir_copies) >= (rev, &theirs) {
+            return false;
+        }
+        fs.dir_copies = theirs;
+        fs.dir_copies_rev = rev;
+        self.save_or_report();
+        true
+    }
+
     /// Set how long versions are kept and bump its revision so the others take it.
     pub fn set_keep_versions(&mut self, secs: u64) -> Result<(), Error> {
         let fs = self.fs.as_mut().ok_or(Error::NotInFilesystem)?;

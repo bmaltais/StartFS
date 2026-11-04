@@ -126,17 +126,26 @@ impl LocalFs {
     /// once a round, and only when it has held chunks to look at.
     pub fn refresh_used(&self) {
         let generation = self.tree_generation.load(Ordering::SeqCst);
-        if self.used.lock().unwrap().0 == Some(generation) {
+        let looked = self.used.lock().unwrap().0 == Some(generation)
+            && self.wants.lock().unwrap().generation == Some(generation);
+        if looked {
             return;
         }
         let (now, window) = (self.clock.now(), self.window());
-        let used = self.run(false, |t| {
+        let (default, dirs) = {
+            let policy = self.policy.lock().unwrap();
+            (policy.default, policy.dirs.clone())
+        };
+        let looked = self.run(false, |t| {
             let mut used = tree_chunks(&t.inodes)?;
             used.extend(t.version_chunks(now, window, false)?.into_keys());
-            Ok(used)
+            Ok((used, self.work_out_wants(t, &dirs)?))
         });
-        match used {
-            Ok(used) => *self.used.lock().unwrap() = (Some(generation), used),
+        match looked {
+            Ok((used, wants)) => {
+                *self.used.lock().unwrap() = (Some(generation), used);
+                self.keep_wants(generation, wants, default);
+            }
             Err(e) => eprintln!("startfs: cannot work out which chunks are in use: {e}"),
         }
     }

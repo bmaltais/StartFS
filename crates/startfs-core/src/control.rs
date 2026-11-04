@@ -68,6 +68,12 @@ pub enum Request {
         #[serde(default)]
         keep_versions_secs: Option<u64>,
     },
+    /// Give the directory at `path` (a mount path or a filesystem path) its own number of
+    /// copies, or with `None` take its entry away so it follows the filesystem's again.
+    SetDirCopies {
+        path: String,
+        copies: Option<u32>,
+    },
     /// Make a token we issued stop working.
     Revoke {
         token: String,
@@ -140,6 +146,24 @@ pub struct FilesystemInfo {
     /// Chunks and metadata are encrypted at rest; joining takes a recovery key.
     #[serde(default)]
     pub encrypted: bool,
+    /// Directories that hold a number of copies of their own instead of `copies`, by path
+    /// (`/scratch` is 1, `/photos` is 3). The nearest directory above a file with an entry
+    /// decides; a chunk several files use gets the highest of theirs.
+    #[serde(default)]
+    pub dir_copies: std::collections::BTreeMap<String, u32>,
+    /// Bumped each time `dir_copies` is changed; the highest wins when members disagree.
+    #[serde(default)]
+    pub dir_copies_rev: u64,
+}
+
+impl FilesystemInfo {
+    /// The most copies any chunk may be wanted on: `copies`, or a directory's higher own.
+    pub fn most_copies(&self) -> u32 {
+        self.dir_copies
+            .values()
+            .copied()
+            .fold(self.copies, u32::max)
+    }
 }
 
 fn default_keep_versions() -> u64 {
@@ -856,6 +880,17 @@ impl Client {
             site: None,
             storage_only: None,
             keep_versions_secs: None,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Give a directory its own number of copies (`None`: back to the filesystem's), on every member.
+    pub fn set_dir_copies(&self, path: &str, copies: Option<u32>) -> Result<(), Error> {
+        match self.call(&Request::SetDirCopies {
+            path: path.into(),
+            copies,
         })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),

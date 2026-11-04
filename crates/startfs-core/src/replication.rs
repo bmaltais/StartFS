@@ -216,6 +216,7 @@ fn retry_delay(silent: &HashMap<MemberId, Nanos>, view: &View<'_>, peer: MemberI
 /// is covered for up to N copies, so the chunk does not go degraded for the night.
 fn standins_needed(
     view: &View<'_>,
+    copies: u32,
     targets: &[MemberId],
     holders: &BTreeSet<MemberId>,
     held: bool,
@@ -226,10 +227,7 @@ fn standins_needed(
         .iter()
         .filter(|t| **t != view.me && !view.down.contains(*t) && !holders.contains(*t))
         .count() as u32;
-    let needed = view
-        .copies
-        .min(MIN_COPIES)
-        .saturating_sub(reachable + coming);
+    let needed = copies.min(MIN_COPIES).saturating_sub(reachable + coming);
     let awake = holders
         .iter()
         .filter(|h| !view.sleeping.contains(*h))
@@ -245,7 +243,7 @@ fn standins_needed(
         .filter(|m| view.sleeping.contains(*m))
         .collect::<HashSet<_>>()
         .len() as u32;
-    needed.max(asleep.min(view.copies.saturating_sub(awake + awake_coming)))
+    needed.max(asleep.min(copies.saturating_sub(awake + awake_coming)))
 }
 
 /// Whether a chunk held here is only waiting for peers to say who holds it: an ask went out
@@ -281,6 +279,11 @@ impl Replicator {
             state: Mutex::new(State::default()),
             heal: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// How many copies `id` is wanted on: its directories' own number, or the filesystem's.
+    fn copies_of(&self, view: &View<'_>, id: &ChunkId) -> u32 {
+        self.fs.wanted_copies(id, view.copies)
     }
 
     /// This node's replica of `id` is gone (found corrupt and deleted): get a
@@ -359,6 +362,18 @@ impl Replicator {
         }
     }
 
+    /// Look again at the chunks held here that are now wanted on a different number of copies
+    /// (a directory's entry changed, or a file moved to another directory).
+    fn track_changed_wants(&self, st: &mut State) {
+        for id in self.fs.take_changed_wants() {
+            if st.tracks.contains_key(&id) || self.fs.has_replica(&id) {
+                let track = st.tracks.entry(id).or_default();
+                track.settled = false;
+                track.wake = 0;
+            }
+        }
+    }
+
     /// Drop the staged chunks no file refers to any more (a build's temporary files, an
     /// overwritten file): pushing them to peers only for the garbage collector to remove them
     /// there is wasted work. Like the collector, this counts only the chunks the visible tree
@@ -431,13 +446,14 @@ impl Replicator {
             if st.tracks.contains_key(&id) {
                 continue;
             }
-            let was = place(&id, &old_members, old.copies, &old_skip);
-            let now = place(&id, view.members, view.copies, &new_skip);
+            let copies = self.copies_of(view, &id);
+            let was = place(&id, &old_members, copies, &old_skip);
+            let now = place(&id, view.members, copies, &new_skip);
             let holders: BTreeSet<MemberId> =
                 now.iter().copied().filter(|m| *m != view.me).collect();
             if was != now
                 || !now.contains(&view.me)
-                || standins_needed(view, &now, &holders, true) > 0
+                || standins_needed(view, copies, &now, &holders, true) > 0
             {
                 st.tracks.insert(id, Track::default());
             }
@@ -464,6 +480,10 @@ impl Replicator {
             self.replan(&mut st, view, epoch);
         }
         self.track_staged(&mut st);
+        if self.fs.has_dir_copies() {
+            self.fs.refresh_used();
+        }
+        self.track_changed_wants(&mut st);
         self.sweep_unreferenced(&mut st, view.now);
         // Earn this round's share of the repair rate (at most one second's worth).
         let earned = st.allowance_at.map_or(i64::MAX, |at| {
@@ -572,7 +592,8 @@ impl Replicator {
             }
         }
         let skip: HashSet<MemberId> = st.full.union(view.lost).copied().collect();
-        let mut targets = place(id, view.members, view.copies, &skip);
+        let copies = self.copies_of(view, id);
+        let mut targets = place(id, view.members, copies, &skip);
         if staged
             && targets.contains(&view.me)
             && !self.fs.has_replica(id)
@@ -585,7 +606,7 @@ impl Replicator {
         let track = st.tracks.get_mut(id).expect("tracked");
         track.queued_at.get_or_insert(view.now);
         let mut held = self.fs.has_replica(id);
-        let needed = standins_needed(view, &targets, &track.holders, held);
+        let needed = standins_needed(view, copies, &targets, &track.holders, held);
         if needed > 0 {
             let out: HashSet<MemberId> = skip
                 .union(view.down)
@@ -744,7 +765,7 @@ impl Replicator {
             let replicas = track.holders.len() as u32 + u32::from(self.fs.has_replica(id));
             // With fewer copies than wanted the chunk stays listed as
             // degraded: everything placement allows has been done.
-            if replicas >= view.copies {
+            if replicas >= copies {
                 st.tracks.remove(id);
             } else {
                 track.settled = true;
@@ -844,7 +865,7 @@ impl Replicator {
             if t.heard
                 && !t.settled
                 && mine
-                && replicas < view.copies
+                && replicas < self.copies_of(view, id)
                 && self.fs.has_replica(id)
                 && !awaiting(t, view, &st.silent)
             {
@@ -887,7 +908,7 @@ impl Replicator {
         by_member.into_iter().max_by_key(|(m, n)| (*n, *m))
     }
 
-    /// Chunks on fewer than `view.copies` nodes, as far as this node knows,
+    /// Chunks on fewer nodes than they are wanted on, as far as this node knows,
     /// counted by their copies. Each chunk is counted by one member (once its
     /// holders agree who), so the counts of all members add up.
     pub fn unreplicated(&self, view: &View<'_>) -> Vec<Shortfall> {
@@ -919,7 +940,7 @@ impl Replicator {
             // reached may not be tracking it. Around a membership change both
             // can count it, for a moment.
             let mine = !held || is_steward(id, view.me, t.holders.iter().copied());
-            if copies < view.copies && mine {
+            if copies < self.copies_of(view, id) && mine {
                 *by_copies.entry(copies).or_default() += 1;
             }
         }

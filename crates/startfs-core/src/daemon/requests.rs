@@ -79,6 +79,10 @@ impl Daemon {
                 }
                 Response::Done
             }
+            Request::SetDirCopies { path, copies } => {
+                self.set_dir_copies(&self.fs_path(&path), copies)?;
+                Response::Done
+            }
             Request::Revoke { token } => {
                 self.revoke_token(&token)?;
                 Response::Done

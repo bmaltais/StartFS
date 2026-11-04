@@ -127,6 +127,12 @@ impl Daemon {
                     m.merge_keep_versions(secs, rev);
                 }
             }
+            Message::DirCopies { entries, rev } => {
+                let mut m = self.membership.lock().unwrap();
+                if m.is_member_endpoint(from) {
+                    m.merge_dir_copies(entries, rev);
+                }
+            }
             Message::Members(list) => {
                 let mut m = self.membership.lock().unwrap();
                 if m.is_member_endpoint(from) && m.merge(list) {
