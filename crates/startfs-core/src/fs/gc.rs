@@ -48,13 +48,8 @@ impl LocalFs {
         // loses the chunks of the file it brings back.
         let mut doomed: Vec<ChunkId> = Vec::new();
         let report = self.run(true, |t| {
-            let mut referenced: HashSet<ChunkId> = HashSet::new();
-            for row in t.inodes.iter().map_err(db)? {
-                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
-                    referenced.extend(refs.into_iter().map(|r| r.id));
-                }
-            }
-            referenced.extend(self.pinned.lock().unwrap().keys().copied());
+            let mut referenced = tree_chunks(&t.inodes)?;
+            referenced.extend(self.pins.held());
             let versioned = t.version_chunks(now, self.window(), true)?;
             let only_versions = versioned
                 .iter()
@@ -136,12 +131,7 @@ impl LocalFs {
         }
         let (now, window) = (self.clock.now(), self.window());
         let used = self.run(false, |t| {
-            let mut used: HashSet<ChunkId> = HashSet::new();
-            for row in t.inodes.iter().map_err(db)? {
-                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
-                    used.extend(refs.into_iter().map(|r| r.id));
-                }
-            }
+            let mut used = tree_chunks(&t.inodes)?;
             used.extend(t.version_chunks(now, window, false)?.into_keys());
             Ok(used)
         });
@@ -165,13 +155,8 @@ impl LocalFs {
     /// tree under the same lock, so a chunk that is about to be referenced is never taken for an orphan.
     pub fn drop_unreferenced(&self, ids: &[ChunkId]) -> FsResult<Vec<ChunkId>> {
         let orphans = self.run(true, |t| {
-            let mut referenced: HashSet<ChunkId> = HashSet::new();
-            for row in t.inodes.iter().map_err(db)? {
-                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
-                    referenced.extend(refs.into_iter().map(|r| r.id));
-                }
-            }
-            referenced.extend(self.pinned.lock().unwrap().keys().copied());
+            let mut referenced = tree_chunks(&t.inodes)?;
+            referenced.extend(self.pins.held());
             let mut orphans: Vec<ChunkId> = ids
                 .iter()
                 .filter(|id| !referenced.contains(*id) && self.has_staged(id))
@@ -192,59 +177,30 @@ impl LocalFs {
     }
 
     /// Remove the chunk files of chunks found unreferenced by a transaction that has since
-    /// committed, unless a write has taken hold of one meanwhile. A write that stores a chunk
-    /// already on disk skips the write, so a removal that had not looked again would delete
-    /// the chunk the file it just committed points at.
-    ///
-    /// The look (which chunks the tree refers to) runs without the pin lock, so writes go on.
-    /// Removal goes in small batches under the lock. A write pins before it stores and unpins
-    /// only once its file refers to the chunks, so a chunk that was unpinned and unreferenced
-    /// at the look, and has not been pinned since, is still unused: the chunks pinned since
-    /// are left for a later pass.
+    /// committed, unless a write has taken hold of one meanwhile (see [`super::pins`]).
     fn remove_unused(&self, ids: &[ChunkId], remove: impl Fn(&ChunkId)) -> FsResult<()> {
-        const BATCH: usize = 128;
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let _alone = self.removing.lock().unwrap();
-        let pinned_then = {
-            let pinned = self.pinned.lock().unwrap();
-            *self.pin_log.lock().unwrap() = Some(HashSet::new());
-            pinned.clone()
-        };
-        let mut unused: HashSet<ChunkId> = ids
-            .iter()
-            .filter(|id| !pinned_then.contains_key(*id))
-            .copied()
-            .collect();
-        let looked = self.view(|v| {
-            for row in v.inodes.iter().map_err(db)? {
-                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
-                    for r in refs {
-                        unused.remove(&r.id);
+        self.pins.remove_unused(
+            ids,
+            |unused| {
+                self.view(|v| {
+                    for id in tree_chunks(&v.inodes)? {
+                        unused.remove(&id);
                     }
-                }
-            }
-            Ok(())
-        });
-        if looked.is_err() {
-            *self.pin_log.lock().unwrap() = None;
-            return looked;
-        }
-        for batch in ids.chunks(BATCH) {
-            {
-                let _pinned = self.pinned.lock().unwrap();
-                let log = self.pin_log.lock().unwrap();
-                let log = log.as_ref().expect("set above");
-                (batch.iter())
-                    .filter(|id| unused.contains(*id) && !log.contains(*id))
-                    .for_each(&remove);
-            }
-            // The lock is not fair: without a pause this thread takes it straight back and a
-            // write waiting to pin starves until the whole removal is done.
-            std::thread::sleep(Duration::from_micros(200));
-        }
-        *self.pin_log.lock().unwrap() = None;
-        Ok(())
+                    Ok(())
+                })
+            },
+            remove,
+        )
     }
+}
+
+/// The chunks the files in the visible tree refer to.
+fn tree_chunks(inodes: &impl ReadableTable<u64, &'static [u8]>) -> FsResult<HashSet<ChunkId>> {
+    let mut chunks = HashSet::new();
+    for row in inodes.iter().map_err(db)? {
+        if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
+            chunks.extend(refs.into_iter().map(|r| r.id));
+        }
+    }
+    Ok(chunks)
 }
