@@ -241,6 +241,9 @@ impl LocalFs {
     pub(super) fn pin(&self, ids: impl IntoIterator<Item = ChunkId>) -> Pinned<'_> {
         let ids: Vec<ChunkId> = ids.into_iter().collect();
         let mut pinned = self.pinned.lock().unwrap();
+        if let Some(log) = self.pin_log.lock().unwrap().as_mut() {
+            log.extend(&ids);
+        }
         for id in &ids {
             *pinned.entry(*id).or_default() += 1;
         }
