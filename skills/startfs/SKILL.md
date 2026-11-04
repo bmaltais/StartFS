@@ -156,6 +156,15 @@ too, shorten the window first (`startfs config --keep-versions 0`), with the sam
 versions are then gone. Run it again if a daemon restarted meanwhile. Every member
 must run protocol 12 (release 1.5.0 or newer).
 
+## Where data lives: copies per directory, keep local
+
+`startfs copies PATH N` gives a directory its own number of copies on every member (scratch 1,
+photos 3); `--clear` follows the filesystem's again. A chunk files in two places use gets the most
+either asks for. Lowering waits for a healthy cluster. It needs protocol 20; `status` lists the
+entries. For one machine only: `startfs keep PATH` pins a file or directory in that node's cache
+(fetching what it lacks) so it reads offline, `--release` lets it go, and `startfs free` drops the
+rest of that node's cache.
+
 ## Retire or remove a machine
 
 - Planned exit: `startfs leave` on that machine hands its data to the others first.
