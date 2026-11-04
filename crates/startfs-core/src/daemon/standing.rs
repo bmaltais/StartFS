@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+pub(super) const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// Since when a member counts as unseen here, for the long waits (taking it for asleep, giving
 /// it up for lost): when this daemon last heard it, or, when it has not heard it since it
@@ -68,6 +68,13 @@ fn node_state(leaving: bool, up: bool, unknown: bool, lost: bool, paused: bool) 
     }
 }
 
+/// The members judged lost and the members paused for an upgrade, for [`Liveness::peer_state`].
+#[derive(Clone, Copy)]
+pub(super) struct Judged<'a> {
+    pub lost: &'a HashSet<MemberId>,
+    pub paused: &'a HashSet<MemberId>,
+}
+
 /// Which members the replicator should treat as lost, down, asleep, or kept for stand-ins.
 pub(super) struct Verdicts {
     pub lost: HashSet<MemberId>,
@@ -85,9 +92,11 @@ struct Memory {
     /// When each member was last seen asleep (unseen past the stand-in delay); the extra copies
     /// made for it are kept for the stand-in retention after.
     slept: HashMap<MemberId, Nanos>,
-    /// When the cluster was last looked at, and until when a long gap since then (this node
-    /// was asleep itself) makes every peer look unseen.
-    looked: (Option<Nanos>, Nanos),
+    /// When the cluster was last looked at.
+    looked_at: Option<Nanos>,
+    /// Until when a long gap since the last look (this node was asleep itself) makes every
+    /// peer look unseen.
+    settling_until: Nanos,
 }
 
 /// The liveness of the other members. Every method takes `now`, so a test can drive time.
@@ -150,19 +159,22 @@ impl Liveness {
         now.saturating_sub(seen) < STANDIN_AFTER.as_nanos() as u64
     }
 
-    /// The state `status` and `activity` show for `member`. This node (`is_self`) is always up.
-    pub fn state(
-        &self,
-        member: &Member,
-        is_self: bool,
-        lost: bool,
-        paused: bool,
-        now: Nanos,
-    ) -> NodeState {
+    /// The state `status` and `activity` show for another member. `judged` holds the verdicts
+    /// from the same [`verdicts`](Self::verdicts) pass, so a caller names no flag by position.
+    pub fn peer_state(&self, member: &Member, judged: Judged<'_>, now: Nanos) -> NodeState {
         let heard = self.last_heard(member.endpoint);
-        let up = is_self || is_up(heard, now);
-        let unknown = !is_self && is_unknown(heard, self.started, now);
-        node_state(member.leaving, up, unknown, lost, paused)
+        node_state(
+            member.leaving,
+            is_up(heard, now),
+            is_unknown(heard, self.started, now),
+            judged.lost.contains(&member.id),
+            judged.paused.contains(&member.id),
+        )
+    }
+
+    /// The state shown for this node itself: always up unless it is leaving.
+    pub fn own_state(member: &Member) -> NodeState {
+        node_state(member.leaving, true, false, false, false)
     }
 
     /// Lost, down, asleep and kept-for-stand-ins members, with the paused ones counted as none
@@ -209,14 +221,13 @@ impl Liveness {
         // After a long gap this node was likely asleep itself, so every peer looks unseen until
         // their hellos arrive: nobody is taken for asleep then.
         let stalled = m
-            .looked
-            .0
+            .looked_at
             .is_some_and(|at| now.saturating_sub(at) >= STANDIN_AFTER.as_nanos() as u64);
-        m.looked.0 = Some(now);
+        m.looked_at = Some(now);
         if stalled {
-            m.looked.1 = now + DOWN_AFTER.as_nanos() as u64;
+            m.settling_until = now + DOWN_AFTER.as_nanos() as u64;
         }
-        let settling = now < m.looked.1;
+        let settling = now < m.settling_until;
         let sleeping = if settling {
             HashSet::new()
         } else {
@@ -280,7 +291,7 @@ impl Liveness {
         Some(Duration::from_nanos(left).as_secs())
     }
 
-    /// When each member in `members` (but `me`) was last heard, by member id.
+    /// When each member in `members` that was ever heard was last heard, by member id.
     pub fn heard_by_member(&self, members: &[Member]) -> HashMap<MemberId, Nanos> {
         let m = self.memory.lock().unwrap();
         members
@@ -387,7 +398,8 @@ impl Liveness {
         }
     }
 
-    /// Run `f` on what `endpoint` last gossiped, if anything.
+    /// Run `f` on what `endpoint` last gossiped, if anything. `f` runs under the lock: it must
+    /// not call back into `Liveness`.
     pub fn with_health<R>(&self, endpoint: NodeId, f: impl FnOnce(&Health) -> R) -> Option<R> {
         let m = self.memory.lock().unwrap();
         m.peer_health.get(&endpoint).map(|(_, h)| f(h))
@@ -430,184 +442,4 @@ fn last_report(
             })
         });
     own.into_iter().chain(relayed).min_by_key(|r| r.secs_ago)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const S: Nanos = 1_000_000_000;
-    const START: Nanos = 1_000 * S;
-    const GRACE: u64 = 3600;
-
-    fn member(id: u32) -> Member {
-        Member {
-            id: MemberId(id),
-            endpoint: NodeId(id),
-            addr: String::new(),
-            offer_bytes: 1,
-            weight_bytes: 0,
-            site: String::new(),
-            storage_only: false,
-            rev: 0,
-            leaving: false,
-            removed: false,
-        }
-    }
-
-    fn secs(n: u64) -> Nanos {
-        n * S
-    }
-
-    fn none() -> HashSet<MemberId> {
-        HashSet::new()
-    }
-
-    #[test]
-    fn a_member_heard_lately_is_up_and_goes_down_after_the_delay() {
-        let l = Liveness::new(START);
-        l.heard(NodeId(2), START);
-        assert!(l.is_up(NodeId(2), START + DOWN_AFTER.as_nanos() as Nanos - 1));
-        assert!(!l.is_up(NodeId(2), START + DOWN_AFTER.as_nanos() as Nanos));
-    }
-
-    #[test]
-    fn state_follows_the_order_leaving_up_unknown_paused_lost_down() {
-        let l = Liveness::new(START);
-        let mut m = member(2);
-        // Not heard since the start, and the start is recent: unknown.
-        assert_eq!(
-            l.state(&m, false, false, false, START + secs(1)),
-            NodeState::Unknown
-        );
-        let late = START + DOWN_AFTER.as_nanos() as Nanos + secs(1);
-        assert_eq!(l.state(&m, false, false, false, late), NodeState::Down);
-        assert_eq!(l.state(&m, false, false, true, late), NodeState::Upgrading);
-        assert_eq!(l.state(&m, false, true, false, late), NodeState::Lost);
-        l.heard(NodeId(2), late);
-        assert_eq!(l.state(&m, false, true, true, late), NodeState::Online);
-        m.leaving = true;
-        assert_eq!(l.state(&m, false, false, false, late), NodeState::Leaving);
-        // This node is always up, whatever it heard of itself.
-        assert_eq!(
-            l.state(&member(1), true, false, false, late),
-            NodeState::Online
-        );
-    }
-
-    #[test]
-    fn unseen_past_the_grace_is_lost_and_past_the_down_delay_is_down() {
-        let l = Liveness::new(START);
-        let members = [member(1), member(2)];
-        l.heard(NodeId(2), START);
-        let now = START + secs(GRACE);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 0, &none(), now);
-        assert!(v.lost.contains(&MemberId(2)));
-        assert!(v.down.contains(&MemberId(2)));
-        assert!(!v.lost.contains(&MemberId(1)), "this node is never lost");
-        let v = l.verdicts(
-            &members,
-            MemberId(1),
-            GRACE,
-            0,
-            &none(),
-            START + secs(GRACE - 1),
-        );
-        assert!(v.lost.is_empty());
-        assert!(v.down.contains(&MemberId(2)));
-    }
-
-    #[test]
-    fn a_paused_member_is_neither_down_nor_asleep() {
-        let l = Liveness::new(START);
-        let members = [member(1), member(2)];
-        l.heard(NodeId(2), START);
-        let paused: HashSet<_> = [MemberId(2)].into();
-        let now = START + secs(2 * 3600);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 7, &paused, now);
-        assert!(v.down.is_empty() && v.sleeping.is_empty());
-    }
-
-    #[test]
-    fn asleep_members_are_remembered_for_the_retention_then_dropped() {
-        let l = Liveness::new(START);
-        let members = [member(1), member(2)];
-        l.heard(NodeId(2), START);
-        // A first look, then another once the member has been unseen past the stand-in delay.
-        let t1 = START + secs(10);
-        l.verdicts(&members, MemberId(1), GRACE, 7, &none(), t1);
-        let t2 = START + STANDIN_AFTER.as_nanos() as Nanos - secs(1);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 7, &none(), t2);
-        assert!(v.sleeping.is_empty());
-        let t3 = START + STANDIN_AFTER.as_nanos() as Nanos + secs(10);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 7, &none(), t3);
-        assert!(v.sleeping.contains(&MemberId(2)));
-        assert!(v.kept.contains(&MemberId(2)));
-        assert!(l.standin_secs_left(MemberId(2), 7, t3).is_some());
-        // It is back, and a week later the extra copies are no longer kept for it.
-        let after = t3 + secs(8 * 24 * 3600);
-        l.heard(NodeId(2), after);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 7, &none(), after);
-        assert!(v.kept.is_empty() && l.standin_secs_left(MemberId(2), 7, after).is_none());
-    }
-
-    #[test]
-    fn after_a_long_gap_nobody_is_taken_for_asleep_until_hellos_return() {
-        let l = Liveness::new(START);
-        let members = [member(1), member(2)];
-        l.heard(NodeId(2), START);
-        l.verdicts(&members, MemberId(1), GRACE, 7, &none(), START + secs(10));
-        // This node was suspended: the next look comes long after the last.
-        let woke = START + secs(3 * 3600);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 7, &none(), woke);
-        assert!(v.sleeping.is_empty(), "settling after our own sleep");
-    }
-
-    #[test]
-    fn a_restarted_daemon_relearns_how_long_a_member_has_been_gone_from_its_peers() {
-        let l = Liveness::new(START + secs(7200));
-        let members = [member(1), member(2), member(3)];
-        let now = START + secs(7200) + secs(5);
-        // Peer 3 says it saw member 2 an hour and a half ago.
-        let health = Health {
-            seen: vec![Sighting {
-                member: MemberId(2),
-                secs_ago: 5400,
-            }],
-            ..Health::default()
-        };
-        l.record_health(NodeId(3), health, Some(MemberId(1)), now);
-        let v = l.verdicts(&members, MemberId(1), GRACE, 0, &none(), now);
-        assert!(
-            v.lost.contains(&MemberId(2)),
-            "lost by what the peer relayed"
-        );
-        assert!(!v.lost.contains(&MemberId(3)) || l.is_up(NodeId(3), now));
-        // What it passes on never makes a member look more recently seen than relayed.
-        let s = l.sightings(&members, Some(MemberId(1)), now);
-        let two = s.iter().find(|x| x.member == MemberId(2)).unwrap();
-        assert!(two.secs_ago >= 5400);
-    }
-
-    #[test]
-    fn what_a_peer_gossiped_of_sleep_never_names_this_node() {
-        let l = Liveness::new(START);
-        let health = Health {
-            slept: vec![
-                Sighting {
-                    member: MemberId(1),
-                    secs_ago: 10,
-                },
-                Sighting {
-                    member: MemberId(2),
-                    secs_ago: 10,
-                },
-            ],
-            ..Health::default()
-        };
-        l.record_health(NodeId(3), health, Some(MemberId(1)), START + secs(100));
-        let slept = l.slept_sightings(START + secs(100));
-        assert_eq!(slept.len(), 1);
-        assert_eq!(slept[0].member, MemberId(2));
-    }
 }

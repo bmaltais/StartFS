@@ -1,5 +1,6 @@
 //! The activity view: this node's recent rates, queues and resource use.
 
+use super::standing::Judged;
 use super::{Daemon, UNCLAIMED_REPLY_BYTES, answer_bytes};
 use crate::activity::{ActivityReport, PeerActivity, QueueActivity, Structure, Structures};
 use crate::error::Error;
@@ -41,11 +42,12 @@ impl Daemon {
                 .filter(|m| Some(m.id) != me)
                 .map(|m| PeerActivity {
                     member: m.id,
-                    state: self.liveness.state(
+                    state: self.liveness.peer_state(
                         &m,
-                        false,
-                        lost.contains(&m.id),
-                        paused.contains(&m.id),
+                        Judged {
+                            lost: &lost,
+                            paused: &paused,
+                        },
                         now,
                     ),
                     in_flight: in_flight.get(&m.id).copied().unwrap_or(0),

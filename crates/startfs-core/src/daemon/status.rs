@@ -14,7 +14,7 @@ use crate::protocol::{Health, Message};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+use super::standing::{Judged, Liveness, NANOS_PER_SEC};
 
 /// Is the data safe right now? Copies beyond what the storage nodes allow are
 /// not expected, so a file is only a worry if it has fewer than it could have.
@@ -252,13 +252,18 @@ impl Daemon {
                         stranded.push(r);
                     }
                 }
-                let state = self.liveness.state(
-                    &m,
-                    is_self,
-                    lost.contains(&m.id),
-                    paused.contains(&m.id),
-                    now,
-                );
+                let state = if is_self {
+                    Liveness::own_state(&m)
+                } else {
+                    self.liveness.peer_state(
+                        &m,
+                        Judged {
+                            lost: &lost,
+                            paused: &paused,
+                        },
+                        now,
+                    )
+                };
                 let last_seen = (!up).then(|| self.liveness.last_seen(&m, now));
                 MemberStatus {
                     id: m.id,
