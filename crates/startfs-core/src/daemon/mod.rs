@@ -14,7 +14,7 @@ mod standing;
 mod status;
 mod upgrade;
 
-use self::standing::is_up;
+use self::standing::{Liveness, Verdicts};
 use crate::activity::{Activity, CountingTransport, Phase};
 use crate::chunkstore::ChunkId;
 use crate::clock::Clock;
@@ -23,13 +23,13 @@ use crate::control::NodeStats;
 use crate::daemon::latency::PeerLatency;
 use crate::error::Error;
 use crate::fs::{ChunkSource, GcReport, LocalFs, NodeConfig};
-use crate::members::{Member, MemberId, Membership};
+use crate::members::{MemberId, Membership};
 use crate::net::{NodeId, Transport};
 use crate::oplog::{Entry, Frontier};
 use crate::ops::FsResult;
 use crate::ops::Nanos;
 use crate::power::{MainsPower, PowerSource};
-use crate::protocol::{DecodeError, Health, Message, Replica};
+use crate::protocol::{DecodeError, Message, Replica};
 use crate::replication::{Replicator, View};
 use crate::resources::{ResourceSource, SystemResources};
 use crate::scrub::Scrubber;
@@ -156,14 +156,8 @@ pub struct Daemon {
     /// The answer to the join request in flight, if it has arrived.
     join_reply: Mutex<Option<Result<crate::members::Admission, Error>>>,
     wait: Mutex<WaitHook>,
-    /// When each member was last seen asleep (unseen past the stand-in delay);
-    /// the extra copies made for it are kept for the stand-in retention after.
-    slept: Mutex<HashMap<MemberId, Nanos>>,
-    /// When the cluster was last looked at, and until when a long gap since
-    /// then (this node was asleep itself) makes every peer look unseen.
-    looked: Mutex<(Option<Nanos>, Nanos)>,
-    /// When each peer endpoint was last heard from.
-    heard: Mutex<HashMap<NodeId, Nanos>>,
+    /// What this node knows of the other members' liveness (ADR 0003).
+    liveness: Liveness,
     /// The address each member's endpoint was last announced to the transport at, and when.
     announced: Mutex<HashMap<NodeId, (String, Nanos)>>,
     last_gossip: Mutex<Option<Nanos>>,
@@ -172,8 +166,6 @@ pub struct Daemon {
     behind: Mutex<HashSet<MemberId>>,
     /// When the last tick began.
     last_tick: Mutex<Option<Nanos>>,
-    /// The latest replication health each peer gossiped, and when it arrived.
-    peer_health: Mutex<HashMap<NodeId, (Nanos, Health)>>,
     /// Storage figures peers sent in answer to the query in flight.
     stats_replies: Mutex<HashMap<NodeId, NodeStats>>,
     last_gc: Mutex<Option<Nanos>>,
@@ -181,8 +173,6 @@ pub struct Daemon {
     gc: Mutex<GcProgress>,
     last_compact: Mutex<Option<Nanos>>,
     last_release: Mutex<Option<Nanos>>,
-    /// When this daemon started: how long a never-heard member has been unseen.
-    started: Nanos,
     /// Answers to chunk requests, by peer and chunk, for the reader waiting on
     /// them, with the time each arrived.
     chunk_replies: Mutex<HashMap<(NodeId, ChunkId), (Nanos, ChunkAnswer)>>,
@@ -335,20 +325,16 @@ impl Daemon {
                 transport: Mutex::new(None),
                 syncer: Mutex::new(None),
                 join_reply: Mutex::new(None),
-                slept: Mutex::new(HashMap::new()),
-                looked: Mutex::new((None, 0)),
-                heard: Mutex::new(HashMap::new()),
+                liveness: Liveness::new(started),
                 announced: Mutex::new(HashMap::new()),
                 last_gossip: Mutex::new(None),
                 behind: Mutex::new(HashSet::new()),
                 last_tick: Mutex::new(None),
-                peer_health: Mutex::new(HashMap::new()),
                 stats_replies: Mutex::new(HashMap::new()),
                 last_gc: Mutex::new(None),
                 gc: Mutex::new(GcProgress::default()),
                 last_compact: Mutex::new(None),
                 last_release: Mutex::new(None),
-                started,
                 wait: Mutex::new(Arc::new(|| {
                     std::thread::sleep(std::time::Duration::from_millis(10))
                 })),
@@ -478,7 +464,7 @@ impl Daemon {
                 decoded,
                 Err(DecodeError::VersionMismatch { .. }) | Ok(Message::UpgradeNotice(_))
             ) {
-                self.heard.lock().unwrap().insert(from, self.clock.now());
+                self.liveness.heard(from, self.clock.now());
             }
             match decoded {
                 Ok(Message::Entries(more)) => entries.entry(from).or_default().extend(more),
@@ -591,15 +577,11 @@ impl Daemon {
             (m.peers(), m.records(), m.token_records(), m.key_wraps())
         };
         let now = self.clock.now();
-        {
-            // Frames still arriving while the tick is stuck count as heard.
-            let mut heard = self.heard.lock().unwrap();
-            for p in &peers {
-                if let Some(ago) = transport.last_heard(*p) {
-                    let at = now.saturating_sub(ago.as_nanos() as u64);
-                    let seen = heard.entry(*p).or_insert(at);
-                    *seen = (*seen).max(at);
-                }
+        // Frames still arriving while the tick is stuck count as heard.
+        for p in &peers {
+            if let Some(ago) = transport.last_heard(*p) {
+                self.liveness
+                    .heard_at(*p, now.saturating_sub(ago.as_nanos() as u64));
             }
         }
         let mut last = self.last_gossip.lock().unwrap();
@@ -795,19 +777,15 @@ impl Daemon {
         // A member that announced an upgrade pause is expected back: it is not counted
         // down or asleep, and is sent nothing new meanwhile.
         let paused = self.paused_members(now);
-        let lost = self.unseen_members(&members, me, grace, true, now);
-        let mut down =
-            self.unseen_members(&members, me, grace.min(DOWN_AFTER.as_secs()), false, now);
-        down.retain(|m| !paused.contains(m));
-        let (mut sleeping, kept) = self.sleepers(&members, me, grace, standin_days, now);
-        sleeping.retain(|m| !paused.contains(m));
-        let heard: HashMap<MemberId, Nanos> = {
-            let heard = self.heard.lock().unwrap();
-            members
-                .iter()
-                .filter_map(|m| Some((m.id, *heard.get(&m.endpoint)?)))
-                .collect()
-        };
+        let Verdicts {
+            lost,
+            down,
+            sleeping,
+            kept,
+        } = self
+            .liveness
+            .verdicts(&members, me, grace, standin_days, &paused, now);
+        let heard = self.liveness.heard_by_member(&members);
         let mut behind = self.behind.lock().unwrap().clone();
         behind.extend(&paused);
         Some(f(&View {
@@ -829,90 +807,6 @@ impl Daemon {
             },
             now,
         }))
-    }
-
-    /// The members asleep now (unseen for the stand-in delay) and those seen
-    /// asleep within the retention, which includes the former.
-    fn sleepers(
-        &self,
-        members: &[Member],
-        me: MemberId,
-        grace: u64,
-        standin_days: u64,
-        now: Nanos,
-    ) -> (HashSet<MemberId>, HashSet<MemberId>) {
-        if standin_days == 0 {
-            return (HashSet::new(), HashSet::new());
-        }
-        // After a long gap this node was likely asleep itself, so every peer
-        // looks unseen until their hellos arrive: nobody is taken for asleep then.
-        let settling = {
-            let mut looked = self.looked.lock().unwrap();
-            let stalled = looked
-                .0
-                .is_some_and(|at| now.saturating_sub(at) >= STANDIN_AFTER.as_nanos() as u64);
-            looked.0 = Some(now);
-            if stalled {
-                looked.1 = now + DOWN_AFTER.as_nanos() as u64;
-            }
-            now < looked.1
-        };
-        let sleeping = if settling {
-            HashSet::new()
-        } else {
-            self.unseen_members(members, me, grace.min(STANDIN_AFTER.as_secs()), true, now)
-        };
-        let retention = Duration::from_secs(standin_days * 24 * 3600).as_nanos() as u64;
-        let mut slept = self.slept.lock().unwrap();
-        for m in &sleeping {
-            slept.insert(*m, now);
-        }
-        slept.retain(|_, at| now.saturating_sub(*at) < retention);
-        let kept = slept.keys().copied().collect();
-        (sleeping, kept)
-    }
-
-    /// Seconds the extra copies made for `member` are still kept, if it was
-    /// seen asleep within the retention.
-    pub(super) fn standin_secs_left(
-        &self,
-        member: MemberId,
-        standin_days: u64,
-        now: Nanos,
-    ) -> Option<u64> {
-        let retention = Duration::from_secs(standin_days * 24 * 3600).as_nanos() as u64;
-        let at = *self.slept.lock().unwrap().get(&member)?;
-        let left = retention.checked_sub(now.saturating_sub(at))?;
-        Some(Duration::from_nanos(left).as_secs())
-    }
-
-    /// Members unseen for `secs`; with `relayed`, by what peers relayed too
-    /// ([`standing::unseen_since`]), for the long waits only.
-    fn unseen_members(
-        &self,
-        members: &[Member],
-        me: MemberId,
-        grace: u64,
-        relayed: bool,
-        now: Nanos,
-    ) -> HashSet<MemberId> {
-        let heard = self.heard.lock().unwrap();
-        let peer_health = self.peer_health.lock().unwrap();
-        let grace = Duration::from_secs(grace).as_nanos() as u64;
-        members
-            .iter()
-            .filter(|m| m.id != me)
-            .filter(|m| {
-                let own = heard.get(&m.endpoint).copied();
-                let seen = if relayed {
-                    standing::unseen_since(own, m.id, &peer_health, self.started)
-                } else {
-                    own.unwrap_or(self.started)
-                };
-                now.saturating_sub(seen) >= grace
-            })
-            .map(|m| m.id)
-            .collect()
     }
 
     /// Exchange logs with exactly the other members.
@@ -999,16 +893,19 @@ impl Daemon {
     /// before those that are not up, and how many of them are up.
     fn ranked_peers(&self) -> (Vec<NodeId>, usize) {
         let mut peers = self.membership.lock().unwrap().peers();
-        let heard = self.heard.lock().unwrap().clone();
         let now = self.clock.now();
-        let down = |p: &NodeId| !is_up(heard.get(p).copied(), now);
+        let heard: HashMap<NodeId, Option<Nanos>> = peers
+            .iter()
+            .map(|p| (*p, self.liveness.last_heard(*p)))
+            .collect();
+        let down = |p: &NodeId| !self.liveness.is_up(*p, now);
         {
             let latency = self.latency.lock().unwrap();
             peers.sort_by_key(|p| {
                 (
                     down(p),
                     latency.estimate(*p, now),
-                    std::cmp::Reverse(heard.get(p)),
+                    std::cmp::Reverse(heard[p]),
                 )
             });
         }
