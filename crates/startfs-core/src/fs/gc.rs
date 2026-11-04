@@ -176,6 +176,12 @@ impl LocalFs {
         Ok(orphans)
     }
 
+    /// Run `hook` once, in the next removal of unused chunks, after it has looked at the tree
+    /// and before it removes anything: the moment a concurrent write races it. For tests.
+    pub fn before_next_removal(&self, hook: impl FnOnce() + Send + 'static) {
+        self.pins.after_look(Box::new(hook));
+    }
+
     /// Remove the chunk files of chunks found unreferenced by a transaction that has since
     /// committed, unless a write has taken hold of one meanwhile (see [`super::pins`]).
     fn remove_unused(&self, ids: &[ChunkId], remove: impl Fn(&ChunkId)) -> FsResult<()> {
