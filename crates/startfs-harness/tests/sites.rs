@@ -140,3 +140,46 @@ fn labelling_an_existing_cluster_re_places_chunks_until_it_is_site_diverse() {
     );
     assert_eq!(held[4] * 2, held.iter().sum::<u64>(), "{held:?}");
 }
+
+/// Three home nodes (0..3) and two cloud nodes (3..5), two copies: one at each site.
+fn three_home_two_cloud() -> Cluster {
+    let c = Cluster::start(5);
+    let token = c.control(0).create("home", 2).unwrap();
+    c.control(0).set_offer(BIG).unwrap();
+    c.control(0).set_site("home").unwrap();
+    for i in 1..5 {
+        let site = if i < 3 { "home" } else { "cloud" };
+        c.control(i).join_at(&token, Some(BIG), site).unwrap();
+    }
+    c.sync();
+    c
+}
+
+#[test]
+fn a_new_copy_is_made_from_a_holder_at_the_same_site() {
+    use startfs_core::protocol::Message;
+    let c = three_home_two_cloud();
+    write_files(&c, 40);
+    for _ in 0..4 {
+        c.advance(MINUTE);
+        c.sync();
+    }
+    let sent = c.network().traffic().len();
+
+    // A third copy lands at either site; one holder is at each, so the one at the new copy's
+    // site makes it.
+    c.control(1).set_copies(3).unwrap();
+    for _ in 0..20 {
+        c.advance(MINUTE);
+        c.sync();
+    }
+    let site = |n: u32| if n < 3 { "home" } else { "cloud" };
+    let mut pushes = 0;
+    for (from, to, raw) in &c.network().traffic()[sent..] {
+        if let Ok(Message::ChunkPush(_, Some(_))) = Message::decode(raw) {
+            pushes += 1;
+            assert_eq!(site(from.0), site(to.0), "{from:?} sent a copy to {to:?}");
+        }
+    }
+    assert!(pushes > 0, "no copy was made");
+}

@@ -263,6 +263,42 @@ fn awaiting(track: &Track, view: &View<'_>, silent: &HashMap<MemberId, Nanos>) -
     })
 }
 
+/// Whether this node sends `id` to `target`, given whether it would by the plain rule
+/// (`steward`). Repair prefers a source at the target's own site (ADR 0005): of the holders
+/// that are up there, one sends, and holders at other sites leave it to them. A chunk written
+/// here is pushed by this node whatever the sites, and when no holder is at the target's site
+/// the plain rule decides.
+fn steward_for(
+    view: &View<'_>,
+    target: MemberId,
+    steward: bool,
+    held_here: bool,
+    staged: bool,
+    id: &ChunkId,
+    holders: &BTreeSet<MemberId>,
+) -> bool {
+    if staged {
+        return steward;
+    }
+    let site_of = |m: MemberId| {
+        view.members
+            .iter()
+            .find(|x| x.id == m)
+            .map(|x| x.site.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let Some(site) = site_of(target) else {
+        return steward;
+    };
+    let near: Vec<MemberId> = (holders.iter().copied())
+        .filter(|h| site_of(*h) == Some(site) && !view.down.contains(h))
+        .collect();
+    if near.is_empty() {
+        return steward;
+    }
+    held_here && site_of(view.me) == Some(site) && is_steward(id, view.me, near)
+}
+
 pub fn tier(copies: u32) -> Tier {
     if copies <= 1 {
         Tier::AtRisk
@@ -644,6 +680,9 @@ impl Replicator {
         let steward = staged
             || !targets.contains(&view.me)
             || is_steward(id, view.me, track.holders.iter().copied());
+        // A chunk held again at a site where another holder has it is copied across a link
+        // that is cheap, not a long one: see `steward_for`.
+        let held_here = staged || held;
         // Whether the chunk may do more than wait for answers or retries.
         let mut blocked = false;
         for t in &targets {
@@ -653,6 +692,7 @@ impl Replicator {
             // A target that just said it lacks the chunk is sent it at once by
             // the steward; everyone else asks again only after a retry delay.
             let retry = retry_delay(&st.silent, view, *t);
+            let steward = steward_for(view, *t, steward, held_here, staged, id, &track.holders);
             let due = (steward && track.answered.contains(t))
                 || track
                     .sent

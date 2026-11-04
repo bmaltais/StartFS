@@ -307,7 +307,9 @@ filesystem) keeps N copies of every chunk on N different machines.
   Labelling or relabelling re-places chunks in the background, at the `repair_bytes_per_sec`
   rate. `startfs status` shows each member's site and warns when the copies cannot span as many
   sites as they should (a site is lost or full); writes are never refused for that, and the
-  copies move back when the site returns. See `docs/adr/0005-sites-are-declared.md`.
+  copies move back when the site returns. When a copy is re-made, a holder at the new copy's own
+  site sends it if there is one up, so repair does not cross the long link when it need not.
+  See `docs/adr/0005-sites-are-declared.md`.
 - A short outage is not a loss. A machine that is merely offline keeps working locally and
   catches up when it returns; concurrent edits to the same file become conflict copies.
 
