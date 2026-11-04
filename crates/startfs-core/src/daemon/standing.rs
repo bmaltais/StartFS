@@ -162,14 +162,27 @@ impl Liveness {
     /// The state `status` and `activity` show for another member. `judged` holds the verdicts
     /// from the same [`verdicts`](Self::verdicts) pass, so a caller names no flag by position.
     pub fn peer_state(&self, member: &Member, judged: Judged<'_>, now: Nanos) -> NodeState {
+        self.peer_standing(member, judged, now).0
+    }
+
+    /// [`peer_state`](Self::peer_state) and whether the member is up, from one reading of when
+    /// it was heard, so the two cannot disagree when a frame arrives between them.
+    pub fn peer_standing(
+        &self,
+        member: &Member,
+        judged: Judged<'_>,
+        now: Nanos,
+    ) -> (NodeState, bool) {
         let heard = self.last_heard(member.endpoint);
-        node_state(
+        let up = is_up(heard, now);
+        let state = node_state(
             member.leaving,
-            is_up(heard, now),
+            up,
             is_unknown(heard, self.started, now),
             judged.lost.contains(&member.id),
             judged.paused.contains(&member.id),
-        )
+        );
+        (state, up)
     }
 
     /// The state shown for this node itself: always up unless it is leaving.

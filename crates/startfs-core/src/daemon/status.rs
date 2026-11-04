@@ -230,7 +230,18 @@ impl Daemon {
             .into_iter()
             .map(|m| {
                 let is_self = membership.me() == Some(m.id);
-                let up = is_self || self.liveness.is_up(m.endpoint, now);
+                let (state, up) = if is_self {
+                    (Liveness::own_state(&m), true)
+                } else {
+                    self.liveness.peer_standing(
+                        &m,
+                        Judged {
+                            lost: &lost,
+                            paused: &paused,
+                        },
+                        now,
+                    )
+                };
                 // A member in its upgrade pause is back soon: what it last reported
                 // still counts and nothing about it is alarming.
                 let expected = up || paused.contains(&m.id);
@@ -252,18 +263,6 @@ impl Daemon {
                         stranded.push(r);
                     }
                 }
-                let state = if is_self {
-                    Liveness::own_state(&m)
-                } else {
-                    self.liveness.peer_state(
-                        &m,
-                        Judged {
-                            lost: &lost,
-                            paused: &paused,
-                        },
-                        now,
-                    )
-                };
                 let last_seen = (!up).then(|| self.liveness.last_seen(&m, now));
                 MemberStatus {
                     id: m.id,
