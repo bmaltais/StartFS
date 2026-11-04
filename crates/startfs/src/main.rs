@@ -303,55 +303,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Client::new(socket).revoke(rest.first().ok_or(CliError::Usage)?)?;
             Ok(())
         }
-        "config" => {
-            if let Some(bytes) = optional_size(rest, "--offer")? {
-                Client::new(socket.clone()).set_offer(bytes)?;
-            }
-            if let Some(bytes) = optional_size(rest, "--weight")? {
-                Client::new(socket.clone()).set_weight(bytes)?;
-            }
-            if let Ok(site) = flag_value(rest, "--site") {
-                Client::new(socket.clone()).set_site(&site)?;
-            }
-            if let Ok(value) = flag_value(rest, "--activity") {
-                let on = match value.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => return Err(CliError::ActivityNotOnOff),
-                };
-                Client::new(socket.clone()).set_activity(on)?;
-            }
-            let has = |flag: &str| rest.iter().any(|a| a == flag);
-            if has("--storage-only") && has("--no-storage-only") {
-                return Err(CliError::StorageOnlyBoth);
-            }
-            if has("--storage-only") || has("--no-storage-only") {
-                Client::new(socket.clone()).set_storage_only(has("--storage-only"))?;
-            }
-            if let Ok(window) = flag_value(rest, "--keep-versions") {
-                let secs =
-                    parse_duration(&window).ok_or_else(|| CliError::BadDuration(window.clone()))?;
-                Client::new(socket.clone()).set_keep_versions(secs)?;
-            }
-            if let Ok(copies) = flag_value(rest, "--copies") {
-                let copies = copies
-                    .parse::<u32>()
-                    .map_err(|_| CliError::CopiesNotANumber)?;
-                let client = Client::new(socket);
-                client.set_copies(copies)?;
-                if let Ok(s) = client.status()
-                    && s.copies_possible < copies
-                {
-                    eprintln!(
-                        "warning: {copies} copies wanted but only {} node{} can store copies, so {} will exist until more join",
-                        s.copies_possible,
-                        if s.copies_possible == 1 { "" } else { "s" },
-                        s.copies_possible,
-                    );
-                }
-            }
-            Ok(())
-        }
+        "config" => config(rest, socket),
         "status" => {
             let verbose = rest.iter().any(|a| a == "--verbose" || a == "-v");
             if rest.iter().any(|a| a == "--watch") {
@@ -603,6 +555,55 @@ fn terminal_size() -> (usize, usize) {
 /// until Ctrl-C (or SIGTERM), then give the screen and the cursor back. The daemon is asked
 /// once per refresh and only while this runs; a daemon that cannot be reached shows as a
 /// line and the watch carries on.
+fn config(rest: &[String], socket: PathBuf) -> Result<(), CliError> {
+    if let Some(bytes) = optional_size(rest, "--offer")? {
+        Client::new(socket.clone()).set_offer(bytes)?;
+    }
+    if let Some(bytes) = optional_size(rest, "--weight")? {
+        Client::new(socket.clone()).set_weight(bytes)?;
+    }
+    if let Ok(site) = flag_value(rest, "--site") {
+        Client::new(socket.clone()).set_site(&site)?;
+    }
+    if let Ok(value) = flag_value(rest, "--activity") {
+        let on = match value.as_str() {
+            "on" => true,
+            "off" => false,
+            _ => return Err(CliError::ActivityNotOnOff),
+        };
+        Client::new(socket.clone()).set_activity(on)?;
+    }
+    let has = |flag: &str| rest.iter().any(|a| a == flag);
+    if has("--storage-only") && has("--no-storage-only") {
+        return Err(CliError::StorageOnlyBoth);
+    }
+    if has("--storage-only") || has("--no-storage-only") {
+        Client::new(socket.clone()).set_storage_only(has("--storage-only"))?;
+    }
+    if let Ok(window) = flag_value(rest, "--keep-versions") {
+        let secs = parse_duration(&window).ok_or_else(|| CliError::BadDuration(window.clone()))?;
+        Client::new(socket.clone()).set_keep_versions(secs)?;
+    }
+    if let Ok(copies) = flag_value(rest, "--copies") {
+        let copies = copies
+            .parse::<u32>()
+            .map_err(|_| CliError::CopiesNotANumber)?;
+        let client = Client::new(socket);
+        client.set_copies(copies)?;
+        if let Ok(s) = client.status()
+            && s.copies_possible < copies
+        {
+            eprintln!(
+                "warning: {copies} copies wanted but only {} node{} can store copies, so {} will exist until more join",
+                s.copies_possible,
+                if s.copies_possible == 1 { "" } else { "s" },
+                s.copies_possible,
+            );
+        }
+    }
+    Ok(())
+}
+
 fn watch_status(client: &Client, verbose: bool, interval: Duration) -> Result<(), CliError> {
     use std::io::{IsTerminal, Write};
     if !std::io::stdout().is_terminal() {
