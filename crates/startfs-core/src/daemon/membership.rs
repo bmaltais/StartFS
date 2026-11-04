@@ -168,6 +168,14 @@ impl Daemon {
 
     fn mint(&self, membership: &mut Membership) -> Result<String, Error> {
         let ttl = std::time::Duration::from_secs(self.config.token_ttl_secs);
+        self.mint_for(membership, ttl)
+    }
+
+    fn mint_for(
+        &self,
+        membership: &mut Membership,
+        ttl: std::time::Duration,
+    ) -> Result<String, Error> {
         membership.mint_token(self.clock.now() + ttl.as_nanos() as u64)
     }
 
@@ -268,7 +276,12 @@ impl Daemon {
 
     /// Mint another join token and tell the other members about it.
     pub(super) fn new_token(&self) -> Result<String, Error> {
-        let token = self.mint(&mut self.membership.lock().unwrap())?;
+        self.new_token_for(std::time::Duration::from_secs(self.config.token_ttl_secs))
+    }
+
+    /// Like `new_token`, but valid for `ttl` instead of the configured time.
+    pub(super) fn new_token_for(&self, ttl: std::time::Duration) -> Result<String, Error> {
+        let token = self.mint_for(&mut self.membership.lock().unwrap(), ttl)?;
         self.announce_tokens();
         Ok(token)
     }

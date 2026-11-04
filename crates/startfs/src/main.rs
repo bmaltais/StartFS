@@ -51,6 +51,13 @@ commands:
                                       node lives (home, cloud) so copies are spread across sites;
                                       --storage-only: hold replicas but never mount or serve the
                                       filesystem. An encrypted filesystem needs --key
+  add [USER@]HOST [--offer SIZE] [--site NAME] [--storage-only] [--via ssh|tailscale] [--version vX.Y.Z]
+                                      install StartFS on a Linux machine over SSH and join it to this
+                                      filesystem, run from your terminal with your own credentials.
+                                      Uses `tailscale ssh` for a tailnet machine, else ssh (--via
+                                      picks). It installs the release this node runs (--version
+                                      another), FUSE unless --storage-only, and revokes its short-lived
+                                      token at the end. An encrypted filesystem is refused
   recover RECOVERY_KEY TOKEN [--offer SIZE] [--site NAME]
                                       bring a rebuilt machine back into an encrypted filesystem:
                                       the key is checked by a member before it says anything
@@ -104,6 +111,12 @@ enum CliError {
         "this member is storage-only, so it does not mount the filesystem; drop --mount and the mountpoint setting, or make it an ordinary member first (`startfs config --no-storage-only`)"
     )]
     StorageOnlyCannotMount,
+    #[error("--via must be ssh or tailscale")]
+    BadVia,
+    #[error("a storage-only member needs --offer: how much space it gives")]
+    StorageOnlyNeedsOffer,
+    #[error(transparent)]
+    Add(#[from] startfs::add::AddError),
     #[error("--copies must be a number")]
     CopiesNotANumber,
     #[error("--activity must be on or off")]
@@ -242,6 +255,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             println!("joined");
             Ok(())
         }
+        "add" => add_member(rest, socket),
         "recover" => {
             let (key, token) = (
                 rest.first().ok_or(CliError::Usage)?,
@@ -673,6 +687,11 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "history" => (&[], &["--json"], 1),
         "restore" => (&["--at"], &[], 1),
         "join" => (&["--offer", "--site", "--key"], &["--storage-only"], 1),
+        "add" => (
+            &["--offer", "--site", "--via", "--version"],
+            &["--storage-only"],
+            1,
+        ),
         "recover" => (&["--offer", "--site"], &[], 2),
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
@@ -708,6 +727,56 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
             }
         }
     }
+    Ok(())
+}
+
+/// `startfs add`: see `startfs::add`.
+fn add_member(rest: &[String], socket: PathBuf) -> Result<(), CliError> {
+    use startfs::add::{self, Plan, SshRemote, Via};
+    let host = rest
+        .first()
+        .filter(|h| !h.starts_with('-'))
+        .ok_or(CliError::Usage)?;
+    let offer = flag_value(rest, "--offer").ok();
+    if let Some(offer) = &offer {
+        parse_size(offer)?;
+    }
+    let storage_only = rest.iter().any(|a| a == "--storage-only");
+    if storage_only && offer.is_none() {
+        return Err(CliError::StorageOnlyNeedsOffer);
+    }
+    let via = match flag_value(rest, "--via").ok().as_deref() {
+        None => None,
+        Some("ssh") => Some(Via::Ssh),
+        Some("tailscale") => Some(Via::Tailscale),
+        Some(_) => return Err(CliError::BadVia),
+    };
+    let plan = Plan {
+        version: flag_value(rest, "--version")
+            .unwrap_or_else(|_| format!("v{}", env!("CARGO_PKG_VERSION"))),
+        offer,
+        site: flag_value(rest, "--site").ok(),
+        storage_only,
+    };
+    let via = add::choose_transport(via, || add::tailscale_knows(host));
+    println!(
+        "adding {host} ({}) at {}",
+        if matches!(via, Via::Ssh) {
+            "ssh"
+        } else {
+            "tailscale ssh"
+        },
+        plan.version
+    );
+    let mut remote = SshRemote {
+        via,
+        host: host.clone(),
+    };
+    let report = add::add(&mut remote, &Client::new(socket), &plan)?;
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!("added {host}: watch it arrive with `startfs status`");
     Ok(())
 }
 
