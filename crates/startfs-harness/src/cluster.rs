@@ -29,6 +29,12 @@ impl NodeFs {
         self.fs().is_ok_and(|fs| fs.has_unsynced())
     }
 
+    /// Run `hook` once, in the node's next removal of unused chunks, between its look at the
+    /// tree and its first removal.
+    pub fn before_next_removal(&self, hook: impl FnOnce() + Send + 'static) {
+        self.fs().expect("node is up").before_next_removal(hook);
+    }
+
     fn fs(&self) -> FsResult<Arc<LocalFs>> {
         self.slot.lock().unwrap().clone().ok_or(FsError::NodeDown)
     }

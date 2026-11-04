@@ -26,6 +26,9 @@ pub(super) struct Pins {
     state: Mutex<State>,
     /// One removal at a time, since they share the log.
     removing: Mutex<()>,
+    /// Runs once, between a removal's look and its first batch, then is dropped. Lets a test
+    /// put a write exactly where the race is.
+    after_look: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Chunks a write commit stores before the transaction that refers to them: until it
@@ -36,6 +39,10 @@ pub(super) struct Pinned<'a> {
 }
 
 impl Pins {
+    pub(super) fn after_look(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.after_look.lock().unwrap() = Some(hook);
+    }
+
     pub(super) fn hold(&self, ids: impl IntoIterator<Item = ChunkId>) -> Pinned<'_> {
         let ids: Vec<ChunkId> = ids.into_iter().collect();
         let mut state = self.state.lock().unwrap();
@@ -81,6 +88,10 @@ impl Pins {
         // Ends the log however this function is left.
         let _log = EndLog(self);
         look(&mut unused)?;
+        let hook = self.after_look.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         for batch in ids.chunks(BATCH) {
             {
                 let state = self.state.lock().unwrap();
