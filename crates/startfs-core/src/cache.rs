@@ -129,14 +129,15 @@ impl ChunkCache {
         }
     }
 
-    /// Remember a chunk that the caller has already verified.
-    pub fn put(&self, data: &[u8]) {
+    /// Remember a chunk that the caller has already verified against `id`, its BLAKE3 hash, so
+    /// it is not hashed a second time.
+    pub fn put_hashed(&self, id: ChunkId, data: &[u8]) {
         if data.len() as u64 > self.capacity {
             return;
         }
-        let Ok(id) = self.store.put(data) else {
+        if self.store.put_hashed(id, data).is_err() {
             return;
-        };
+        }
         let Some(size) = self.store.size_of(&id) else {
             return;
         };

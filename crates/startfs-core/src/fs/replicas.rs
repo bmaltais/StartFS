@@ -200,7 +200,7 @@ impl LocalFs {
             && !self.cache.touch(id)
             && let Ok(data) = self.staging.get(id)
         {
-            self.cache.put(&data);
+            self.cache.put_hashed(*id, &data);
         }
         self.staging.remove(id);
     }
