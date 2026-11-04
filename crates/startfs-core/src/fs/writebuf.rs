@@ -82,11 +82,18 @@ impl Dirty {
             .filter(|(s, d)| **s + d.len() as u64 >= offset)
             .map(|(s, _)| *s)
             .collect();
-        let start = joined.first().map_or(offset, |s| (*s).min(offset));
-        let mut merged = Vec::new();
-        for s in joined {
-            let d = self.regions.remove(&s).expect("listed above");
-            let at = (s - start) as usize;
+        // A region that starts at or before `offset` is grown in place: a sequential
+        // writer extends the same region on every write, and rebuilding it each time
+        // would copy everything buffered so far.
+        let (start, mut merged, rest) = match joined.split_first() {
+            Some((&s, rest)) if s <= offset => {
+                (s, self.regions.remove(&s).expect("listed above"), rest)
+            }
+            _ => (offset, Vec::new(), joined.as_slice()),
+        };
+        for s in rest {
+            let d = self.regions.remove(s).expect("listed above");
+            let at = (*s - start) as usize;
             if merged.len() < at + d.len() {
                 merged.resize(at + d.len(), 0);
             }
