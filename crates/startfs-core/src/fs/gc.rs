@@ -119,10 +119,10 @@ impl LocalFs {
             }
             Ok(report)
         })?;
-        for id in doomed {
-            self.chunks.remove(&id);
-            self.staging.remove(&id);
-        }
+        self.remove_unused(&doomed, |id| {
+            self.chunks.remove(id);
+            self.staging.remove(id);
+        })?;
         Ok(report)
     }
 
@@ -187,9 +187,39 @@ impl LocalFs {
         })?;
         // The commit above is durable and persists the lazy ones before it, so a delete that
         // made these orphans cannot be undone by a crash once they are gone.
-        for id in &orphans {
-            self.staging.remove(id);
-        }
+        self.remove_unused(&orphans, |id| self.staging.remove(id))?;
         Ok(orphans)
+    }
+
+    /// Remove the chunk files of chunks found unreferenced by a transaction that has since
+    /// committed, unless a write has taken hold of one meanwhile. A write that stores a chunk
+    /// already on disk skips the write, so a removal that had not looked again would delete
+    /// the chunk the file it just committed points at. The pins are held for the whole look:
+    /// a write pins before it stores and unpins only once its file refers to the chunks, so
+    /// a chunk neither pinned nor referenced now stays unused until the removal is done.
+    fn remove_unused(&self, ids: &[ChunkId], remove: impl Fn(&ChunkId)) -> FsResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let pinned = self.pinned.lock().unwrap();
+        let mut unused: HashSet<ChunkId> = ids
+            .iter()
+            .filter(|id| !pinned.contains_key(*id))
+            .copied()
+            .collect();
+        self.view(|v| {
+            for row in v.inodes.iter().map_err(db)? {
+                if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
+                    for r in refs {
+                        unused.remove(&r.id);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        for id in ids.iter().filter(|id| unused.contains(*id)) {
+            remove(id);
+        }
+        Ok(())
     }
 }
