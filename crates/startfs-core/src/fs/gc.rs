@@ -194,20 +194,30 @@ impl LocalFs {
     /// Remove the chunk files of chunks found unreferenced by a transaction that has since
     /// committed, unless a write has taken hold of one meanwhile. A write that stores a chunk
     /// already on disk skips the write, so a removal that had not looked again would delete
-    /// the chunk the file it just committed points at. The pins are held for the whole look:
-    /// a write pins before it stores and unpins only once its file refers to the chunks, so
-    /// a chunk neither pinned nor referenced now stays unused until the removal is done.
+    /// the chunk the file it just committed points at.
+    ///
+    /// The look (which chunks the tree refers to) runs without the pin lock, so writes go on.
+    /// Removal goes in small batches under the lock. A write pins before it stores and unpins
+    /// only once its file refers to the chunks, so a chunk that was unpinned and unreferenced
+    /// at the look, and has not been pinned since, is still unused: the chunks pinned since
+    /// are left for a later pass.
     fn remove_unused(&self, ids: &[ChunkId], remove: impl Fn(&ChunkId)) -> FsResult<()> {
+        const BATCH: usize = 128;
         if ids.is_empty() {
             return Ok(());
         }
-        let pinned = self.pinned.lock().unwrap();
+        let _alone = self.removing.lock().unwrap();
+        let pinned_then = {
+            let pinned = self.pinned.lock().unwrap();
+            *self.pin_log.lock().unwrap() = Some(HashSet::new());
+            pinned.clone()
+        };
         let mut unused: HashSet<ChunkId> = ids
             .iter()
-            .filter(|id| !pinned.contains_key(*id))
+            .filter(|id| !pinned_then.contains_key(*id))
             .copied()
             .collect();
-        self.view(|v| {
+        let looked = self.view(|v| {
             for row in v.inodes.iter().map_err(db)? {
                 if let Content::Chunks(refs) = decode(row.map_err(db)?.1.value())?.content {
                     for r in refs {
@@ -216,10 +226,25 @@ impl LocalFs {
                 }
             }
             Ok(())
-        })?;
-        for id in ids.iter().filter(|id| unused.contains(*id)) {
-            remove(id);
+        });
+        if looked.is_err() {
+            *self.pin_log.lock().unwrap() = None;
+            return looked;
         }
+        for batch in ids.chunks(BATCH) {
+            {
+                let _pinned = self.pinned.lock().unwrap();
+                let log = self.pin_log.lock().unwrap();
+                let log = log.as_ref().expect("set above");
+                (batch.iter())
+                    .filter(|id| unused.contains(*id) && !log.contains(*id))
+                    .for_each(&remove);
+            }
+            // The lock is not fair: without a pause this thread takes it straight back and a
+            // write waiting to pin starves until the whole removal is done.
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        *self.pin_log.lock().unwrap() = None;
         Ok(())
     }
 }
