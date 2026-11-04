@@ -400,8 +400,8 @@ impl Daemon {
         }
         let verdict = filesystem.as_ref().map(|f| {
             verdict_of(
-                f.copies,
-                copies_possible,
+                f.most_copies(),
+                f.most_copies().min(storage_nodes),
                 &unreplicated,
                 repair.as_ref(),
                 &members,
@@ -421,8 +421,8 @@ impl Daemon {
         let gate = filesystem.as_ref().is_some_and(|f| {
             matches!(
                 verdict_of(
-                    f.copies,
-                    copies_possible,
+                    f.most_copies(),
+                    f.most_copies().min(storage_nodes),
                     &unreplicated,
                     repair.as_ref(),
                     &present,
@@ -457,6 +457,7 @@ impl Daemon {
                     }
                 },
                 cache: self.fs.cache_stats(),
+                kept_local: self.fs.kept_paths(),
                 members,
                 upgrade,
                 nodes,

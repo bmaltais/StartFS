@@ -49,15 +49,18 @@ const HISTORY: TableDefinition<history::Key, &[u8]> = TableDefinition::new("hist
 mod compact;
 mod gc;
 mod history;
+mod keep;
 mod merge;
 mod pins;
 mod replicas;
 use replicas::Piece;
 mod scrub;
 mod usage;
+mod wants;
 mod writebuf;
 pub use gc::GcReport;
 pub use history::{parse_restore_point, restore_point};
+pub use keep::KeepReport;
 pub use merge::{CatchUp, ConflictCopy};
 pub use writebuf::DEFAULT_WRITE_BUFFER;
 
@@ -316,6 +319,12 @@ pub struct LocalFs {
     /// The chunks a file or kept version uses, and the tree generation they were worked
     /// out at (see [`Self::refresh_used`]).
     used: Mutex<(Option<u64>, std::collections::HashSet<ChunkId>)>,
+    /// The filesystem's copies and the directories with their own (see [`wants`]).
+    policy: Mutex<wants::Policy>,
+    /// The paths this member keeps in its cache (see [`keep`]).
+    kept: Mutex<keep::Kept>,
+    /// How many copies each chunk is wanted on, as the last [`Self::refresh_used`] found.
+    wants: Mutex<wants::Wants>,
     /// Chunks fetched on demand; bounded, and apart from replica storage.
     cache: ChunkCache,
     /// Decoded chunks recently read, so small reads do not decode a chunk each.
@@ -451,6 +460,12 @@ impl LocalFs {
             version_bytes: AtomicU64::new(0),
             tree_generation: AtomicU64::new(0),
             used: Mutex::new((None, std::collections::HashSet::new())),
+            policy: Mutex::default(),
+            kept: Mutex::new(keep::Kept {
+                paths: Self::read_kept(dir),
+                generation: None,
+            }),
+            wants: Mutex::default(),
             keep_versions: AtomicU64::new(
                 crate::config::DEFAULT_KEEP_VERSIONS_SECS * 1_000_000_000,
             ),

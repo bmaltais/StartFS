@@ -7,7 +7,7 @@
 
 use crate::chunkstore::{ChunkId, ChunkStore};
 use crate::ops::FsResult;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,11 @@ pub struct CacheStats {
     pub chunks: u64,
     pub used_bytes: u64,
     pub capacity_bytes: u64,
+    /// Chunks kept local (see [`ChunkCache::set_pinned`]) that are cached, and their bytes.
+    #[serde(default)]
+    pub kept_chunks: u64,
+    #[serde(default)]
+    pub kept_bytes: u64,
 }
 
 #[derive(Default)]
@@ -27,6 +32,8 @@ struct Lru {
     /// Oldest first.
     order: BTreeMap<u64, ChunkId>,
     used: u64,
+    /// Chunks eviction leaves alone, however old.
+    pinned: HashSet<ChunkId>,
 }
 
 impl Lru {
@@ -80,14 +87,46 @@ impl ChunkCache {
         Ok(cache)
     }
 
+    /// Drop the oldest chunks that are not pinned until the cache fits. Pinned chunks may leave
+    /// it over its capacity.
     fn evict(&self, lru: &mut Lru) {
-        while lru.used > self.capacity {
-            let Some((_, id)) = lru.order.pop_first() else {
+        let mut over = lru.used.saturating_sub(self.capacity);
+        let mut victims = Vec::new();
+        for id in lru.order.values() {
+            if over == 0 {
                 break;
-            };
+            }
+            if !lru.pinned.contains(id) {
+                over = over.saturating_sub(lru.entries[id].1);
+                victims.push(*id);
+            }
+        }
+        for id in victims {
             lru.remove(&id);
             self.store.remove(&id);
         }
+    }
+
+    /// Keep these chunks cached: eviction passes them over, and [`Self::free_unpinned`] too.
+    pub fn set_pinned(&self, ids: HashSet<ChunkId>) {
+        let mut lru = self.lru.lock().unwrap();
+        lru.pinned = ids;
+        self.evict(&mut lru);
+    }
+
+    /// Drop every chunk that is not pinned; returns the bytes freed.
+    pub fn free_unpinned(&self) -> u64 {
+        let mut lru = self.lru.lock().unwrap();
+        let victims: Vec<ChunkId> = (lru.entries.keys())
+            .filter(|id| !lru.pinned.contains(*id))
+            .copied()
+            .collect();
+        let before = lru.used;
+        for id in victims {
+            lru.remove(&id);
+            self.store.remove(&id);
+        }
+        before - lru.used
     }
 
     /// Seal chunks cached from now on under `key`.
@@ -132,7 +171,7 @@ impl ChunkCache {
     /// Remember a chunk that the caller has already verified against `id`, its BLAKE3 hash, so
     /// it is not hashed a second time.
     pub fn put_hashed(&self, id: ChunkId, data: &[u8]) {
-        if data.len() as u64 > self.capacity {
+        if data.len() as u64 > self.capacity && !self.lru.lock().unwrap().pinned.contains(&id) {
             return;
         }
         if self.store.put_hashed(id, data).is_err() {
@@ -152,10 +191,13 @@ impl ChunkCache {
 
     pub fn stats(&self) -> CacheStats {
         let lru = self.lru.lock().unwrap();
+        let kept = lru.pinned.iter().filter_map(|id| lru.entries.get(id));
         CacheStats {
             chunks: lru.entries.len() as u64,
             used_bytes: lru.used,
             capacity_bytes: self.capacity,
+            kept_chunks: kept.clone().count() as u64,
+            kept_bytes: kept.map(|(_, size)| size).sum(),
         }
     }
 }

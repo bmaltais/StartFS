@@ -307,7 +307,9 @@ filesystem) keeps N copies of every chunk on N different machines.
   Labelling or relabelling re-places chunks in the background, at the `repair_bytes_per_sec`
   rate. `startfs status` shows each member's site and warns when the copies cannot span as many
   sites as they should (a site is lost or full); writes are never refused for that, and the
-  copies move back when the site returns. See `docs/adr/0005-sites-are-declared.md`.
+  copies move back when the site returns. When a copy is re-made, a holder at the new copy's own
+  site sends it if there is one up, so repair does not cross the long link when it need not.
+  See `docs/adr/0005-sites-are-declared.md`.
 - A short outage is not a loss. A machine that is merely offline keeps working locally and
   catches up when it returns; concurrent edits to the same file become conflict copies.
 
@@ -472,6 +474,26 @@ lasted under 30 s is not kept, so a build's short-lived files still never leave 
 chunks are freed once both the window and the GC retention have passed; `startfs config
 --keep-versions` (like `3d`, `12h`; `0` for none) changes the window on every member. Every member
 must run protocol 17.
+
+### Copies per directory
+
+`startfs copies ~/startfs/scratch 1` gives the directory its own number of copies on every
+member (`startfs copies ~/startfs/photos 3`, or `--clear` to follow the filesystem's again). It
+covers the files below it down to a directory with an entry of its own. A chunk is content, so one
+that files in two places use is kept on the most copies either asks for, and on at least the
+filesystem's if a file outside every entry uses it. Entries are by path: renaming a directory
+leaves its entry behind. Repair and `status` count each chunk against its own target. Lowering a
+directory waits for a healthy cluster, like `config --copies`. Needs protocol 20.
+
+### Keeping a path local, and freeing the cache
+
+A read of a file this node does not hold fetches its chunks into a bounded cache, and the oldest
+go first. `startfs keep ~/startfs/project` pins that file or directory in this node's cache: its
+chunks are fetched at once if missing and are never evicted for other reads, so it reads without
+the network (a file added under a kept directory is pinned once the node sees it, and fetched on
+its first read). `startfs keep PATH --release` lets it go. `startfs free` drops everything cached
+that is not kept; the replicas this node is responsible for are placement's business and stay.
+Both affect this node only, and the kept paths survive a restart. `status` lists them.
 
 ### Freeing the space of deleted files
 

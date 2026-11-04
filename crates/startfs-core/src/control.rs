@@ -68,6 +68,19 @@ pub enum Request {
         #[serde(default)]
         keep_versions_secs: Option<u64>,
     },
+    /// Give the directory at `path` (a mount path or a filesystem path) its own number of
+    /// copies, or with `None` take its entry away so it follows the filesystem's again.
+    SetDirCopies {
+        path: String,
+        copies: Option<u32>,
+    },
+    /// Keep the file or directory at `path` in this node's cache (`keep`), or let it go.
+    KeepLocal {
+        path: String,
+        keep: bool,
+    },
+    /// Drop what this node's cache holds that is not kept.
+    FreeSpace,
     /// Make a token we issued stop working.
     Revoke {
         token: String,
@@ -140,6 +153,24 @@ pub struct FilesystemInfo {
     /// Chunks and metadata are encrypted at rest; joining takes a recovery key.
     #[serde(default)]
     pub encrypted: bool,
+    /// Directories that hold a number of copies of their own instead of `copies`, by path
+    /// (`/scratch` is 1, `/photos` is 3). The nearest directory above a file with an entry
+    /// decides; a chunk several files use gets the highest of theirs.
+    #[serde(default)]
+    pub dir_copies: std::collections::BTreeMap<String, u32>,
+    /// Bumped each time `dir_copies` is changed; the highest wins when members disagree.
+    #[serde(default)]
+    pub dir_copies_rev: u64,
+}
+
+impl FilesystemInfo {
+    /// The most copies any chunk may be wanted on: `copies`, or a directory's higher own.
+    pub fn most_copies(&self) -> u32 {
+        self.dir_copies
+            .values()
+            .copied()
+            .fold(self.copies, u32::max)
+    }
 }
 
 fn default_keep_versions() -> u64 {
@@ -493,6 +524,9 @@ pub struct Status {
     pub staging: Staging,
     /// Chunks fetched from peers; separate from replica storage.
     pub cache: CacheStats,
+    /// The paths this node keeps in its cache.
+    #[serde(default)]
+    pub kept_local: Vec<String>,
     /// Members of the filesystem, by id.
     pub members: Vec<MemberStatus>,
     /// The upgrade under way, or the release the cluster last moved to.
@@ -560,6 +594,10 @@ pub enum Response {
     NodeStats(Vec<NodeReport>),
     History(Vec<VersionInfo>),
     Restored(RestoreReport),
+    Kept(crate::fs::KeepReport),
+    Freed {
+        bytes: u64,
+    },
     Error(String),
 }
 
@@ -858,6 +896,37 @@ impl Client {
             keep_versions_secs: None,
         })? {
             Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Give a directory its own number of copies (`None`: back to the filesystem's), on every member.
+    pub fn set_dir_copies(&self, path: &str, copies: Option<u32>) -> Result<(), Error> {
+        match self.call(&Request::SetDirCopies {
+            path: path.into(),
+            copies,
+        })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Keep the file or directory at `path` in this node's cache and fetch what it lacks of it
+    /// (`keep`), or let it go.
+    pub fn keep_local(&self, path: &str, keep: bool) -> Result<crate::fs::KeepReport, Error> {
+        match self.call(&Request::KeepLocal {
+            path: path.into(),
+            keep,
+        })? {
+            Response::Kept(report) => Ok(report),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Drop what this node's cache holds that is not kept; returns the bytes freed.
+    pub fn free_space(&self) -> Result<u64, Error> {
+        match self.call(&Request::FreeSpace)? {
+            Response::Freed { bytes } => Ok(bytes),
             other => Err(unexpected(other)),
         }
     }

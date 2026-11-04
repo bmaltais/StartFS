@@ -74,6 +74,18 @@ commands:
   leave                               hand this node's data to the others and leave
   remove MEMBER                       remove a dead member (its data is re-replicated)
   revoke TOKEN                        make a join token stop working
+  copies PATH N | PATH --clear       give the directory at PATH its own number of copies on every
+                                      node (scratch 1, photos 3), for the files below it down to a
+                                      directory with its own; a chunk files in two places use gets
+                                      the most. --clear: follow the filesystem's again. Lowering
+                                      waits for a healthy cluster, like `config --copies`;
+                                      `status` lists them
+  keep PATH [--release]               keep the file or directory at PATH in this node's cache: its
+                                      chunks are fetched now if missing and never evicted for other
+                                      reads (--release: let it go). Only this node; no other
+                                      member is affected
+  free                                free this node's cache: drop every cached chunk that is not
+                                      kept (replicas this node is responsible for stay)
   config [--offer SIZE] [--weight SIZE] [--copies N] [--activity on|off] [--site NAME]
          [--storage-only | --no-storage-only] [--keep-versions DURATION]
                                       change this node's space offer (sizes like 500M, 2T), its
@@ -318,6 +330,48 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             Ok(())
         }
         "config" => config(rest, socket),
+        "keep" => {
+            let path = absolute(positional(rest, &[]).ok_or(CliError::Usage)?)?;
+            let keep = !rest.iter().any(|a| a == "--release");
+            let report = Client::new(socket).keep_local(&path, keep)?;
+            if keep {
+                println!(
+                    "keeping {path} local: {} chunk{}, {} fetched{}",
+                    report.chunks,
+                    if report.chunks == 1 { "" } else { "s" },
+                    report.fetched,
+                    if report.missing > 0 {
+                        format!(
+                            ", {} not available now (a read fetches them)",
+                            report.missing
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            Ok(())
+        }
+        "free" => {
+            let bytes = Client::new(socket).free_space()?;
+            println!("freed {} from the cache", human(bytes));
+            Ok(())
+        }
+        "copies" => {
+            let path = absolute(positional(rest, &[]).ok_or(CliError::Usage)?)?;
+            let copies = if rest.iter().any(|a| a == "--clear") {
+                None
+            } else {
+                let n = rest
+                    .iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .nth(1)
+                    .ok_or(CliError::Usage)?;
+                Some(n.parse::<u32>().map_err(|_| CliError::CopiesNotANumber)?)
+            };
+            Client::new(socket).set_dir_copies(&path, copies)?;
+            Ok(())
+        }
         "status" => {
             let verbose = rest.iter().any(|a| a == "--verbose" || a == "-v");
             if rest.iter().any(|a| a == "--watch") {
@@ -696,6 +750,8 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "token" => (&[], &["--example"], 0),
         "update" => (&[], &["--force"], 1),
         "remove" | "revoke" => (&[], &[], 1),
+        "copies" => (&[], &["--clear"], 2),
+        "keep" => (&[], &["--release"], 1),
         "config" => (
             &[
                 "--offer",

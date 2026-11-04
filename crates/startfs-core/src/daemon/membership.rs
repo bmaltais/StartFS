@@ -220,6 +220,8 @@ impl Daemon {
                 keep_versions_secs: self.config.keep_versions_secs,
                 keep_versions_rev: 0,
                 encrypted: encrypt,
+                dir_copies: Default::default(),
+                dir_copies_rev: 0,
             },
             endpoint,
             self.addr(),
@@ -385,5 +387,48 @@ impl Daemon {
         }
         self.refresh_staging_limit();
         Ok(())
+    }
+
+    /// Give the directory at `path` its own number of copies, or with `None` take its entry
+    /// away. Lowering what a directory holds drops copies, so it waits for a healthy cluster,
+    /// like lowering the filesystem's copies does.
+    pub(super) fn set_dir_copies(&self, path: &str, copies: Option<u32>) -> Result<(), Error> {
+        if copies == Some(0) {
+            return Err(Error::BadFilesystemSpec);
+        }
+        let path = format!(
+            "/{}",
+            path.split('/')
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        if path == "/" {
+            // The root is the filesystem itself: `config --copies` sets it.
+            return Err(Error::BadFilesystemSpec);
+        }
+        let judged = self.membership.lock().unwrap().dir_copies_setting();
+        let (before, default) = {
+            let membership = self.membership.lock().unwrap();
+            let fs = membership.filesystem().ok_or(Error::NotInFilesystem)?;
+            (
+                fs.dir_copies.get(&path).copied().unwrap_or(fs.copies),
+                fs.copies,
+            )
+        };
+        let lowering = copies.unwrap_or(default) < before;
+        if lowering
+            && !matches!(
+                self.status()?.verdict,
+                Some(Verdict::Safe | Verdict::BestEffort)
+            )
+        {
+            return Err(Error::NotHealthyToLowerCopies);
+        }
+        let mut membership = self.membership.lock().unwrap();
+        if lowering && membership.dir_copies_setting() != judged {
+            return Err(Error::NotHealthyToLowerCopies);
+        }
+        membership.set_dir_copies(&path, copies)
     }
 }

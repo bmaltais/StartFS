@@ -63,6 +63,12 @@ pub enum Message {
     /// Every recovery key's wrap of the filesystem key. A wrap opens nothing without its
     /// recovery key, so members hand them to anyone who is a member.
     KeyWraps(Vec<KeyWrap>),
+    /// The directories that hold their own number of copies, by path, and the revision of
+    /// that setting; the higher revision wins, a tie goes to the greater list.
+    DirCopies {
+        entries: Vec<(String, u32)>,
+        rev: u64,
+    },
 }
 
 /// Which release the cluster is on, sent to a member that cannot otherwise hear
@@ -89,7 +95,7 @@ pub enum Category {
     Chunk,
     /// Operation log entries and state transfer.
     Metadata,
-    /// Hello, members, tokens, health, the copies and versions settings and upgrades.
+    /// Hello, members, tokens, health, the copies, directory copies and versions settings and upgrades.
     Gossip,
     /// Joining and storage-figure queries.
     Other,
@@ -137,7 +143,7 @@ pub enum Replica {
 }
 
 /// Version of the wire protocol. Bumped whenever messages change shape.
-pub const PROTOCOL_VERSION: u8 = 19;
+pub const PROTOCOL_VERSION: u8 = 20;
 
 /// Which side of a version mismatch is behind, in the words of the node reading it.
 pub fn upgrade_hint(ours: u8, theirs: u8) -> &'static str {
@@ -201,9 +207,9 @@ impl Message {
     /// idle need not wake for it: it reads it at its next round.
     pub fn is_background(raw: &[u8]) -> bool {
         // The variant index again; see `is_bulk`: `Members`, `Tokens`, `Health`, `Copies`,
-        // `Upgrade` and `KeepVersions`.
+        // `Upgrade`, `KeepVersions`, `KeyWraps` and `DirCopies`.
         raw.first() != Some(&NOTICE_BYTE)
-            && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16 | 18 | 19))
+            && matches!(raw.get(1), Some(3 | 10 | 11 | 12 | 16 | 18 | 19 | 20))
     }
 
     /// What an encoded message is for, as the activity view groups traffic.
@@ -215,7 +221,7 @@ impl Message {
         match raw.get(1) {
             Some(6..=9) => Category::Chunk,
             Some(1 | 2) => Category::Metadata,
-            Some(0 | 3 | 10..=12 | 13 | 18 | 19) => Category::Gossip,
+            Some(0 | 3 | 10..=12 | 13 | 18 | 19 | 20) => Category::Gossip,
             _ => Category::Other,
         }
     }
@@ -288,8 +294,8 @@ mod tests {
     /// The `(PROTOCOL_VERSION, digest)` the sample messages below encoded to
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
-        19,
-        "983b5d9af3588c09da05bb38bf65559ad244f55dac1cf965eb84ecd9eb665cbe",
+        20,
+        "63c391290386c27ffa1ccea0be62e82d56cf20cf744a196ff9a77a099e09af68",
     );
 
     /// One of every message, with fixed contents: what the wire-shape pin and the traffic
@@ -322,6 +328,8 @@ mod tests {
             keep_versions_secs: 86400,
             keep_versions_rev: 2,
             encrypted: true,
+            dir_copies: [("/scratch".to_string(), 1)].into(),
+            dir_copies_rev: 6,
         };
         let samples = [
             Message::Hello(Frontier::default()),
@@ -387,6 +395,10 @@ mod tests {
             }),
             Message::Copies { copies: 3, rev: 2 },
             Message::KeepVersions { secs: 4, rev: 5 },
+            Message::DirCopies {
+                entries: vec![("/scratch".into(), 1)],
+                rev: 6,
+            },
             Message::StateChunk(StateChunk {
                 pin: crate::oplog::StatePin {
                     frontier: Frontier::from([(MemberId(1), 2)]),
@@ -484,6 +496,10 @@ mod tests {
             Message::Health(Health::default()),
             Message::Copies { copies: 3, rev: 2 },
             Message::KeepVersions { secs: 4, rev: 5 },
+            Message::DirCopies {
+                entries: vec![],
+                rev: 6,
+            },
             Message::Upgrade(UpgradeGossip {
                 running: crate::upgrade::Release {
                     version: "1.10.0".into(),
@@ -523,7 +539,9 @@ mod tests {
             | Message::Tokens(_)
             | Message::Health(_)
             | Message::KeyWraps(_) => (Gossip, true, false),
-            Message::Copies { .. } | Message::KeepVersions { .. } => (Gossip, true, false),
+            Message::Copies { .. } | Message::KeepVersions { .. } | Message::DirCopies { .. } => {
+                (Gossip, true, false)
+            }
             Message::JoinRequest(_) | Message::JoinReply(_) => (Other, false, false),
             Message::ChunkRequest(_) | Message::ChunkAck(..) => (Chunk, false, false),
             Message::ChunkReply(..) | Message::ChunkPush(..) => (Chunk, false, true),
