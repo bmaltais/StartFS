@@ -50,6 +50,7 @@ mod compact;
 mod gc;
 mod history;
 mod merge;
+mod pins;
 mod replicas;
 use replicas::Piece;
 mod scrub;
@@ -352,13 +353,9 @@ pub struct LocalFs {
     stale: AtomicBool,
     /// Objects read to bring the tree up to date with peers' entries.
     tree_reads: AtomicU64,
-    /// Chunks a write commit has stored and not yet made a file refer to: garbage
-    /// collection takes them as referenced (see [`Pinned`]).
-    pinned: Mutex<HashMap<ChunkId, u32>>,
-    /// While a removal of unused chunks is under way: the chunks pinned since it looked.
-    pin_log: Mutex<Option<std::collections::HashSet<ChunkId>>>,
-    /// One removal of unused chunks at a time, since they share [`Self::pin_log`].
-    removing: Mutex<()>,
+    /// Chunks a write commit has stored and not yet made a file refer to, and the removal
+    /// protocol that respects them.
+    pins: pins::Pins,
     /// Serialises operations on this node.
     lock: Mutex<()>,
     /// Latest hybrid logical clock value issued or seen by this node.
@@ -477,9 +474,7 @@ impl LocalFs {
             batching: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             tree_reads: AtomicU64::new(0),
-            pinned: Mutex::new(HashMap::new()),
-            pin_log: Mutex::new(None),
-            removing: Mutex::new(()),
+            pins: pins::Pins::default(),
             lock: Mutex::new(()),
             hlc: Mutex::new(Hlc::ZERO),
         };
@@ -1129,12 +1124,20 @@ impl LocalFs {
     }
 
     /// Replace a file's content, chunking, deduplicating and compressing it.
-    fn store(&self, i: &mut Inode, data: &[u8]) -> FsResult<()> {
+    fn store<'a>(
+        &'a self,
+        i: &mut Inode,
+        data: &[u8],
+        pins: &mut Vec<pins::Pinned<'a>>,
+    ) -> FsResult<()> {
         i.content = if data.len() <= INLINE_MAX {
             Content::Inline(data.to_vec())
         } else {
             let pieces: Vec<Piece<'_>> = chunker::split(data).into_iter().map(Piece::new).collect();
             self.make_room(&pieces)?;
+            // Until the file refers to the chunks (the caller keeps `pins` past its commit), a
+            // removal must not take one already on disk, which `keep_all` then does not rewrite.
+            pins.push(self.pins.hold(pieces.iter().map(|p| p.id)));
             let ids = self.keep_all(&pieces)?;
             Content::Chunks(
                 pieces
@@ -1243,6 +1246,7 @@ impl FsOps for LocalFs {
         } else {
             Durability::None
         };
+        let mut pins = Vec::new();
         self.fetching_as(true, durability, |t, spill| {
             let mut i = t.inode(ino)?;
             let now = self.clock.now();
@@ -1255,7 +1259,7 @@ impl FsOps for LocalFs {
                         self.read_all(&i2, spill)?
                     };
                     data.resize(size as usize, 0);
-                    self.store(&mut i2, &data)?;
+                    self.store(&mut i2, &data, &mut pins)?;
                 }
                 i2.mtime = now;
                 i = i2;

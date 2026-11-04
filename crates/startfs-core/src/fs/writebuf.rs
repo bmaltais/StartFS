@@ -8,7 +8,7 @@
 //! re-chunking from the first affected chunk until a new cut lands on an old
 //! boundary gives the same chunks as chunking the whole file.
 
-use super::replicas::Pinned;
+use super::pins::Pinned;
 use super::*;
 use crate::chunker::MAX_CHUNK;
 use std::borrow::Cow;
@@ -513,7 +513,7 @@ impl LocalFs {
             }
             let committed = &pieces[..used];
             self.make_room(committed)?;
-            let pinned = self.pin(committed.iter().map(|p| p.id));
+            let pinned = self.pins.hold(committed.iter().map(|p| p.id));
             let mut out: Vec<ChunkRef> = refs[..a].to_vec();
             let mut size = sa;
             let ids = self.keep_all(committed)?;
