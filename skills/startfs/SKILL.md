@@ -70,8 +70,11 @@ Tell the user to keep it; joining machines add `--key sfrk1-...`. A rebuilt mach
 
 Run the line from `create` on the new machine, adding `--offer SIZE` (for example `100G`)
 for the space it contributes. Tokens expire after 24h: `startfs token --example` prints a
-fresh line, `startfs revoke TOKEN` cancels one. Ssh into the new machine to run it when the
-user cannot.
+fresh line, `startfs revoke TOKEN` cancels one. To do it all from a member over SSH instead,
+run `startfs add [user@]host --offer SIZE` (add `--storage-only` for a machine that only holds
+copies): it installs the same release on a Linux machine, installs FUSE unless storage-only,
+joins it and revokes its 10-minute token. It uses the user's own ssh or `tailscale ssh` in their
+terminal, and refuses encrypted filesystems.
 
 Done when `startfs status` on either machine lists both in its members table as `up`.
 

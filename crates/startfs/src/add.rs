@@ -10,8 +10,7 @@ use startfs_core::error::Error as CoreError;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const INSTALL_URL: &str =
-    "https://raw.githubusercontent.com/bmaltais/StartFS/main/scripts/install.sh";
+const INSTALL_URL: &str = "https://raw.githubusercontent.com/bmaltais/StartFS";
 /// How long the join token lives. It is revoked as soon as the add ends; this is the backstop.
 pub const TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 /// Where the installer puts the binary, as the remote shell spells it (`INSTALL_DIR` stays default).
@@ -136,7 +135,10 @@ fn join_command(token: &str, plan: &Plan) -> String {
 /// Package managers `add` can install FUSE with: the program to look for, and the install command.
 const PACKAGE_MANAGERS: [(&str, &str); 3] = [
     ("pacman", "sudo pacman -S --needed --noconfirm fuse3"),
-    ("apt-get", "sudo apt-get install -y fuse3"),
+    (
+        "apt-get",
+        "sudo apt-get update && sudo apt-get install -y fuse3",
+    ),
     ("dnf", "sudo dnf install -y fuse3"),
 ];
 
@@ -167,9 +169,15 @@ pub fn add(remote: &mut dyn Remote, local: &dyn Local, plan: &Plan) -> Result<Re
         return Err(AddError::Encrypted);
     }
     let system = remote.run("uname -s", false)?;
-    let system = system.stdout.trim();
-    if !system.is_empty() && system != "Linux" {
-        return Err(AddError::UnsupportedSystem(system.to_string()));
+    let name = system.stdout.trim();
+    if !system.success || name != "Linux" {
+        // No `uname` at all is what a Windows shell answers.
+        let name = if name.is_empty() {
+            "an unknown system"
+        } else {
+            name
+        };
+        return Err(AddError::UnsupportedSystem(name.to_string()));
     }
     if !plan.storage_only {
         let has_fuse = remote.run(
@@ -209,8 +217,9 @@ pub fn add(remote: &mut dyn Remote, local: &dyn Local, plan: &Plan) -> Result<Re
 
 fn provision(remote: &mut dyn Remote, token: &str, plan: &Plan) -> Result<(), AddError> {
     let install = format!(
-        "curl -fsSL {INSTALL_URL} | STARTFS_VERSION={} sh",
-        quote(&plan.version)
+        "curl -fsSL {INSTALL_URL}/{version}/scripts/install.sh | STARTFS_VERSION={} sh",
+        quote(&plan.version),
+        version = plan.version
     );
     if !remote.run(&install, true)?.success {
         return Err(AddError::Install);

@@ -276,9 +276,7 @@ impl Daemon {
 
     /// Mint another join token and tell the other members about it.
     pub(super) fn new_token(&self) -> Result<String, Error> {
-        let token = self.mint(&mut self.membership.lock().unwrap())?;
-        self.announce_tokens();
-        Ok(token)
+        self.new_token_for(std::time::Duration::from_secs(self.config.token_ttl_secs))
     }
 
     /// Like `new_token`, but valid for `ttl` instead of the configured time.

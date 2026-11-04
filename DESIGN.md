@@ -80,6 +80,9 @@ same code with a different membership scope.
    the new node. No auto-discovery in v1. Member ids need no coordination: each member owns an
    id range and an admission takes the new id from it and gives the node a slice for its own
    admissions, so concurrent admissions through different members cannot collide.
+   `startfs add <host>` is the same join driven over SSH by the CLI of an existing member, as the
+   user, with a 10-minute token it always revokes; the daemon never opens SSH sessions to peers
+   (ADR 0011), so a compromised member still cannot run code on the others.
 
 10. **Deletion and space reclaim:** delayed garbage collection. Deleting a file only updates
     metadata. A background GC removes chunks that are unreferenced and have been orphaned longer than

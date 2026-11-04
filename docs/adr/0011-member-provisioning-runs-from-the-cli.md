@@ -36,5 +36,4 @@ unjoined node and says to run `add` again.
 - Encrypted filesystems are refused: joining needs the recovery key, which must not travel in a
   command line. Revisit with a keyless storage-only path (#238).
 - Linux targets only, because no other OS has a release (the installer says so).
-- The sequence is tested with a fake `Remote`; real SSH is checked by hand (`deploy.md` in the
-  workbench has the procedure).
+- The sequence is tested with a fake `Remote`; real SSH is checked by hand.

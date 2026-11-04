@@ -171,7 +171,10 @@ fn a_join_failure_says_it_is_installed_and_a_rerun_succeeds() {
 fn a_mounting_add_installs_fuse_with_the_package_manager_the_target_has() {
     for (manager, command) in [
         ("pacman", "sudo pacman -S --needed --noconfirm fuse3"),
-        ("apt-get", "sudo apt-get install -y fuse3"),
+        (
+            "apt-get",
+            "sudo apt-get update && sudo apt-get install -y fuse3",
+        ),
         ("dnf", "sudo dnf install -y fuse3"),
     ] {
         let mut remote = FakeRemote::linux()
@@ -309,4 +312,21 @@ fn the_transport_follows_via_and_otherwise_the_tailnet() {
     );
     assert_eq!(choose_transport(None, || true), Via::Tailscale);
     assert_eq!(choose_transport(None, || false), Via::Ssh);
+}
+
+#[test]
+fn a_target_with_no_uname_is_refused_as_unsupported() {
+    let mut remote = FakeRemote::linux().answer("uname", false, "");
+    let local = FakeLocal::new(false);
+    let err = add(&mut remote, &local, &plan(true)).unwrap_err();
+    assert!(matches!(err, AddError::UnsupportedSystem(_)), "{err}");
+    assert!(local.events().is_empty());
+}
+
+#[test]
+fn the_installer_is_fetched_from_the_pinned_release_not_main() {
+    let mut remote = FakeRemote::linux();
+    add(&mut remote, &FakeLocal::new(false), &plan(true)).unwrap();
+    let install = &remote.log[position(&remote.log, "install.sh")];
+    assert!(install.contains("/v1.16.6/scripts/install.sh"), "{install}");
 }
