@@ -11,6 +11,7 @@
 use super::replicas::Pinned;
 use super::*;
 use crate::chunker::MAX_CHUNK;
+use std::borrow::Cow;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -108,13 +109,10 @@ impl Dirty {
     }
 
     /// The regions, in groups of near ones that are re-chunked as one window.
-    fn windows(&self) -> Vec<Vec<Region>> {
+    fn into_windows(self) -> Vec<Vec<Region>> {
         let mut out: Vec<Vec<Region>> = Vec::new();
-        for (s, d) in &self.regions {
-            let r = Region {
-                start: *s,
-                data: d.clone(),
-            };
+        for (s, d) in self.regions {
+            let r = Region { start: s, data: d };
             match out.last_mut() {
                 Some(w)
                     if r.start - w.last().expect("not empty").end() <= NEAR
@@ -244,12 +242,13 @@ impl LocalFs {
                 }
             }
         };
-        let done = self.commit_buffer(ino, &d, last);
+        let mtime = d.mtime;
+        let done = self.commit_buffer(ino, d, mtime, last);
         let mut dirty = self.dirty.lock().unwrap();
         let out = match done {
             Ok(Some(rest)) => {
                 match rest {
-                    Some(r) => dirty.insert(ino, Dirty::new(r.start, r.data, d.mtime)),
+                    Some(r) => dirty.insert(ino, Dirty::new(r.start, r.data, mtime)),
                     None => dirty.remove(&ino),
                 };
                 Ok(())
@@ -283,8 +282,14 @@ impl LocalFs {
     /// on a snapshot of the file; only applying the result takes it, and does so
     /// only if the file is still as it was, else the splice starts again.
     /// Returns the tail kept back, or `None` when nothing was ready to commit.
-    fn commit_buffer(&self, ino: Ino, d: &Dirty, last: bool) -> FsResult<Option<Option<Region>>> {
-        let windows = d.windows();
+    fn commit_buffer(
+        &self,
+        ino: Ino,
+        d: Dirty,
+        mtime: Nanos,
+        last: bool,
+    ) -> FsResult<Option<Option<Region>>> {
+        let windows = d.into_windows();
         loop {
             let snap = self.view(|v| Self::file(v, ino))?;
             let was = encode(&snap);
@@ -322,10 +327,10 @@ impl LocalFs {
                 }
                 i.content = content.clone();
                 i.size = size;
-                i.mtime = d.mtime;
-                i.ctime = d.mtime;
+                i.mtime = mtime;
+                i.ctime = mtime;
                 t.put(ino, &i)?;
-                self.emit_set_at(t, ino, &i, d.mtime)?;
+                self.emit_set_at(t, ino, &i, mtime)?;
                 Ok(true)
             })?;
             if applied {
@@ -384,18 +389,23 @@ impl LocalFs {
     }
 
     /// One window as a single region: its regions over the file's bytes between them.
-    fn fill(&self, i: &Inode, window: &[Region], spill: &mut Spill) -> FsResult<Region> {
+    fn fill<'w>(
+        &self,
+        i: &Inode,
+        window: &'w [Region],
+        spill: &mut Spill,
+    ) -> FsResult<Cow<'w, Region>> {
         let start = window[0].start;
         let end = window.last().expect("not empty").end();
         if window.len() == 1 {
-            return Ok(window[0].clone());
+            return Ok(Cow::Borrowed(&window[0]));
         }
         let mut data = self.read_committed(i, start.min(i.size), end.min(i.size), spill)?;
         data.resize((end - start) as usize, 0);
         for r in window {
             data[(r.start - start) as usize..][..r.data.len()].copy_from_slice(&r.data);
         }
-        Ok(Region { start, data })
+        Ok(Cow::Owned(Region { start, data }))
     }
 
     /// Mark a file's buffer as no longer being committed.
