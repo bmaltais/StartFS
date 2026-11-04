@@ -83,6 +83,12 @@ impl Daemon {
                 self.set_dir_copies(&self.fs_path(&path), copies)?;
                 Response::Done
             }
+            Request::KeepLocal { path, keep } => {
+                Response::Kept(self.fs.keep_local(&self.fs_path(&path), keep)?)
+            }
+            Request::FreeSpace => Response::Freed {
+                bytes: self.fs.free_space(),
+            },
             Request::Revoke { token } => {
                 self.revoke_token(&token)?;
                 Response::Done

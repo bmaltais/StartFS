@@ -485,6 +485,16 @@ filesystem's if a file outside every entry uses it. Entries are by path: renamin
 leaves its entry behind. Repair and `status` count each chunk against its own target. Lowering a
 directory waits for a healthy cluster, like `config --copies`. Needs protocol 20.
 
+### Keeping a path local, and freeing the cache
+
+A read of a file this node does not hold fetches its chunks into a bounded cache, and the oldest
+go first. `startfs keep ~/startfs/project` pins that file or directory in this node's cache: its
+chunks are fetched at once if missing and are never evicted for other reads, so it reads without
+the network (a file added under a kept directory is pinned once the node sees it, and fetched on
+its first read). `startfs keep PATH --release` lets it go. `startfs free` drops everything cached
+that is not kept; the replicas this node is responsible for are placement's business and stay.
+Both affect this node only, and the kept paths survive a restart. `status` lists them.
+
 ### Freeing the space of deleted files
 
 Deleting a file keeps its data for `gc_retention_secs` (7 days by default), so a mistake can be

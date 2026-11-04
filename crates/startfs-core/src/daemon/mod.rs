@@ -437,6 +437,7 @@ impl Daemon {
                 .set_keep_versions(Duration::from_secs(f.keep_versions_secs));
             self.fs.set_copies_policy(f.copies, &f.dir_copies);
         }
+        self.fs.refresh_kept();
         timer.phase(Phase::Sync);
         // A long queue is worked off over several ticks, so the rest of the
         // background work is not starved behind it.

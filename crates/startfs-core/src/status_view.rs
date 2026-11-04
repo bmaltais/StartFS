@@ -527,6 +527,14 @@ pub fn render(s: &Status, verbose: bool) -> String {
             .collect();
         out.push_str(&format!("directory copies: {}\n", dirs.join(", ")));
     }
+    if !s.kept_local.is_empty() {
+        out.push_str(&format!(
+            "kept local: {} ({} cached, {})\n",
+            s.kept_local.join(", "),
+            s.cache.kept_chunks,
+            human(s.cache.kept_bytes)
+        ));
+    }
     if let Some(line) = unreplicated_line(s) {
         out.push_str(&line);
     }

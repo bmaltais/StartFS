@@ -457,6 +457,7 @@ impl Daemon {
                     }
                 },
                 cache: self.fs.cache_stats(),
+                kept_local: self.fs.kept_paths(),
                 members,
                 upgrade,
                 nodes,

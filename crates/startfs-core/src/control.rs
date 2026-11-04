@@ -74,6 +74,13 @@ pub enum Request {
         path: String,
         copies: Option<u32>,
     },
+    /// Keep the file or directory at `path` in this node's cache (`keep`), or let it go.
+    KeepLocal {
+        path: String,
+        keep: bool,
+    },
+    /// Drop what this node's cache holds that is not kept.
+    FreeSpace,
     /// Make a token we issued stop working.
     Revoke {
         token: String,
@@ -517,6 +524,9 @@ pub struct Status {
     pub staging: Staging,
     /// Chunks fetched from peers; separate from replica storage.
     pub cache: CacheStats,
+    /// The paths this node keeps in its cache.
+    #[serde(default)]
+    pub kept_local: Vec<String>,
     /// Members of the filesystem, by id.
     pub members: Vec<MemberStatus>,
     /// The upgrade under way, or the release the cluster last moved to.
@@ -584,6 +594,10 @@ pub enum Response {
     NodeStats(Vec<NodeReport>),
     History(Vec<VersionInfo>),
     Restored(RestoreReport),
+    Kept(crate::fs::KeepReport),
+    Freed {
+        bytes: u64,
+    },
     Error(String),
 }
 
@@ -893,6 +907,26 @@ impl Client {
             copies,
         })? {
             Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Keep the file or directory at `path` in this node's cache and fetch what it lacks of it
+    /// (`keep`), or let it go.
+    pub fn keep_local(&self, path: &str, keep: bool) -> Result<crate::fs::KeepReport, Error> {
+        match self.call(&Request::KeepLocal {
+            path: path.into(),
+            keep,
+        })? {
+            Response::Kept(report) => Ok(report),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Drop what this node's cache holds that is not kept; returns the bytes freed.
+    pub fn free_space(&self) -> Result<u64, Error> {
+        match self.call(&Request::FreeSpace)? {
+            Response::Freed { bytes } => Ok(bytes),
             other => Err(unexpected(other)),
         }
     }
