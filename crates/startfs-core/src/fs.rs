@@ -990,7 +990,7 @@ impl LocalFs {
         let fetched = source.as_ref().and_then(|s| s.fetch(id, &is_chunk));
         match fetched {
             Some(data) if is_chunk(&data) => {
-                self.cache.put(&data);
+                self.cache.put_hashed(*id, &data);
                 Ok(data)
             }
             // A local copy is damaged only if reading it says so: a copy that could not be
@@ -1025,12 +1025,12 @@ impl LocalFs {
             if let Some(data) = data
                 && accept(want, data)
             {
-                self.cache.put(data);
+                self.cache.put_hashed(*want, data);
             }
         }
         match answers.swap_remove(0) {
             Some(data) if accept(id, &data) => {
-                self.cache.put(&data);
+                self.cache.put_hashed(*id, &data);
                 Ok(data)
             }
             _ => self.fetch_remote(id),
