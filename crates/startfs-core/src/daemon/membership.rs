@@ -222,6 +222,7 @@ impl Daemon {
                 encrypted: encrypt,
                 dir_copies: Default::default(),
                 dir_copies_rev: 0,
+                marks: Default::default(),
             },
             endpoint,
             self.addr(),
@@ -387,6 +388,12 @@ impl Daemon {
         }
         self.refresh_staging_limit();
         Ok(())
+    }
+
+    /// Tell the filesystem the instant of the oldest mark, so it holds the versions back to it.
+    pub(super) fn refresh_mark_floor(&self) {
+        let floor = self.membership.lock().unwrap().mark_floor();
+        self.fs.set_mark_floor(floor);
     }
 
     /// Give the directory at `path` its own number of copies, or with `None` take its entry

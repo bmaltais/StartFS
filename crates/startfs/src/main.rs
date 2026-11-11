@@ -42,10 +42,17 @@ commands:
   stats [--json]                      ask every member for its storage figures (--json: as JSON)
   history PATH [--json]               list the versions kept of the file at PATH (under the mount,
                                       or in the filesystem), each named by its restore point
-  restore PATH --at POINT             bring the file at PATH, or every file under the directory at
+  restore PATH --at POINT|MARK        bring the file at PATH, or every file under the directory at
                                       PATH (deleted or not), back to what it held at POINT
-                                      (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it); what
-                                      it replaces is kept as a version, so a restore is undoable
+                                      (YYYYMMDD-HHMMSS[.fff], UTC, as `history` shows it) or at
+                                      the instant of a mark; what it replaces is kept as a
+                                      version, so a restore is undoable
+  mark create NAME | list [--json] | delete NAME
+                                      name this instant so that every version needed to restore
+                                      to it is kept past the version window (`restore PATH --at
+                                      NAME`), on every member, until the mark is deleted. Disk
+                                      held only by marks is shown by `status`. A file renamed
+                                      since the mark is not brought back to its old place
   join TOKEN [--key RECOVERY_KEY] [--offer SIZE] [--site NAME] [--storage-only]
                                       join the filesystem a token names, declaring where this
                                       node lives (home, cloud) so copies are spread across sites;
@@ -136,7 +143,7 @@ enum CliError {
     #[error("remove needs a member number (see `startfs status`)")]
     RemoveNeedsMember,
     #[error(
-        "not a restore point: {0} (expected YYYYMMDD-HHMMSS[.fff] in UTC, as `startfs history` shows)"
+        "not a restore point or a mark: {0} (expected YYYYMMDD-HHMMSS[.fff] in UTC, as `startfs history` shows, or a name from `startfs mark list`)"
     )]
     BadRestorePoint(String),
     #[error("not a duration: {0} (expected a number and a unit, like 7d, 36h, 90m or 30s; or 0)")]
@@ -444,9 +451,17 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
         "restore" => {
             let point = flag_value(rest, "--at")?;
             let path = absolute(positional(rest, &["--at"]).ok_or(CliError::Usage)?)?;
-            let at = startfs_core::fs::parse_restore_point(&point)
-                .ok_or_else(|| CliError::BadRestorePoint(point.clone()))?;
-            let report = Client::new(socket).restore(&path, at)?;
+            let client = Client::new(socket);
+            // A mark's name can never read as a restore point, so the two are told apart by form.
+            let report = match startfs_core::fs::parse_restore_point(&point) {
+                Some(at) => client.restore(&path, at)?,
+                None => {
+                    if !client.marks()?.iter().any(|m| m.name == point) {
+                        return Err(CliError::BadRestorePoint(point));
+                    }
+                    client.restore_mark(&path, &point)?
+                }
+            };
             println!(
                 "restored {} file{} under {path} to what {} held at {point}",
                 report.restored,
@@ -461,6 +476,7 @@ fn run(mut args: Vec<String>) -> Result<(), CliError> {
             }
             Ok(())
         }
+        "mark" => mark_command(rest, socket),
         "stats" => {
             let client = Client::new(socket);
             let rows = client.node_stats()?;
@@ -497,6 +513,34 @@ fn absolute(path: &str) -> Result<String, CliError> {
     }
     let cwd = std::env::current_dir().map_err(CliError::DataDir)?;
     Ok(cwd.join(path).display().to_string())
+}
+
+/// `startfs mark create NAME | list | delete NAME`.
+fn mark_command(rest: &[String], socket: PathBuf) -> Result<(), CliError> {
+    use startfs_core::fs::restore_point;
+    let client = Client::new(socket);
+    let mut words = rest.iter().filter(|a| !a.starts_with('-'));
+    match (words.next().map(String::as_str), words.next()) {
+        (Some("create"), Some(name)) => {
+            let m = client.mark_create(name)?;
+            println!("marked {} as {}", restore_point(m.at), m.name);
+        }
+        (Some("delete"), Some(name)) => client.mark_delete(name)?,
+        (Some("list"), None) => {
+            let marks = client.marks()?;
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string(&marks).map_err(CliError::Json)?);
+            } else if marks.is_empty() {
+                println!("no marks (`startfs mark create NAME` names this instant)");
+            } else {
+                for m in marks {
+                    println!("{:<24} {}  member {}", m.name, restore_point(m.at), m.by.0);
+                }
+            }
+        }
+        _ => return Err(CliError::Usage),
+    }
+    Ok(())
 }
 
 /// One line per version, oldest first, each named by its restore point.
@@ -740,6 +784,7 @@ fn check_arguments(command: &str, args: &[String]) -> Result<(), CliError> {
         "activity" | "stats" => (&[], &["--json"], 0),
         "history" => (&[], &["--json"], 1),
         "restore" => (&["--at"], &[], 1),
+        "mark" => (&[], &["--json"], 2),
         "join" => (&["--offer", "--site", "--key"], &["--storage-only"], 1),
         "add" => (
             &["--offer", "--site", "--via", "--version"],

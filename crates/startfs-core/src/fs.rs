@@ -312,6 +312,9 @@ pub struct LocalFs {
     usable_bytes: AtomicU64,
     /// How long a replaced version is kept, in nanoseconds (the filesystem's window).
     keep_versions: AtomicU64,
+    /// The instant of the oldest mark, 0 for none: versions that ended after it are kept
+    /// whatever the window says.
+    mark_floor: AtomicU64,
     /// Bytes only kept versions use, as the last GC pass found them (for `df`).
     version_bytes: AtomicU64,
     /// Bumped by every write commit, so a view derived from the tree knows when it is stale.
@@ -469,6 +472,7 @@ impl LocalFs {
             keep_versions: AtomicU64::new(
                 crate::config::DEFAULT_KEEP_VERSIONS_SECS * 1_000_000_000,
             ),
+            mark_floor: AtomicU64::new(0),
             cache,
             decoded: DecodedCache::new(DEFAULT_DECODED_BYTES),
             source: Mutex::new(None),

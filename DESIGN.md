@@ -258,6 +258,8 @@ build's short-lived files on the node.
 - `status` shows the bytes only versions use (`version_bytes`); `df` counts them as used, as the
   last GC pass found them (up to 10 minutes old), since working them out reads every register.
 
+Marks (ADR 0012, `startfs mark`): a gossiped table of `(name -> instant, member, rev)` with deletion tombstones (odd `rev` live, even deleted; higher wins, an equal `rev` goes to the earlier instant). The one version window the retention test, GC, the version bytes, compaction, `history` and `restore` read becomes the longer of `keep_versions_secs` and the age of the oldest mark, so a version that ended after the mark is kept and nothing else needed to learn about marks. `restore --at NAME` resolves the name to its instant; `status` lists marks and `efficiency.mark_bytes` counts the bytes only they keep.
+
 Not done: thinning (a file written every minute keeps one version per minute for the window, each a
 row of metadata), and versions of directories themselves (a restored directory comes back with its
 last mode, and a file renamed out of it since the restore point is not brought back).
@@ -319,7 +321,7 @@ encryption-ready.
 - Erasure coding
 - Per-user access control (encryption at rest is built: ADR 0010)
 - ACLs, cross-node locks, directory hardlinks
-- Pinning and snapshots (versioned history of single files is built: ADR 0008)
+- Pinning and browsable snapshots (versioned history of single files is built: ADR 0008; named marks that hold the window open back to an instant are built: ADR 0012)
 - Web UI or tray app
 - Auto-discovery of filesystems
 - More than about 20 nodes

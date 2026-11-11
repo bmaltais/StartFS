@@ -1,7 +1,7 @@
 //! Control requests: what the CLI and the harness ask of the daemon.
 
 use super::Daemon;
-use crate::control::{Request, Response};
+use crate::control::{MarkInfo, Request, Response};
 use crate::error::Error;
 
 impl Daemon {
@@ -116,6 +116,36 @@ impl Daemon {
             Request::NodeStats => Response::NodeStats(self.node_reports()?),
             Request::Activity => Response::Activity(Box::new(self.activity_report()?)),
             Request::Status => Response::Status(Box::new(self.status()?)),
+            Request::MarkCreate { name } => {
+                // Commit what is buffered first, so the mark includes writes already made.
+                self.fs.flush_all_logged(true, 0);
+                let at = self.clock.now();
+                let entry = self.membership.lock().unwrap().create_mark(&name, at)?;
+                self.refresh_mark_floor();
+                Response::Mark(MarkInfo {
+                    name,
+                    at: entry.at,
+                    by: entry.by,
+                })
+            }
+            Request::MarkDelete { name } => {
+                self.membership.lock().unwrap().delete_mark(&name)?;
+                self.refresh_mark_floor();
+                Response::Done
+            }
+            Request::Marks => Response::Marks(self.membership.lock().unwrap().live_marks()),
+            Request::RestoreMark { path, mark } => {
+                let at = self
+                    .membership
+                    .lock()
+                    .unwrap()
+                    .live_marks()
+                    .into_iter()
+                    .find(|m| m.name == mark)
+                    .ok_or(Error::NoSuchMark(mark))?
+                    .at;
+                Response::Restored(self.fs.restore(&self.fs_path(&path), at)?)
+            }
             Request::Restore { path, at } => {
                 Response::Restored(self.fs.restore(&self.fs_path(&path), at)?)
             }

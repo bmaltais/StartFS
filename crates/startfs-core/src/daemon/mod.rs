@@ -437,6 +437,7 @@ impl Daemon {
                 .set_keep_versions(Duration::from_secs(f.keep_versions_secs));
             self.fs.set_copies_policy(f.copies, &f.dir_copies);
         }
+        self.refresh_mark_floor();
         self.fs.refresh_kept();
         timer.phase(Phase::Sync);
         // A long queue is worked off over several ticks, so the rest of the
@@ -606,6 +607,12 @@ impl Daemon {
                 .unwrap()
                 .keep_versions_setting()
                 .map(|(secs, rev)| Message::KeepVersions { secs, rev }.encode());
+            let marks_msg = self
+                .membership
+                .lock()
+                .unwrap()
+                .marks_setting()
+                .map(|entries| Message::Marks(entries).encode());
             let dir_copies_msg = self
                 .membership
                 .lock()
@@ -617,6 +624,7 @@ impl Daemon {
                     .iter()
                     .chain(&versions_msg)
                     .chain(&dir_copies_msg)
+                    .chain(&marks_msg)
                 {
                     transport.send(*p, msg.clone());
                 }

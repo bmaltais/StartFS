@@ -475,6 +475,21 @@ chunks are freed once both the window and the GC retention have passed; `startfs
 --keep-versions` (like `3d`, `12h`; `0` for none) changes the window on every member. Every member
 must run protocol 17.
 
+### Marks: keeping a state past the window
+
+Versions are released after the window. To keep the state of everything as of now, for instance
+before a migration, name this instant: `startfs mark create before-migration`. Every version
+needed to restore to it is then kept on every member until you delete the mark, however long that is
+(`startfs mark list`, `startfs mark delete before-migration`). Later,
+`startfs restore ~/startfs/project --at before-migration` brings back what the file or directory held then
+(a name instead of a restore point; the restore is a write like any other and can itself be undone).
+Writes buffered on the node you run `mark create` on are committed first, so the mark includes them.
+
+A mark holds disk: every file changed since the mark keeps its old data. `startfs status` lists the
+marks and, in `--verbose`, how many bytes only marks keep. Delete a mark you no longer need.
+A file renamed since the mark is not brought back to its old place, and a state that lasted under
+30 s is not kept. Marks need protocol 21. See `docs/adr/0012-marks-hold-the-window-open.md`.
+
 ### Copies per directory
 
 `startfs copies ~/startfs/scratch 1` gives the directory its own number of copies on every
@@ -544,6 +559,7 @@ Limits found while validating v1 (details and numbers in `docs/validation.md`):
 - Not verified: real multi-machine use, a real tailnet, macOS.
 
 Non-goals for v1: Windows, erasure coding, per-user access
-control, ACLs, directory hardlinks, cross-node locks, pinning, snapshots, a web UI, filesystem
+control, ACLs, directory hardlinks, cross-node locks, pinning, browsable snapshots (marks name an
+instant to restore to, see above), a web UI, filesystem
 auto-discovery, and more than about 20 nodes. The tailnet is fully trusted: every
 member can read everything.
