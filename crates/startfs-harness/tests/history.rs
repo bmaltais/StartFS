@@ -159,6 +159,33 @@ fn a_member_caught_up_by_state_transfer_lists_the_same_versions() {
     }
 }
 
+#[test]
+fn a_member_caught_up_by_state_transfer_keeps_a_version_that_a_short_lived_one_replaced() {
+    // `a` lives for an hour, is replaced, and the replacement is itself replaced seconds later
+    // (too short-lived to be a version). A member that held the first one as current and missed
+    // all of it is caught up with state: it must list the hour-long version like the others,
+    // not forget it because no kept successor is known to it.
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    let a = put(&c.fs(0), "a", &noise(8 * 1024, 1));
+    pass(&c, HOUR, 10 * MINUTE);
+    c.network()
+        .partition(&[&[NodeId(0), NodeId(1)], &[NodeId(2)]]);
+    c.fs(0).write(a, 0, &noise(9 * 1024, 2)).unwrap();
+    pass(&c, Duration::from_secs(5), Duration::from_secs(5));
+    c.fs(0).write(a, 0, &noise(10 * 1024, 3)).unwrap();
+    pass(&c, 3 * HOUR, 30 * MINUTE);
+    assert!(
+        c.control(0).status().unwrap().log.entries < 3,
+        "the log was not compacted, so no state transfer is needed"
+    );
+
+    c.network().heal();
+    pass(&c, HOUR, 10 * MINUTE);
+    let here = c.control(0).history("/a").unwrap();
+    assert_eq!(here.len(), 2, "{here:?}");
+    assert_eq!(c.control(2).history("/a").unwrap(), here);
+}
+
 /// The restore point `history` shows for the `n`th version of `path`, as a user would type it.
 fn point(c: &Cluster, path: &str, n: usize) -> Nanos {
     let written = c.control(0).history(path).unwrap()[n].written;

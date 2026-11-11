@@ -779,8 +779,15 @@ impl LocalFs {
             for (ino, raw) in &chunk.objects {
                 let mut o = t.object(*ino)?;
                 for old in o.join(dec(raw)?) {
-                    let until = t.successor(*ino, &o, old.hlc)?.unwrap_or(old.hlc);
-                    t.retire(*ino, old, until)?;
+                    // The sender's history rows, joined above, say when the version ended. With
+                    // no successor known here (the one that replaced it was too short-lived to
+                    // be kept, so it has no row) a stand-in "ended when it began" would win
+                    // over the sender's row, since the earliest end is kept, and the version
+                    // would be forgotten. Leave it to the rows: one that never arrives was not
+                    // kept at the sender either.
+                    if let Some(until) = t.successor(*ino, &o, old.hlc)? {
+                        t.retire(*ino, old, until)?;
+                    }
                 }
                 t.put_object(*ino, &o)?;
             }
