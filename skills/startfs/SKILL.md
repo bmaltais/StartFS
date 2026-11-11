@@ -144,6 +144,12 @@ version with the user before restoring over a file they may have changed since. 
 under 30 s is not kept. `startfs config --keep-versions 3d` (or `12h`, `0` for none) changes the
 window for every member; `status` shows the bytes only versions use.
 
+To keep a state past that window (before a migration or a risky change), `startfs mark create NAME`
+names this instant on every member: all versions needed to restore to it are kept until
+`startfs mark delete NAME`, and `startfs restore PATH --at NAME` brings a path back to it (`startfs
+mark list` shows them; `status` shows the disk marks hold). Marks need protocol 21. A file renamed
+since the mark is not brought back to its old place. Remind the user that a mark holds disk until deleted.
+
 ## Free space after deleting files
 
 Deleted files keep their data for 7 days. If the user is short of disk now, or has just deleted a

@@ -601,6 +601,11 @@ impl LocalFs {
         self.mark_floor.store(floor.unwrap_or(0), Ordering::SeqCst);
     }
 
+    /// The filesystem's window alone, without what the oldest mark adds.
+    pub(super) fn plain_window(&self) -> Nanos {
+        self.keep_versions.load(Ordering::SeqCst)
+    }
+
     /// The window, in nanoseconds: the filesystem's, or back to the oldest mark if that is longer.
     pub(super) fn window(&self) -> Nanos {
         let window = self.keep_versions.load(Ordering::SeqCst);

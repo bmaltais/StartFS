@@ -142,7 +142,7 @@ impl Daemon {
                     .live_marks()
                     .into_iter()
                     .find(|m| m.name == mark)
-                    .ok_or_else(|| Error::NoSuchMark(mark))?
+                    .ok_or(Error::NoSuchMark(mark))?
                     .at;
                 Response::Restored(self.fs.restore(&self.fs_path(&path), at)?)
             }

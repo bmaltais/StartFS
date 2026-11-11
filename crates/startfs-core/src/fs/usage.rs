@@ -53,6 +53,9 @@ impl LocalFs {
             }
             let tree: HashSet<ChunkId> = referenced.keys().copied().collect();
             out.version_bytes = t.version_only_bytes(&tree, now, window)?;
+            // What the window alone keeps; the rest is held by marks.
+            let plain = t.version_only_bytes(&tree, now, self.plain_window())?;
+            out.mark_bytes = out.version_bytes.saturating_sub(plain);
             Ok(())
         })?;
         out.referenced_bytes = referenced.values().sum();

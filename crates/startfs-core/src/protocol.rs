@@ -298,7 +298,7 @@ mod tests {
     /// when the version was last bumped.
     const PINNED: (u8, &str) = (
         21,
-        "477096a933c27be6a642081e02c8580303e704980907556e9390b10c253cd40d",
+        "44f60953dbc5f9f68ab644a53f84f414d6c6cfe6cd5db4a8c491c7aacd7ad39c",
     );
 
     /// One of every message, with fixed contents: what the wire-shape pin and the traffic
@@ -462,6 +462,7 @@ mod tests {
                     zstd_chunks: 10,
                     zstd_plain_bytes: 11,
                     version_bytes: 13,
+                    mark_bytes: 14,
                 },
                 pending_gc_bytes: 12,
             }),

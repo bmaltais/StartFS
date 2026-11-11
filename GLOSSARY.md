@@ -98,7 +98,11 @@ _Avoid_: Cleanup, force GC
 
 **Version**:
 An earlier state of a file, kept after the file is overwritten or deleted for `keep_versions_secs` (the filesystem's window, 7 days by default) from when it was replaced. Every member derives the same versions from the log, and their chunks count as in use, so they are not trimmed and repair keeps their copies. A state that lasted less than 30 s is not kept, so short-lived files still never leave the node that wrote them (ADR 0008).
-_Avoid_: Snapshot (unused: it was *state transfer*), backup, revision
+_Avoid_: Snapshot (unused: it was *state transfer*), backup, revision. Held past the window by a **Mark**.
+
+**Mark**:
+A name for an instant (`startfs mark create NAME`), gossiped to every member. While a mark exists, every version needed to restore to it is kept, however old, because the version window is extended back to the oldest mark; `restore --at NAME` uses its instant. It does not bring back a file renamed since (ADR 0012).
+_Avoid_: Snapshot, bookmark, checkpoint
 
 **Restore point**:
 An instant within the window, named as `YYYYMMDD-HHMMSS[.fff]` in UTC. `restore --at` brings a path back to the version it held at that instant; `history` lists each version by the instant it was written. Restoring is a write like any other, so the state it replaces becomes a version in turn.

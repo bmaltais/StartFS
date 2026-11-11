@@ -202,9 +202,14 @@ fn efficiency_lines(s: &Status, copies: u32) -> String {
     let e = &s.efficiency;
     let versions = match (&s.filesystem, e.version_bytes) {
         (Some(f), bytes) if bytes > 0 => format!(
-            "  plus {} that only earlier versions use, kept {} after they were replaced (`startfs history PATH`)\n",
+            "  plus {} that only earlier versions use, kept {} after they were replaced (`startfs history PATH`){}\n",
             human(bytes),
-            time_left(f.keep_versions_secs)
+            time_left(f.keep_versions_secs),
+            if e.mark_bytes > 0 {
+                format!("; {} of it only because of marks", human(e.mark_bytes))
+            } else {
+                String::new()
+            }
         ),
         _ => String::new(),
     };
@@ -526,6 +531,20 @@ pub fn render(s: &Status, verbose: bool) -> String {
             .map(|(p, n)| format!("{p} {n}"))
             .collect();
         out.push_str(&format!("directory copies: {}\n", dirs.join(", ")));
+    }
+    if let Some(f) = s.filesystem.as_ref() {
+        let mut marks: Vec<_> = f.marks.iter().filter(|(_, e)| !e.deleted()).collect();
+        marks.sort_by_key(|(name, e)| (e.at, name.as_str()));
+        if !marks.is_empty() {
+            let shown: Vec<String> = marks
+                .iter()
+                .map(|(name, e)| format!("{name} ({})", crate::fs::restore_point(e.at)))
+                .collect();
+            out.push_str(&format!(
+                "marks: {} (versions back to the oldest are kept; `startfs mark list`)\n",
+                shown.join(", ")
+            ));
+        }
     }
     if !s.kept_local.is_empty() {
         out.push_str(&format!(

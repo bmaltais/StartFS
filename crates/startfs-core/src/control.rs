@@ -360,6 +360,9 @@ pub struct Efficiency {
     /// history holds beyond the tree. `df` counts it as used.
     #[serde(default)]
     pub version_bytes: u64,
+    /// Of `version_bytes`, those that only a mark keeps: the window alone would have released them.
+    #[serde(default)]
+    pub mark_bytes: u64,
 }
 
 /// One node's storage figures: what it holds and how well it is stored.
