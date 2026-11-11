@@ -436,3 +436,33 @@ fn a_rebuilt_machine_that_wrote_the_files_gets_its_tree_back() {
     }
 }
 // NEXT
+
+#[test]
+fn chunks_no_file_uses_are_not_counted_as_waiting_for_repair() {
+    // Deleted data is never copied (a member back from away would otherwise hand the others
+    // what a purge freed), so it must not show in `repair` as chunks that need fixing.
+    let c = Cluster::with_filesystem(3, 5, "keep_versions_secs = 0\nrepair_bytes_per_sec = 20000");
+    write_files(&c, 80);
+    let counted = |c: &Cluster| -> u32 {
+        (0..3)
+            .filter_map(|i| c.control(i).status().unwrap().repair)
+            .map(|r| r.at_risk + r.degraded)
+            .sum()
+    };
+    // Control: with the files in use, two members lost leave chunks to repair.
+    c.crash(3);
+    c.crash(4);
+    c.advance(31 * MINUTE);
+    c.sync();
+    assert!(counted(&c) > 0);
+
+    // Once the files are deleted nothing will be copied, so nothing is left to repair.
+    for i in 0..80 {
+        c.fs(0).unlink(ROOT_INO, &format!("f{i}")).unwrap();
+    }
+    for _ in 0..3 {
+        c.advance(MINUTE);
+        c.sync();
+    }
+    assert_eq!(counted(&c), 0);
+}

@@ -907,6 +907,7 @@ impl Replicator {
                 && mine
                 && replicas < self.copies_of(view, id)
                 && self.fs.has_replica(id)
+                && !self.fs.is_unused(id)
                 && !awaiting(t, view, &st.silent)
             {
                 match tier(replicas) {
