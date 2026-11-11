@@ -108,6 +108,22 @@ pub enum Request {
         path: String,
         at: Nanos,
     },
+    /// Like `Restore`, at the instant of the named mark.
+    RestoreMark {
+        path: String,
+        mark: String,
+    },
+    /// Name the current instant (a mark), so the versions needed to restore to it are
+    /// kept past the window.
+    MarkCreate {
+        name: String,
+    },
+    /// Remove a mark; what only it kept is released.
+    MarkDelete {
+        name: String,
+    },
+    /// The marks of the filesystem, oldest first.
+    Marks,
     /// Join the filesystem named by a token, optionally setting our space offer.
     Join {
         token: String,
@@ -161,6 +177,36 @@ pub struct FilesystemInfo {
     /// Bumped each time `dir_copies` is changed; the highest wins when members disagree.
     #[serde(default)]
     pub dir_copies_rev: u64,
+    /// The marks by name, with the ones deleted kept as tombstones so a member that was away
+    /// does not bring a deleted one back (ADR 0012).
+    #[serde(default)]
+    pub marks: std::collections::BTreeMap<String, MarkEntry>,
+}
+
+/// One name in the marks table. A live mark has an odd `rev`, a deleted one an even `rev`
+/// (creating takes it from 0 to 1, deleting adds 1, creating again adds 1 more), so two
+/// members never disagree about whether a mark is deleted at the same revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkEntry {
+    /// The instant the mark names, on the creating member's clock.
+    pub at: Nanos,
+    /// The member that created it.
+    pub by: MemberId,
+    pub rev: u64,
+}
+
+impl MarkEntry {
+    pub fn deleted(&self) -> bool {
+        self.rev.is_multiple_of(2)
+    }
+}
+
+/// A live mark as `mark list` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkInfo {
+    pub name: String,
+    pub at: Nanos,
+    pub by: MemberId,
 }
 
 impl FilesystemInfo {
@@ -594,6 +640,8 @@ pub enum Response {
     NodeStats(Vec<NodeReport>),
     History(Vec<VersionInfo>),
     Restored(RestoreReport),
+    Mark(MarkInfo),
+    Marks(Vec<MarkInfo>),
     Kept(crate::fs::KeepReport),
     Freed {
         bytes: u64,
@@ -1076,6 +1124,41 @@ impl Client {
             at,
         })? {
             Response::Restored(report) => Ok(report),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Like [`Self::restore`], at the instant of the mark `mark`.
+    pub fn restore_mark(&self, path: &str, mark: &str) -> Result<RestoreReport, Error> {
+        match self.call(&Request::RestoreMark {
+            path: path.into(),
+            mark: mark.into(),
+        })? {
+            Response::Restored(report) => Ok(report),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Name the current instant, on every member.
+    pub fn mark_create(&self, name: &str) -> Result<MarkInfo, Error> {
+        match self.call(&Request::MarkCreate { name: name.into() })? {
+            Response::Mark(m) => Ok(m),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Remove a mark, on every member.
+    pub fn mark_delete(&self, name: &str) -> Result<(), Error> {
+        match self.call(&Request::MarkDelete { name: name.into() })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// The marks, oldest first.
+    pub fn marks(&self) -> Result<Vec<MarkInfo>, Error> {
+        match self.call(&Request::Marks)? {
+            Response::Marks(m) => Ok(m),
             other => Err(unexpected(other)),
         }
     }

@@ -12,7 +12,7 @@
 //! it a slice of that range for the nodes it admits in turn. Ranges never
 //! overlap, so two members admitting at the same moment cannot assign the same id.
 
-use crate::control::FilesystemInfo;
+use crate::control::{FilesystemInfo, MarkEntry, MarkInfo};
 use crate::crypto::KeyWrap;
 use crate::error::Error;
 use crate::net::NodeId;
@@ -690,6 +690,101 @@ impl Membership {
         true
     }
 
+    /// Name the instant `at` as a mark, failing if a live mark has the name already.
+    pub fn create_mark(&mut self, name: &str, at: Nanos) -> Result<MarkEntry, Error> {
+        if !valid_mark_name(name) {
+            return Err(Error::BadMarkName);
+        }
+        let me = self.me;
+        let fs = self.fs.as_mut().ok_or(Error::NotInFilesystem)?;
+        let before = fs.marks.get(name).copied();
+        if before.is_some_and(|e| !e.deleted()) {
+            return Err(Error::MarkExists(name.into()));
+        }
+        if before.is_none() && fs.marks.len() >= MAX_MARKS {
+            return Err(Error::TooManyMarks);
+        }
+        let entry = MarkEntry {
+            at,
+            by: me,
+            rev: before.map_or(1, |e| e.rev + 1),
+        };
+        fs.marks.insert(name.into(), entry);
+        self.save()?;
+        Ok(entry)
+    }
+
+    /// Remove a mark. Its name stays in the table as a deleted entry, so a member that was
+    /// away cannot bring it back.
+    pub fn delete_mark(&mut self, name: &str) -> Result<(), Error> {
+        let fs = self.fs.as_mut().ok_or(Error::NotInFilesystem)?;
+        let entry = fs
+            .marks
+            .get_mut(name)
+            .filter(|e| !e.deleted())
+            .ok_or_else(|| Error::NoSuchMark(name.into()))?;
+        entry.rev += 1;
+        self.save()
+    }
+
+    /// The marks that exist, oldest first.
+    pub fn live_marks(&self) -> Vec<MarkInfo> {
+        let mut out: Vec<MarkInfo> = self
+            .fs
+            .iter()
+            .flat_map(|fs| fs.marks.iter())
+            .filter(|(_, e)| !e.deleted())
+            .map(|(name, e)| MarkInfo {
+                name: name.clone(),
+                at: e.at,
+                by: e.by,
+            })
+            .collect();
+        out.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
+        out
+    }
+
+    /// The instant of the oldest mark: versions that ended after it are kept.
+    pub fn mark_floor(&self) -> Option<Nanos> {
+        self.live_marks().first().map(|m| m.at)
+    }
+
+    /// The whole marks table, deleted entries included, as gossiped.
+    pub fn marks_setting(&self) -> Option<Vec<(String, MarkEntry)>> {
+        self.fs
+            .as_ref()
+            .map(|fs| fs.marks.iter().map(|(n, e)| (n.clone(), *e)).collect())
+    }
+
+    /// Fold in a peer's marks table. Per name the higher revision wins; at the same revision
+    /// (two members created the name at once) the earlier instant wins, which keeps more, and
+    /// then the lower member, so every member settles on the same entry. Returns whether
+    /// anything changed.
+    pub fn merge_marks(&mut self, theirs: Vec<(String, MarkEntry)>) -> bool {
+        let Some(fs) = self.fs.as_mut() else {
+            return false;
+        };
+        let rank = |e: &MarkEntry| (e.rev, std::cmp::Reverse(e.at), std::cmp::Reverse(e.by.0));
+        let mut changed = false;
+        for (name, entry) in theirs {
+            if !valid_mark_name(&name) {
+                continue; // a peer cannot make a name we would not accept
+            }
+            let wins = match fs.marks.get(&name) {
+                Some(mine) => rank(&entry) > rank(mine),
+                None => fs.marks.len() < MAX_MARKS,
+            };
+            if wins {
+                fs.marks.insert(name, entry);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_or_report();
+        }
+        changed
+    }
+
     /// Change how much of the placement this node takes; 0 follows the offer.
     pub fn set_weight(&mut self, bytes: u64) -> Result<(), Error> {
         let me = self.me;
@@ -740,4 +835,18 @@ impl Membership {
         }
         self.save()
     }
+}
+
+/// The most names (live and deleted) the marks table holds, so the gossip stays small.
+pub const MAX_MARKS: usize = 256;
+
+/// A mark's name: 1 to 64 characters of letters, digits, `-`, `_` and `.`, and not
+/// something `--at` would read as a restore point.
+pub fn valid_mark_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && crate::fs::parse_restore_point(name).is_none()
 }

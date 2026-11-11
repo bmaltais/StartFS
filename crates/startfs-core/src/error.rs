@@ -28,6 +28,14 @@ pub enum Error {
         "cannot lower the number of copies until every file has all its copies and every member is reachable (see `startfs status`)"
     )]
     NotHealthyToLowerCopies,
+    #[error("a mark's name is 1 to 64 characters of letters, digits, '-', '_' and '.'")]
+    BadMarkName,
+    #[error("there is a mark called {0} already")]
+    MarkExists(String),
+    #[error("there is no mark called {0}")]
+    NoSuchMark(String),
+    #[error("there are too many marks: delete one first")]
+    TooManyMarks,
     #[error("{0} is not a release tag (expected something like v1.10.0)")]
     BadRelease(String),
     #[error("cannot find the latest release: {0}")]

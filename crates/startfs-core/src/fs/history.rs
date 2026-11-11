@@ -595,8 +595,18 @@ impl LocalFs {
             .store(window.as_nanos() as u64, Ordering::SeqCst);
     }
 
-    /// The window, in nanoseconds.
+    /// Hold every version that ended after `floor`, the instant of the oldest mark, however
+    /// short the window is; `None` when there is no mark.
+    pub fn set_mark_floor(&self, floor: Option<Nanos>) {
+        self.mark_floor.store(floor.unwrap_or(0), Ordering::SeqCst);
+    }
+
+    /// The window, in nanoseconds: the filesystem's, or back to the oldest mark if that is longer.
     pub(super) fn window(&self) -> Nanos {
-        self.keep_versions.load(Ordering::SeqCst)
+        let window = self.keep_versions.load(Ordering::SeqCst);
+        match self.mark_floor.load(Ordering::SeqCst) {
+            0 => window,
+            floor => window.max(self.clock.now().saturating_sub(floor)),
+        }
     }
 }
