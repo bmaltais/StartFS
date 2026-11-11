@@ -305,3 +305,34 @@ fn a_member_away_longer_than_the_window_still_holds_the_marked_versions_on_retur
         assert_eq!(read(&c, i, "a"), noise(8 * 1024, 1), "node {i}");
     }
 }
+
+#[test]
+fn members_converge_even_when_together_they_hold_more_names_than_one_may_make() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    c.network()
+        .partition(&[&[NodeId(0)], &[NodeId(1), NodeId(2)]]);
+    for n in 0..200 {
+        c.control(0).mark_create(&format!("a{n}")).unwrap();
+        c.control(1).mark_create(&format!("b{n}")).unwrap();
+    }
+    c.network().heal();
+    pass(&c, 10 * MINUTE, MINUTE);
+    for i in 0..3 {
+        assert_eq!(c.control(i).marks().unwrap().len(), 400, "node {i}");
+    }
+}
+
+#[test]
+fn a_member_cannot_make_more_names_than_the_table_holds() {
+    let c = Cluster::with_filesystem(2, 3, CONFIG);
+    for n in 0..256 {
+        c.control(0).mark_create(&format!("m{n}")).unwrap();
+    }
+    assert!(c.control(0).mark_create("one-more").is_err());
+    c.control(0).mark_delete("m0").unwrap();
+    assert!(
+        c.control(0).mark_create("one-more").is_err(),
+        "a deleted name still takes its place"
+    );
+    c.control(0).mark_create("m0").unwrap();
+}

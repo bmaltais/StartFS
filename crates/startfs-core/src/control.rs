@@ -210,6 +210,22 @@ pub struct MarkInfo {
 }
 
 impl FilesystemInfo {
+    /// The marks that exist (deleted names left out), oldest first.
+    pub fn live_marks(&self) -> Vec<MarkInfo> {
+        let mut out: Vec<MarkInfo> = self
+            .marks
+            .iter()
+            .filter(|(_, e)| !e.deleted())
+            .map(|(name, e)| MarkInfo {
+                name: name.clone(),
+                at: e.at,
+                by: e.by,
+            })
+            .collect();
+        out.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
+        out
+    }
+
     /// The most copies any chunk may be wanted on: `copies`, or a directory's higher own.
     pub fn most_copies(&self) -> u32 {
         self.dir_copies

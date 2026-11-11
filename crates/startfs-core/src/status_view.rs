@@ -533,12 +533,11 @@ pub fn render(s: &Status, verbose: bool) -> String {
         out.push_str(&format!("directory copies: {}\n", dirs.join(", ")));
     }
     if let Some(f) = s.filesystem.as_ref() {
-        let mut marks: Vec<_> = f.marks.iter().filter(|(_, e)| !e.deleted()).collect();
-        marks.sort_by_key(|(name, e)| (e.at, name.as_str()));
+        let marks = f.live_marks();
         if !marks.is_empty() {
             let shown: Vec<String> = marks
                 .iter()
-                .map(|(name, e)| format!("{name} ({})", crate::fs::restore_point(e.at)))
+                .map(|m| format!("{} ({})", m.name, crate::fs::restore_point(m.at)))
                 .collect();
             out.push_str(&format!(
                 "marks: {} (versions back to the oldest are kept; `startfs mark list`)\n",

@@ -34,7 +34,9 @@ pub enum Error {
     MarkExists(String),
     #[error("there is no mark called {0}")]
     NoSuchMark(String),
-    #[error("there are too many marks: delete one first")]
+    #[error(
+        "the marks table is full (256 names, deleted ones included): make a mark under a name that was deleted"
+    )]
     TooManyMarks,
     #[error("{0} is not a release tag (expected something like v1.10.0)")]
     BadRelease(String),

@@ -30,8 +30,10 @@ takes `rev` from nothing to 1, deleting adds 1, creating again adds 1, so a live
 deleted at the same revision. Per name the higher `rev` wins, so a delete beats a create a member
 missed. If two members create one name at once (equal `rev`), the earlier instant wins, which keeps
 more, then the lower member id, so every member settles on the same entry. Deleted entries stay in
-the table forever: dropping them would let a member that was away bring a deleted mark back. At
-most 256 names (live and deleted) are held, which bounds the message. The whole table is gossiped
+the table forever: dropping them would let a member that was away bring a deleted mark back. A
+member makes at most 256 names (live and deleted), which bounds the message; names others made
+are always taken in, so a cap never leaves members with different sets (a cluster that has made
+256 distinct names can only reuse deleted ones). The whole table is gossiped
 like `DirCopies`, in a new `Marks` message, so the protocol is bumped to 21 (ADR 0002).
 
 **Naming.** A mark's name is 1 to 64 characters of letters, digits, `-`, `_` and `.`, and must not

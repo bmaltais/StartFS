@@ -602,13 +602,13 @@ impl LocalFs {
     }
 
     /// The filesystem's window alone, without what the oldest mark adds.
-    pub(super) fn plain_window(&self) -> Nanos {
+    pub(super) fn base_window(&self) -> Nanos {
         self.keep_versions.load(Ordering::SeqCst)
     }
 
     /// The window, in nanoseconds: the filesystem's, or back to the oldest mark if that is longer.
     pub(super) fn window(&self) -> Nanos {
-        let window = self.keep_versions.load(Ordering::SeqCst);
+        let window = self.base_window();
         match self.mark_floor.load(Ordering::SeqCst) {
             0 => window,
             floor => window.max(self.clock.now().saturating_sub(floor)),

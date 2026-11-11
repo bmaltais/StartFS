@@ -729,19 +729,9 @@ impl Membership {
 
     /// The marks that exist, oldest first.
     pub fn live_marks(&self) -> Vec<MarkInfo> {
-        let mut out: Vec<MarkInfo> = self
-            .fs
-            .iter()
-            .flat_map(|fs| fs.marks.iter())
-            .filter(|(_, e)| !e.deleted())
-            .map(|(name, e)| MarkInfo {
-                name: name.clone(),
-                at: e.at,
-                by: e.by,
-            })
-            .collect();
-        out.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
-        out
+        self.fs
+            .as_ref()
+            .map_or_else(Vec::new, FilesystemInfo::live_marks)
     }
 
     /// The instant of the oldest mark: versions that ended after it are kept.
@@ -772,7 +762,7 @@ impl Membership {
             }
             let wins = match fs.marks.get(&name) {
                 Some(mine) => rank(&entry) > rank(mine),
-                None => fs.marks.len() < MAX_MARKS,
+                None => true, // the cap is on making names, never on agreeing about them
             };
             if wins {
                 fs.marks.insert(name, entry);
@@ -837,7 +827,8 @@ impl Membership {
     }
 }
 
-/// The most names (live and deleted) the marks table holds, so the gossip stays small.
+/// The most names (live and deleted) a member will make, so the table and its gossip stay small.
+/// Names others made are always taken in: a cap there would leave members with different sets.
 pub const MAX_MARKS: usize = 256;
 
 /// A mark's name: 1 to 64 characters of letters, digits, `-`, `_` and `.`, and not
