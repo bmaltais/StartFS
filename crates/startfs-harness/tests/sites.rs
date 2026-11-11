@@ -183,3 +183,44 @@ fn a_new_copy_is_made_from_a_holder_at_the_same_site() {
     }
     assert!(pushes > 0, "no copy was made");
 }
+
+/// Three home members and two cloud members, three copies.
+fn three_home_two_cloud_three_copies() -> Cluster {
+    let c = Cluster::start(5);
+    let token = c.control(0).create("home", 3).unwrap();
+    c.control(0).set_offer(BIG).unwrap();
+    c.control(0).set_site("home").unwrap();
+    for i in 1..5 {
+        let site = if i < 3 { "home" } else { "cloud" };
+        c.control(i).join_at(&token, Some(BIG), site).unwrap();
+    }
+    c.sync();
+    c
+}
+
+#[test]
+fn a_member_that_comes_back_gets_its_copies_whichever_holder_outranks_the_other() {
+    // A chunk held by a cloud member and one home member, short of a copy at a second home
+    // member: the home holder is the source at the target's site, and it must send even when
+    // the cloud holder outranks it in the plain rule. Both used to leave it to the other, so
+    // roughly half the chunks written while a member was away stayed one copy short.
+    for away in 1..5 {
+        let c = three_home_two_cloud_three_copies();
+        c.crash(away);
+        write_files(&c, 80);
+        c.advance(Duration::from_secs(3600));
+        c.sync();
+        c.restart(away);
+        for _ in 0..60 {
+            c.advance(MINUTE);
+            c.sync();
+        }
+        for i in 0..c.node_count() {
+            let short = c.control(i).status().unwrap().unreplicated;
+            assert!(
+                short.is_empty(),
+                "member {away} was away; node {i}: {short:?}"
+            );
+        }
+    }
+}

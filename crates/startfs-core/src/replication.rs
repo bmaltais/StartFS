@@ -293,10 +293,14 @@ fn steward_for(
     let near: Vec<MemberId> = (holders.iter().copied())
         .filter(|h| site_of(*h) == Some(site) && !view.down.contains(h))
         .collect();
-    if near.is_empty() {
+    // This node counts among the sources at the target's site when it holds the chunk and lives
+    // there. Otherwise a holder elsewhere that outranks it would send only when no one is near,
+    // and the holder elsewhere would leave it to this one: nobody sends.
+    let here = held_here && site_of(view.me) == Some(site);
+    if near.is_empty() && !here {
         return steward;
     }
-    held_here && site_of(view.me) == Some(site) && is_steward(id, view.me, near)
+    here && is_steward(id, view.me, near)
 }
 
 pub fn tier(copies: u32) -> Tier {
