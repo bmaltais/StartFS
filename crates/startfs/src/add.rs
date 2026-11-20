@@ -267,20 +267,27 @@ pub struct SshRemote {
     pub host: String,
 }
 
+/// The program and arguments that run `command` on `host` over `via`. `interactive` asks for a
+/// terminal (`-t`). `tailscale ssh` takes no ssh options before the host, but hands everything
+/// after it to the system `ssh`, which reads options there too, so `-t` goes after the host.
+pub fn ssh_argv(via: Via, host: &str, command: &str, interactive: bool) -> Vec<String> {
+    let mut argv: Vec<String> = match via {
+        Via::Ssh if interactive => vec!["ssh".into(), "-t".into(), host.into()],
+        Via::Ssh => vec!["ssh".into(), host.into()],
+        Via::Tailscale if interactive => {
+            vec!["tailscale".into(), "ssh".into(), host.into(), "-t".into()]
+        }
+        Via::Tailscale => vec!["tailscale".into(), "ssh".into(), host.into()],
+    };
+    argv.push(command.into());
+    argv
+}
+
 impl Remote for SshRemote {
     fn run(&mut self, command: &str, interactive: bool) -> Result<Output, AddError> {
-        let mut cmd = match self.via {
-            Via::Ssh => Command::new("ssh"),
-            Via::Tailscale => {
-                let mut c = Command::new("tailscale");
-                c.arg("ssh");
-                c
-            }
-        };
-        if interactive {
-            cmd.arg("-t");
-        }
-        cmd.arg(&self.host).arg(command);
+        let argv = ssh_argv(self.via, &self.host, command, interactive);
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
         if interactive {
             let status = cmd.status().map_err(AddError::Spawn)?;
             return Ok(Output {

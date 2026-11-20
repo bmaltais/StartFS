@@ -2,7 +2,7 @@
 //! steps, what is revoked when, and what each failure leaves behind. Real SSH is tried by hand.
 
 use startfs::add::{
-    AddError, Local, Output, Plan, Remote, TOKEN_TTL, Via, add, choose_transport, quote,
+    AddError, Local, Output, Plan, Remote, TOKEN_TTL, Via, add, choose_transport, quote, ssh_argv,
 };
 use startfs_core::error::Error as CoreError;
 use std::cell::RefCell;
@@ -312,6 +312,27 @@ fn the_transport_follows_via_and_otherwise_the_tailnet() {
     );
     assert_eq!(choose_transport(None, || true), Via::Tailscale);
     assert_eq!(choose_transport(None, || false), Via::Ssh);
+}
+
+#[test]
+fn a_terminal_is_asked_for_where_each_transport_accepts_it() {
+    assert_eq!(
+        ssh_argv(Via::Ssh, "u@box", "uname", true),
+        ["ssh", "-t", "u@box", "uname"]
+    );
+    assert_eq!(
+        ssh_argv(Via::Ssh, "box", "uname", false),
+        ["ssh", "box", "uname"]
+    );
+    // `tailscale ssh` refuses flags before the host; ones after it reach the system ssh.
+    assert_eq!(
+        ssh_argv(Via::Tailscale, "box", "uname", true),
+        ["tailscale", "ssh", "box", "-t", "uname"]
+    );
+    assert_eq!(
+        ssh_argv(Via::Tailscale, "box", "uname", false),
+        ["tailscale", "ssh", "box", "uname"]
+    );
 }
 
 #[test]
